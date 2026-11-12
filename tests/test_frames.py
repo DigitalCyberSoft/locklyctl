@@ -166,14 +166,18 @@ def test_plan_keep_unlocked():
     slot = lambda b, e: {"week": 0x80, "begin": b, "end": e, "enabled": True, "sync": F.SYNC_AUTO_ENTRY}
     assert F.plan_keep_unlocked(at(14, 5), 60) == [slot((14, 5), (15, 5))]
     assert F.plan_keep_unlocked(at(23, 0), 60) == [slot((23, 0), (23, 59))]       # until midnight
-    for bad in ((at(20, 0), 600), (at(14, 0), 0), (at(14, 0), 24 * 60)):
+    def refused(*args):
         try:
-            F.plan_keep_unlocked(*bad)
+            F.plan_keep_unlocked(*args)
         except ValueError:
-            continue
-        raise AssertionError(bad)
-    old, F.KEEP_UNLOCKED_PAST_MIDNIGHT = F.KEEP_UNLOCKED_PAST_MIDNIGHT, True
+            return True
+        return False
+    old = F.KEEP_UNLOCKED_PAST_MIDNIGHT
     try:
+        F.KEEP_UNLOCKED_PAST_MIDNIGHT = False                # windows stop at 23:59
+        assert refused(at(20, 0), 600) and refused(at(14, 0), 0) and refused(at(14, 0), 24 * 60)
+        F.KEEP_UNLOCKED_PAST_MIDNIGHT = True
+        assert refused(at(14, 0), 0) and refused(at(14, 0), 24 * 60)
         assert F.plan_keep_unlocked(at(20, 0), 600) == [slot((20, 0), (23, 59)), slot((0, 0), (6, 0))]
         assert F.plan_keep_unlocked(at(20, 0), 1439)[-1]["end"] == (19, 59)
     finally:

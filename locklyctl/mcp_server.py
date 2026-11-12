@@ -310,9 +310,10 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
 
     @mcp.tool(annotations=RISKY)
     async def keep_unlocked_for(door: str, hours: float) -> dict:
-        """Keep a Visage/Vision door unlocked from now for some hours; the lock
-        relocks by itself at the end (it can't run past its midnight). Only
-        when the user explicitly asked for this door to stay unlocked."""
+        """Keep a Visage/Vision door unlocked from now for under 24 hours; the
+        lock relocks by itself at the end, and a new call replaces an earlier
+        window. Only when the user explicitly asked for this door to stay
+        unlocked."""
         v = await anyio.to_thread.run_sync(doors.remote, door)
         r = await run(doors.api.keep_unlocked, v["id"], round(hours * 60))
         return {"ok": True, "door": v["name"], "until": r["until"], "detail": r["detail"]}

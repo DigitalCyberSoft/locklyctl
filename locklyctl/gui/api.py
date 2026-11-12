@@ -597,7 +597,8 @@ class Api:
     def keep_unlocked(self, lock_id: str, minutes: int) -> dict:
         """Keep a door unlocked from now for ``minutes`` with one-time Welcome
         Mode slots that the lock runs and then switches off by itself (8-slot
-        locks). The door's other slots are written back unchanged. Wakes it."""
+        locks). They replace any earlier window set from here; the door's other
+        slots are written back unchanged. Wakes it."""
         lock = self._lock(lock_id)
         if F.welcome_form(lock) != F.WELCOME_9B:
             raise ValueError("Keeping a door unlocked for a while needs an 8-slot lock (Visage or Vision).")
@@ -607,10 +608,10 @@ class Api:
         new = F.plan_keep_unlocked(start, int(minutes))
         cfg = config.load_config()
         mine = ((cfg.get("keep_unlocked") or {}).get(lock["ID"]) or {}).get("slots") or []
-        # One-time slots this app added earlier, which the lock has run and
-        # switched off, only take up room. Anything else is left alone.
-        table = [s for s in self._welcome8_table(lock)
-                 if s["enabled"] or self._slot_key(s) not in mine]
+        # One-time slots this app added earlier go, whether the lock has run them
+        # yet or not: left on, an earlier window's slot from 00:00 would still
+        # open the door with nothing here tracking it. Anything else stays.
+        table = [s for s in self._welcome8_table(lock) if self._slot_key(s) not in mine]
         if len(table) + len(new) > 8:
             raise LocklyError("All 8 Welcome Mode slots on this door are in use; "
                               "clear some in the Schedules tab first.")

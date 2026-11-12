@@ -112,7 +112,7 @@ class FakeClient:
             {"part": "wifi", "version": "2.02.72", "size_kb": 1180},
             {"part": "ble", "version": "1.14.28", "size_kb": 280}]}
 
-    # 0A9B as 11D sent it: one one-time slot 07:00-21:00, switched off, first entry
+    # 0A9B as a Visage sent it: one one-time slot 07:00-21:00, switched off, first entry
     welcome_table = "00" + "04" + "01" + "08" + "8007001500" + "00FFFFFFFF" * 7 + "00" + "00"
 
     def exchange_built(self, lock, build):
@@ -202,7 +202,7 @@ def test_keep_unlocked(api):
         assert r["until"] == "15:05" and r["lock"]["keepUnlockedUntil"] == "15:05"
         frame, _ = c.sent[-1]
         plain = P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(frame)[6:-2]).hex().upper()
-        # 11D's own slot kept as it was (off, first entry); the new one-time slot on, auto entry
+        # the door's own slot kept as it was (off, first entry); the new one-time slot on, auto entry
         assert "0301" + "08" + "8007001500" + "800E050F05" + "00FFFFFFFF" * 6 + "02" + "02" in plain
         assert config.load_config()["keep_unlocked"][B2]["slots"] == [[0x80, 14, 5, 15, 5]]
         # later, once the lock has run and switched it off, it's cleared to make room
@@ -210,6 +210,14 @@ def test_keep_unlocked(api):
         api.keep_unlocked(B2, 30)
         plain = P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(c.sent[-1][0])[6:-2]).hex().upper()
         assert "0301" + "08" + "8007001500" + "800E050E23" + "00FFFFFFFF" * 6 in plain
+        # a new window replaces one from here that's still running; past the
+        # lock's midnight it takes a second slot from 00:00
+        c.welcome_table = "00040108" + "8007001500" + "800E050E23" + "00FFFFFFFF" * 6 + "02" + "02"
+        r = api.keep_unlocked(B2, 600)
+        assert r["until"] == "00:05 tomorrow"
+        plain = P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(c.sent[-1][0])[6:-2]).hex().upper()
+        assert "0301" + "08" + "8007001500" + "800E05173B" + "8000000005" + "00FFFFFFFF" * 5 + "06" + "06" in plain
+        assert config.load_config()["keep_unlocked"][B2]["slots"] == [[0x80, 14, 5, 23, 59], [0x80, 0, 0, 0, 5]]
         try:
             api.keep_unlocked(UUID, 60)                    # a PGD7Y: single-slot Welcome Mode
         except ValueError:

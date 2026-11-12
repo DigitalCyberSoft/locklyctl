@@ -94,16 +94,19 @@ def build_welcome8_set(lock: dict, nonce: str, schedules: list[dict],
 
 
 # ── Keep unlocked for a while (one-time 0x9B slots) ──────────────────────────
-# Seen on a Visage (11D, 2026-11-12): a one-time slot (week 0x80) with auto entry
+# Seen on a Visage (2026-11-12): a one-time slot (week 0x80) with auto entry
 # whose window contains the current time opens the door within ~20 s, locks it
 # again at the end, and the lock then switches that slot off by itself, so it
 # never repeats. One-time slots carry no date, and the lock drops weekday bits
 # from them (0x90 was stored and run as 0x80), so a window past midnight needs
 # a second one-time slot for tomorrow's part; that one must not contain the
-# current time, or it would run straight away instead of tomorrow.
+# current time, or it would run straight away instead of tomorrow. Seen on the
+# same lock on 2026-11-13: a slot for 00:00-00:02 written at 23:33 left the door locked,
+# had it open by 00:01 and locked again by 00:03, and was then switched off.
+# Not seen yet: whether the door locks for the minute between 23:59 and 00:00.
 SYNC_AUTO_ENTRY = 1          # WelcomeModeRequest.AUTO_ENTRY_WELCOME_MODE: unlocks by itself
 SYNC_FIRST_ENTRY = 0         # MANUAL_ENTRY: stays locked until someone opens it once
-KEEP_UNLOCKED_PAST_MIDNIGHT = False   # on once a slot for 00:00 is seen to run the next day
+KEEP_UNLOCKED_PAST_MIDNIGHT = True    # False: windows stop at 23:59 lock time
 
 
 def plan_keep_unlocked(start, minutes: int) -> list[dict]:

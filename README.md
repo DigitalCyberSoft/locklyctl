@@ -43,7 +43,7 @@ way the official app does.
 | Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |
 | Guest PIN codes: add, list, delete | ✅ on Visage/Vision written to the lock; PGD7Y unverified |
 | Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore). Set writes "first entry" slots: the door stays locked until someone opens it once |
-| Keep a Visage/Vision unlocked for a while (one-time `0x9B` slot that unlocks by itself) | ✅ tested on a Visage: opened within ~20 s, relocked at the end, and the lock switched the slot off. Until 23:59 lock time |
+| Keep a Visage/Vision unlocked for a while (one-time `0x9B` slot that unlocks by itself) | ✅ tested on a Visage: opened within ~20 s, relocked at the end, and the lock switched the slot off. Under 24 h: past midnight (lock time) a second slot from 00:00 takes over, and the lock was seen to run such a slot the next day. Not yet seen: whether the door locks for the minute between 23:59 and 00:00 |
 | Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
 | Firmware: what Lockly offers, part by part, next to what the lock runs | ✅ checked against Lockly for a Visage, a PGD7Y, a Vision and PGH200 hubs. Installing isn't built: use the Lockly app |
@@ -61,8 +61,8 @@ unlock* (press and hold until the button fills, so a stray click can't open a
 door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
 test. Star a door to pin it to **Favorites** at the top of the list, where
 Lock and Unlock are a single tap each, without the hold. **Keep unlocked for**
-1 to 12 hours (Visage, Vision) sets a one-time Welcome Mode window that the
-lock runs and ends by itself. Doors that didn't answer can be asked again
+1 to 23 hours (Visage, Vision) sets a one-time Welcome Mode window that the
+lock runs and ends by itself; a new one replaces the last. Doors that didn't answer can be asked again
 with **Retry asleep**. The **Device** tab tests the connection and checks
 for newer firmware. The **People** view
 shows everyone who can get in, across every door, and lets you give, change

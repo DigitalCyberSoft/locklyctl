@@ -10,7 +10,7 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
   route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", favorite: false,
-  keepUnlockedUntil: null, keepMaxMinutes: 540, ...extra,
+  keepUnlockedUntil: null, keepMaxMinutes: 1439, ...extra,
 });
 
 const locks = [
