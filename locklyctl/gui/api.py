@@ -1,0 +1,561 @@
+"""The Python side of the GUI: methods the web page calls through pywebview.
+
+Each public method is exposed to JavaScript as ``window.pywebview.api.<name>``
+and runs on its own thread. Methods return plain JSON-able values and raise
+on failure; the page shows the exception message. All lock work goes through
+the same LocklyClient the CLI uses — this module only shapes data for the UI.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import time
+from datetime import datetime, timedelta, timezone
+
+from .. import config
+from .. import features as F
+from .. import protocol as P
+from ..features import lock_tz  # noqa: F401  (re-exported for callers)
+from ..transport import LocklyClient, LocklyError
+
+_LOG = logging.getLogger("locklyctl.gui")
+_UNIT_RE = re.compile(r"^\s*(\d{1,4}[A-Za-z]?)\b\s*(.*)$")
+_DURATIONS_H = {"4h": 4, "24h": 24, "72h": 72, "1w": 168}
+
+
+def split_unit(name: str) -> tuple[str, str]:
+    """'2A Office' → ('2A', 'Office'); '1204' → ('1204', ''); 'Garage' → ('', 'Garage')."""
+    m = _UNIT_RE.match(name or "")
+    return (m.group(1).upper(), m.group(2).strip()) if m else ("", (name or "").strip())
+
+
+def _fmt_ms(ms) -> str | None:
+    try:
+        n = int(ms)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if n > 10**11:
+        n //= 1000
+    try:
+        return datetime.fromtimestamp(n).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+_ROLES = {"OWNER": "owner", "ADMIN": "admin", "FAMILY": "family", "GUEST": "guest"}
+_DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _days(mask: int) -> str:
+    """Weekday bitmask (bit 0 = Monday) in words; runs of 3+ days as ranges."""
+    if mask & 0x7F == 0x7F:
+        return "Every day"
+    if mask & 0x7F == 0x60:
+        return "Weekends"
+    on = [i for i in range(7) if mask & (1 << i)]
+    parts, i = [], 0
+    while i < len(on):
+        j = i
+        while j + 1 < len(on) and on[j + 1] == on[j] + 1:
+            j += 1
+        parts.append(f"{_DAY_ABBR[on[i]]}–{_DAY_ABBR[on[j]]}" if j - i >= 2
+                     else ", ".join(_DAY_ABBR[k] for k in on[i:j + 1]))
+        i = j + 1
+    return ", ".join(parts) or "No days"
+
+
+def _clock(ms, tz: timezone | None = None) -> str | None:
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz).strftime("%H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def describe_access(u: dict, tz: timezone | None = None) -> str:
+    """A cloud user record's access window in words."""
+    tt = u.get("timeType")
+    if tt == "NO_LIMIT":
+        return "Always"
+    if tt == "WEEK":
+        try:
+            mask = int(u.get("weekData") or 0)
+        except ValueError:
+            mask = 0
+        start, end = _clock(u.get("startTime"), tz), _clock(u.get("endTime"), tz)
+        all_day = start == end or (start, end) == ("00:00", "23:59")
+        window = f" {start}–{end}" if start and end and not all_day else ""
+        return _days(mask) + window
+    start, end = _fmt_ms(u.get("startTime")), _fmt_ms(u.get("endTime"))
+    if start and end:
+        return f"{start} to {end}"
+    return tt.replace("_", " ").capitalize() if tt else "Unknown"
+
+
+def person_access(u: dict, door: dict, tz: timezone | None = None) -> dict:
+    """One person's access on one door, shaped for the People view."""
+    # Collapse runs of spaces so "Sam  Taylor" and "Sam Taylor " group together.
+    name = re.sub(r"\s+", " ", " ".join(x for x in (u.get("name"), u.get("lastName")) if x)).strip()
+    email = (u.get("email") or "").strip().lower()
+    return {
+        "_key": email or f"name:{name.lower()}" if (email or name) else f"id:{door['id']}:{u.get('userAcuId')}",
+        "person": name or email or "Unnamed",
+        "lockId": door["id"], "doorName": door["name"], "doorUnit": door["unit"],
+        "doorRest": door["rest"], "doorModel": door["model"], "doorRoute": door.get("route"),
+        "userId": u.get("userAcuId"),
+        "role": _ROLES.get(str(u.get("type")), str(u.get("type") or "").lower()),
+        "access": describe_access(u, tz),
+        "timeType": u.get("timeType"),
+        "weekData": u.get("weekData"),
+        "startTime": u.get("startTime"), "endTime": u.get("endTime"),
+        "enabled": u.get("disabled") != "Y",
+        "status": u.get("acuStatus"),
+        "hasPin": bool(u.get("pw")) or u.get("pwStatus") == "Y",
+        "pin": u.get("pw") or "",
+        "fingerprints": int(u.get("fptCount") or 0),
+        "faces": int(u.get("faceCount") or 0),
+        "cards": int(u.get("rfidCount") or 0),
+        "twoStep": str(u.get("multipleVerific")) == "1",
+    }
+
+
+def _parse_local(value: str, tz) -> datetime:
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Not a date and time: {value!r}") from None
+    return dt.replace(tzinfo=tz) if tz else dt
+
+
+def _access_spec(access: dict, tz) -> dict:
+    """GUI access choice → create_access_user arguments (role, cloud time
+    type and times, lock role byte and date field)."""
+    kind = (access or {}).get("kind", "always")
+    if kind == "always":
+        return {"role": "FAMILY", "time_type": "NO_LIMIT", "user_type": F.UT_FAMILY,
+                "date": F.access_date_permanent()}
+    if kind == "weekly":
+        days = [d for d in (access.get("days") or []) if str(d).strip()]
+        if not days:                     # week_byte([]) would mean "every day"
+            raise ValueError("Pick at least one day.")
+        week = F.week_byte(days)
+        if week & F.WEEK_ONCE:
+            raise ValueError("Pick days of the week.")
+        begin, end = F.parse_hhmm(access.get("start", "")), F.parse_hhmm(access.get("end", ""))
+        if end <= begin:
+            raise ValueError("The end time must be after the start time.")
+        today = datetime.now(tz)
+        ms = lambda hm: int(today.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0).timestamp() * 1000)
+        return {"role": "GUEST", "time_type": "WEEK", "week": week, "start_ms": ms(begin),
+                "end_ms": ms(end), "user_type": F.UT_GUEST_WEEKLY,
+                "date": F.access_date_weekly(week, begin, end)}
+    if kind == "dates":
+        start, end = _parse_local(access.get("from"), tz), _parse_local(access.get("to"), tz)
+        if end <= start:
+            raise ValueError("The end must be after the start.")
+        return {"role": "GUEST", "time_type": "MORE_LIMIT", "start_ms": int(start.timestamp() * 1000),
+                "end_ms": int(end.timestamp() * 1000), "user_type": F.UT_GUEST_PERIOD,
+                "date": F.access_date_period(start, end)}
+    raise ValueError("Choose when this person can get in.")
+
+
+def _lock_date(u: dict, tz) -> str:
+    """The lock's 10-byte validity field for an existing cloud user record."""
+    tt = u.get("timeType")
+    if tt == "WEEK":
+        conv = lambda ms: datetime.fromtimestamp(int(ms) / 1000, tz)
+        s, e = conv(u.get("startTime") or 0), conv(u.get("endTime") or 0)
+        return F.access_date_weekly(int(u.get("weekData") or 0), (s.hour, s.minute), (e.hour, e.minute))
+    if tt in ("MORE_LIMIT", "ONE_LIMIT") and u.get("startTime") and u.get("endTime"):
+        conv = lambda ms: datetime.fromtimestamp(int(ms) / 1000, tz)
+        return F.access_date_period(conv(u["startTime"]), conv(u["endTime"]))
+    return F.access_date_permanent()
+
+
+class Api:
+    def __init__(self, client_factory=LocklyClient) -> None:
+        self._factory = client_factory
+        self._client: LocklyClient | None = None
+
+    # ── session ──────────────────────────────────────────────────────────
+
+    def session(self) -> dict:
+        """Sign in silently with the saved login, if there is one."""
+        cfg = config.load_config()
+        email, pw_hash = cfg.get("email"), config.load_credential(cfg)
+        if not (email and pw_hash):
+            return {"signedIn": False, "email": email or ""}
+        client = self._factory(email)
+        try:
+            client.login_with_hash(pw_hash)
+            client.load_devices()
+        except LocklyError as e:
+            return {"signedIn": False, "email": email,
+                    "message": f"Your saved sign-in no longer works ({e}). Sign in again."}
+        except Exception as e:  # noqa: BLE001 - offline etc.
+            return {"signedIn": False, "email": email,
+                    "message": f"Couldn't reach Lockly: {e}"}
+        if not cfg.get("pw_in_keyring") and config._keyring():
+            config._save_credential(cfg, email, pw_hash)   # migrate file → keyring
+        self._set_client(client)
+        return {"signedIn": True, "email": email}
+
+    def sign_in(self, email: str, password: str, remember: bool) -> dict:
+        email = (email or "").strip()
+        if not email or not password:
+            raise ValueError("Enter your Lockly email and password.")
+        client = self._factory(email)
+        client.login(password)
+        client.load_devices()
+        cfg = config.load_config()
+        where = config._save_credential(cfg, email, client.pw_hash if remember else None)
+        self._set_client(client)
+        return {"signedIn": True, "email": email, "storedIn": where}
+
+    def sign_out(self) -> dict:
+        """Forget the saved login and end the session."""
+        cfg = config.load_config()
+        config._save_credential(cfg, cfg.get("email", ""), None)
+        self.close()
+        return {"signedIn": False, "email": cfg.get("email", "")}
+
+    def close(self) -> None:
+        if self._client:
+            try:
+                self._client.close()
+            finally:
+                self._client = None
+
+    def _set_client(self, client: LocklyClient) -> None:
+        self.close()
+        self._client = client
+
+    # ── locks & status ───────────────────────────────────────────────────
+
+    def _c(self) -> LocklyClient:
+        if self._client is None:
+            raise LocklyError("Not signed in.")
+        return self._client
+
+    def _lock(self, lock_id: str) -> dict:
+        for lk in self._c().locks:
+            if lk.get("ID") == lock_id:
+                return lk
+        raise LocklyError("That lock is no longer on this account.")
+
+    def _view(self, lock: dict) -> dict:
+        name = str(lock.get("na") or lock.get("blename") or lock.get("ID", "?"))
+        unit, rest = split_unit(name)
+        e = self._c().status_cache.get(lock["ID"]) or {}
+        if not e:
+            state = "unknown"
+        elif not e.get("reachable", True):
+            state = "asleep"
+        elif e.get("is_locked") is None:
+            state = "unknown"
+        else:
+            state = "locked" if e["is_locked"] else "unlocked"
+        return {
+            "id": lock["ID"], "name": name, "unit": unit, "rest": rest,
+            "model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
+            "state": state,
+            "battery": e.get("battery_percent"),
+            "lowBattery": bool(e.get("low_battery") or e.get("battery_invalid")),
+            "doorOpen": e.get("door_sensor_open"),
+            "firmware": e.get("firmware_version") or "",
+            "cached": bool(e.get("cached")),
+            "checkedAt": e.get("ts"),
+            "welcomeForm": F.welcome_form(lock),
+            "route": F.remote_route(lock),
+            "faceCapable": F.supports_face(lock),
+        }
+
+    def locks(self) -> list[dict]:
+        """All locks, with the silent hub-cached status where a hub has one."""
+        c = self._c()
+        c.prime_cached_status(c.locks)
+        return [self._view(lk) for lk in c.locks]
+
+    def check_all(self) -> list[dict]:
+        """Live status for every lock. Wakes them all (they beep)."""
+        c = self._c()
+        c.refresh_all_status(c.locks)
+        return [self._view(lk) for lk in c.locks]
+
+    def check(self, lock_id: str) -> dict:
+        """Live status for one lock (wakes it)."""
+        lock = self._lock(lock_id)
+        self._c().query_status(lock)
+        return self._view(lock)
+
+    def lock(self, lock_id: str) -> dict:
+        lock = self._lock(lock_id)
+        ok, detail = self._c().lock(lock)
+        if ok:
+            self._note_state(lock, locked=True)
+        return {"ok": ok, "detail": detail, "lock": self._view(lock)}
+
+    def unlock(self, lock_id: str) -> dict:
+        lock = self._lock(lock_id)
+        ok, detail = self._c().unlock(lock)
+        if ok:
+            self._note_state(lock, locked=False)
+        return {"ok": ok, "detail": detail, "lock": self._view(lock)}
+
+    def _note_state(self, lock: dict, *, locked: bool) -> None:
+        """Record an acknowledged lock/unlock so the plate updates at once."""
+        cache = self._c().status_cache
+        entry = {k: v for k, v in (cache.get(lock["ID"]) or {}).items() if k != "cached"}
+        cache[lock["ID"]] = {**entry, "reachable": True, "is_locked": locked, "ts": time.time()}
+
+    # ── activity & guests ────────────────────────────────────────────────
+
+    def activity(self, lock_id: str) -> list[dict]:
+        lock = self._lock(lock_id)
+        since = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+        res = self._c().get_history(lock, since)
+        if res is None:
+            raise LocklyError("Lockly didn't return the access log.")
+        out = []
+        for ev in reversed(res[0]):
+            code = str(ev.get("openType") or ev.get("type") or "?")
+            raw_t = ev.get("time") or ev.get("eventTime") or ""
+            out.append({"time": _fmt_ms(raw_t) or str(raw_t),
+                        "what": P.describe_open_type(code),
+                        "who": ev.get("name") or ev.get("userName") or ""})
+        return out
+
+    def guests(self, lock_id: str) -> list[dict]:
+        lock = self._lock(lock_id)
+        gs = self._c().list_guests(lock)
+        if gs is None:
+            raise LocklyError("Lockly didn't return the guest list.")
+        return [{"id": g.get("userAcuId"), "name": g.get("name") or "",
+                 "pin": g.get("pw") or "", "start": _fmt_ms(g.get("startTime")),
+                 "end": _fmt_ms(g.get("endTime"))} for g in gs]
+
+    def add_guest(self, lock_id: str, name: str, pin: str, duration: str) -> dict:
+        lock = self._lock(lock_id)
+        name, pin = (name or "").strip(), (pin or "").strip()
+        if not name:
+            raise ValueError("Give the guest a name.")
+        if not (pin.isdigit() and 4 <= len(pin) <= 8):
+            raise ValueError("The PIN must be 4 to 8 digits.")
+        permanent = duration == "permanent"
+        if not permanent and duration not in _DURATIONS_H:
+            raise ValueError("Choose how long the PIN works.")
+        start = int(time.time() * 1000)
+        end = start + (100 * 365 * 24 if permanent else _DURATIONS_H[duration]) * 3600 * 1000
+        body = self._c().add_guest_pin(lock, name, pin, start, end, permanent=permanent)
+        return {"ok": True, "id": (body or {}).get("userAcuId")}
+
+    def delete_guest(self, lock_id: str, user_id: int) -> dict:
+        lock = self._lock(lock_id)
+        if not self._c().delete_guest(lock, int(user_id)):
+            raise LocklyError("Lockly didn't delete that guest PIN.")
+        return {"ok": True}
+
+    # ── people (all access a person has, across every door) ──────────────
+
+    def people(self) -> list[dict]:
+        """Everyone with access to any door, merged across doors by email (or
+        by name when there's no email), each with their access per door.
+        Cloud data only (acu/crdntl/list per lock) — no lock is woken."""
+        from concurrent.futures import ThreadPoolExecutor
+        c = self._c()
+
+        def fetch(lk):
+            try:
+                return lk, c.list_users(lk)
+            except Exception as e:  # noqa: BLE001 - one door must not hide the rest
+                _LOG.warning("user list failed for %s: %s", lk.get("na"), e)
+                return lk, None
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            results = list(ex.map(fetch, c.locks))
+
+        merges = config.load_config().get("people_merges") or {}
+        people: dict[str, dict] = {}
+        failed = []
+        for lk, users in results:
+            door = self._view(lk)
+            if users is None:
+                failed.append(door["name"])
+                continue
+            for u in users:
+                entry = person_access(u, door, lock_tz(lk))
+                own_key = entry.pop("_key")
+                key = merges.get(own_key, own_key)
+                p = people.setdefault(key, {"key": key, "name": entry["person"],
+                                            "email": u.get("email") or "", "doors": [],
+                                            "mergedKeys": []})
+                if own_key != key and own_key not in p["mergedKeys"]:
+                    p["mergedKeys"].append(own_key)
+                if own_key == key:                       # the target names the person
+                    p["name"] = entry["person"]
+                    p["email"] = u.get("email") or p["email"]
+                entry["recordKey"] = own_key
+                p["doors"].append(entry)
+        out = sorted(people.values(), key=lambda p: (p["name"] or "~").lower())
+        for p in out:
+            p["doors"].sort(key=lambda d: d["doorName"].lower())
+            p["isOwner"] = any(d["role"] == "owner" for d in p["doors"])
+        return {"people": out, "failedDoors": failed}
+
+    # -- editing a person's access on one door -------------------------------
+
+    def _lock_record(self, lock: dict, user_id: int) -> dict | None:
+        """The lock's own record for this user (slot, role byte, PIN), or None
+        if the user exists only in the cloud. Wakes the lock."""
+        return next((u for u in self._c().lock_user_table(lock)
+                     if u["user_id"] == int(user_id) & 0xFFFF), None)
+
+    def _cloud_record(self, lock: dict, user_id: int) -> dict:
+        u = next((x for x in self._c().list_users(lock) if x.get("userAcuId") == int(user_id)), None)
+        if u is None:
+            raise LocklyError("That person is no longer on this door.")
+        return u
+
+    def door_access_detail(self, lock_id: str, user_id: int) -> dict:
+        """Names and ids of one person's fingerprints, faces and cards on a door
+        (cloud only — nothing is woken)."""
+        lock = self._lock(lock_id)
+        o = self._c().user_detail(lock, int(user_id))
+        def items(key, code_key):
+            return [{"crdntlId": m.get("crdntlId"), "slot": m.get("pid"),
+                     "code": m.get(code_key), "name": m.get("name") or ""}
+                    for m in (o.get(key) or [])]
+        return {"fingerprints": items("fpList", "fpCode1"), "faces": items("faceList", "faceCode"),
+                "cards": items("rfidList", "fpCode1"),
+                "hasPin": bool((o.get("pwd") or {}).get("password"))}
+
+    def add_to_door(self, lock_id: str, name: str, pin: str, access: dict) -> dict:
+        """Give a person access to a door with a PIN. ``access`` is
+        {"kind": "always"} | {"kind": "weekly", "days": [...], "start": "HH:MM", "end": "HH:MM"}
+        | {"kind": "dates", "from": "YYYY-MM-DDTHH:MM", "to": "..."} (lock's local time)."""
+        lock = self._lock(lock_id)
+        name, pin = (name or "").strip(), (pin or "").strip()
+        if not name:
+            raise ValueError("Give the person a name.")
+        if pin and not (pin.isdigit() and 4 <= len(pin) <= 8):
+            raise ValueError("The PIN must be 4 to 8 digits.")
+        spec = _access_spec(access, lock_tz(lock))
+        r = self._c().create_access_user(lock, name=name, pin=pin, **spec)
+        return {"ok": True, "userId": r["userAcuId"], "slot": r["pwdId"]}
+
+    def change_pin(self, lock_id: str, user_id: int, pin: str) -> dict:
+        lock = self._lock(lock_id)
+        pin = (pin or "").strip()
+        if not (pin.isdigit() and 4 <= len(pin) <= 8):
+            raise ValueError("The PIN must be 4 to 8 digits.")
+        cloud = self._cloud_record(lock, user_id)
+        if cloud.get("type") == "OWNER":
+            raise ValueError("Change the owner's PIN in the Lockly app.")
+        rec = self._lock_record(lock, user_id)
+        if rec is None:
+            raise LocklyError("This person isn't on the lock yet (only in Lockly's cloud).")
+        cloud = {**cloud, "acuIndex": rec["pwd_id"]}
+        self._c().change_access_user_pin(lock, cloud, pin, user_type=rec["user_type"],
+                                         date=_lock_date(cloud, lock_tz(lock)))
+        return {"ok": True}
+
+    def remove_from_door(self, lock_id: str, user_id: int) -> dict:
+        """Take a person off one door: lock record (0x73 delete) then cloud."""
+        lock = self._lock(lock_id)
+        cloud = self._cloud_record(lock, user_id)
+        if cloud.get("type") == "OWNER":
+            raise ValueError("The owner can't be removed from their own lock.")
+        rec = self._lock_record(lock, user_id)
+        if rec is None:                       # cloud-only draft: nothing on the lock
+            self._c()._rest_ok("acu/delete", {"adminAcuId": 0, "dv": lock["ID"],
+                                              "userAcuId": int(user_id)})
+        else:
+            self._c().delete_access_user(lock, user_acu_id=int(user_id), pwd_id=rec["pwd_id"],
+                                         user_type=rec["user_type"])
+        return {"ok": True}
+
+    def remove_credential(self, lock_id: str, user_id: int, kind: str, crdntl_id: int,
+                          code: int) -> dict:
+        """Remove one fingerprint / face / card from a person on one door."""
+        lock = self._lock(lock_id)
+        sensor_type = {"fingerprint": F.SENSOR_FINGERPRINT, "face": F.SENSOR_FACE,
+                       "card": F.SENSOR_RFID}[kind]
+        rec = self._lock_record(lock, user_id)
+        if rec is None:
+            raise LocklyError("This person isn't on the lock yet (only in Lockly's cloud).")
+        self._c().delete_sensor(lock, user_acu_id=int(user_id), pwd_id=rec["pwd_id"],
+                                sensor_type=sensor_type, code=int(code), crdntl_id=crdntl_id)
+        return {"ok": True}
+
+    def merge_people(self, keys: list[str], into: str) -> dict:
+        """Show several people as one (e.g. the same person spelled differently
+        on different doors). Stored only in this computer's config; nothing on
+        the locks or in Lockly's cloud changes."""
+        cfg = config.load_config()
+        merges = cfg.setdefault("people_merges", {})
+        into = merges.get(into, into)
+        for k in keys:
+            if k and k != into:
+                merges[k] = into
+                for alias, target in list(merges.items()):   # re-point anything merged into k
+                    if target == k:
+                        merges[alias] = into
+        config.save_config(cfg)
+        return self.people()
+
+    def separate_person(self, key: str) -> dict:
+        """Undo merges into (or of) this person."""
+        cfg = config.load_config()
+        merges = cfg.get("people_merges") or {}
+        cfg["people_merges"] = {a: t for a, t in merges.items() if t != key and a != key}
+        config.save_config(cfg)
+        return self.people()
+
+    # ── experimental: Welcome Mode, Rain Mode ────────────────────────────
+
+    def _experimental(self, lock: dict, build, needs_nonce: bool, send: bool) -> dict:
+        if not send:
+            return {"ok": True, "sent": False, "frame": build("0" * 32)}
+        ok, detail = self._c().send_built(lock, build, needs_nonce=needs_nonce)
+        return {"ok": ok, "sent": True, "detail": detail}
+
+    def welcome(self, lock_id: str, form: str | None, action: str, days: list[str],
+                start: str, end: str, send: bool) -> dict:
+        lock = self._lock(lock_id)
+        form = form or F.welcome_form(lock)
+        if form not in (F.WELCOME_9B, F.WELCOME_46):
+            raise ValueError("Choose which Welcome Mode this lock uses.")
+        week, begin, finish = 0, (0, 0), (0, 0)
+        if action == "set":
+            week = F.week_byte(list(days or []))
+            begin, finish = F.parse_hhmm(start), F.parse_hhmm(end)
+            if finish <= begin:
+                raise ValueError("The end time must be after the start time.")
+        _what, build, needs_nonce = F.welcome_plan(lock, form, action, week, begin, finish)
+        return {**self._experimental(lock, build, needs_nonce, send), "form": form}
+
+    def rain(self, lock_id: str, on: bool, send: bool) -> dict:
+        lock = self._lock(lock_id)
+        return self._experimental(lock, lambda n: F.build_rain_mode_set(lock, n, bool(on)),
+                                  True, send)
+
+    def rain_state(self, lock_id: str) -> dict:
+        """Read Rain Mode from the lock (read-only; wakes it)."""
+        lock = self._lock(lock_id)
+        return self._experimental(lock, lambda n: F.build_rain_mode_query(lock, n), True, True)
+
+    def welcome_state(self, lock_id: str, form: str | None) -> dict:
+        """Read the Welcome Mode schedule from the lock (read-only; wakes it)."""
+        return self.welcome(lock_id, form, "query", [], "", "", True)
+
+    # ── connection test ──────────────────────────────────────────────────
+
+    def diagnose(self, lock_id: str) -> dict:
+        lock = self._lock(lock_id)
+        c = self._c()
+        cached = c.cached_status(lock) if lock.get("hubid") else None
+        live = c.query_status(lock)
+        return {"model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
+                "cachedOk": bool(cached), "liveOk": bool(live),
+                "trail": c.last_transport_trail(), "lock": self._view(lock)}

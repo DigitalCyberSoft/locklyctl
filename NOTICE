@@ -1,0 +1,25 @@
+locklyctl — unofficial Lockly command-line tool.
+
+Not affiliated with, authorised by, or endorsed by Lockly Security Inc. /
+PIN GENIE LIMITED. "Lockly" and the lock model names are trademarks of their
+owner, used here only to identify the hardware.
+
+This project incorporates material from LocklyHA
+(https://github.com/Forcky/LocklyHA), Copyright (c) 2024 Patrick Forck, under
+the MIT License (see LICENSE.LocklyHA):
+ - locklyctl/protocol.py — the crypto, BLE framing and response parsers are
+   ported from LocklyHA's api.py, where they are validated on real hardware.
+ - locklyctl/certs/ — the Lockly application's shared MQTT client certificate,
+   CA and key (CN=com.lockly), identical to the copies LocklyHA distributes and
+   present in every app install. Not a user secret.
+
+New in this project (MIT, Copyright (c) 2026 DigitalCyberSoft):
+ - the synchronous REST/MQTT transport, the interactive menu, the desktop
+   app (locklyctl/gui), and the
+   feature frame builders in locklyctl/features.py (Welcome Mode, Rain Mode,
+   and remote enrolment), decoded from the Lockly Android app by static
+   analysis and documented at https://digitalcybersoft.github.io/lockly_api_docs/
+
+Bundled font: Archivo (locklyctl/gui/web/fonts), Copyright 2020 The Archivo
+Project Authors (https://github.com/Omnibus-Type/Archivo), under the SIL Open
+Font License 1.1 (see locklyctl/gui/web/fonts/OFL.txt).

@@ -1,0 +1,409 @@
+"""Per-model Lockly capability flags.
+
+Lockly hardware does not share one BLE command format.  The app decides which
+frame to build from a numeric lock type, via the ``isPGxxx()`` predicates on
+``BluetoothBean``.  This module ports the subset of those predicates that
+affect the frames this integration builds.
+
+Where the lock type comes from
+------------------------------
+``BluetoothBean.getLockType()`` parses the bean's ``lockType`` string and
+**falls back to 1** when it is absent.  The ``qrylknew`` cloud response does not
+carry ``lockType`` — the lock reports it itself, as byte 18 of the decrypted
+status ACK (``QueryLockStatusCmd`` reads ``data[36:38]``).  So the flow is:
+query status once, learn the lock type, then build commands for it.  Until a
+status response has been seen, ``DEFAULT_CAPABILITIES`` (lock type 1) applies,
+which is the same fallback the app uses.
+
+Model numbers below are from ``BluetoothBean.isPGxxx()`` in Lockly app 3.2.9.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+# ── Command codes ─────────────────────────────────────────────────────────────
+
+CMD_QUERY_STATUS = "1E"     # MessageManage.CODE_NEW_QUERY_LOCK_STATUS
+CMD_SET_AUTO_LOCK = "12"     # SetAutoLockCmd — native Auto-Detection/Automation mode
+CMD_LOCK_SETTINGS = "19"     # LockSettingsCmd — query/write physical switch settings
+CMD_UNLOCK = "22"           # NewUnlockCmd, standard AES path
+CMD_UNLOCK_82 = "52"        # NewUnlockCmd, isSupport82Cmd path
+CMD_QUERY_PASSWORDS = "93"  # QueryPwd147Cmd — paginated credential list
+
+# SyncUnlockRecordCmd reads the access log from the lock itself.  Which code it
+# uses depends on the hardware: attendance locks use 0x53, locks with the "log
+# 120" format use 0x78, everything else 0x04.
+CMD_LOG_ATTENDANCE = "53"
+CMD_LOG_120 = "78"
+CMD_LOG_LEGACY = "4"
+
+# Characters per record in the log response.  The wider formats carry a 2-byte
+# credential slot where the legacy one carries a single byte.
+LOG_RECORD_CHARS_WIDE = 22
+LOG_RECORD_CHARS_LEGACY = 20
+
+# isSimpleAttendance(): PGI302FC / PGI303FC / PGI302W.
+_SIMPLE_ATTENDANCE = frozenset({51, 54, 67})
+
+# PagingLogCmd reads the log a page at a time, bounded by a date range, where
+# SyncUnlockRecord returns a large block in one go.  Log148Cmd sends 0x94,
+# Log124Cmd sends 0x7C.
+CMD_PAGING_LOG_148 = "94"
+CMD_PAGING_LOG_124 = "7C"
+
+# Log124Cmd.parseData record width: date(6B) type(1B) slot(4B LE) id(2B).
+PAGING_LOG_RECORD_CHARS = 26
+
+# "No bound" sentinels for the date range (PagingLogCmd.DATE_UNLIMITED and the
+# matching value for the time half).
+PAGING_DATE_UNLIMITED = "FFFFFF"
+PAGING_TIME_UNLIMITED = "FFFFFFFFFF"
+
+# isSupport148Cmd(), the unconditional members.  PGD628FN is absent, so it uses
+# the 0x7C form.
+_SUPPORTS_148_CMD = frozenset({
+    102,  # PGK7SWH
+    103,  # PGK7SWHK
+    104,  # PGK728WHK
+    105,  # PGK728WRHK
+    113,  # PGD899G
+    117,  # PGK798HK
+    124,  # PGD728FG25
+    125,  # PGD728FNG25
+    127,  # PGD628FG25
+    128,  # PGK728WKL
+    129,  # PGD728FN21
+    132,  # PGD7AWG25
+    133,  # PGD7YWG25
+})
+
+# QueryPwdCmd.NO_PASSWOED: the sentinel frame meaning "this lock holds none".
+_NO_PASSWORDS_ACK = "a1b2c3d40a000c11019a"
+
+# ── Frame field values ────────────────────────────────────────────────────────
+
+# str2 in NewUnlockCmd.getData — MessageManage lock/unlock type.
+ACTION_UNLOCK = "01"
+ACTION_LOCK = "02"
+
+# getUnLockType(): "2" for a host/admin, "3" for long-term or staff users.
+UNLOCK_TYPE_HOST = "2"
+UNLOCK_TYPE_LONG_TERM = "3"
+
+# str3 in NewUnlockCmd.getData.  getDataForHub passes "1"; getDataForBluetooth
+# and getDataForNetwork pass "0".  Cloud senddata is always hub-relayed.
+_STR3_HUB = "1"
+_STR3_DIRECT = "0"
+
+# ── Lock type sets, ported from BluetoothBean ────────────────────────────────
+
+_LOCK_TYPE_FALLBACK = 1  # BluetoothBean.getLockType() default
+
+# isPGI301() — excluded from the timestamp path even though it is an 0x52 lock.
+_PGI301 = 121
+
+# isSupport82Cmd(), unconditional members.
+_SUPPORTS_82_CMD = frozenset({
+    51,   # PGI302FC
+    54,   # PGI303FC
+    102,  # PGK7SWH
+    103,  # PGK7SWHK
+    104,  # PGK728WHK
+    105,  # PGK728WRHK
+    113,  # PGD899G
+    117,  # PGK798HK
+    121,  # PGI301
+    124,  # PGD728FG25
+    125,  # PGD728FNG25
+    127,  # PGD628FG25
+    128,  # PGK728WKL
+    132,  # PGD7AWG25
+    133,  # PGD7YWG25
+})
+
+# isSupport82Cmd() members gated on a firmware check we do not implement
+# (DeviceVersionManager.m57412m / m57414o).  Treated as NOT supporting 0x52 so
+# we fall back to the widely-working 0x22 frame rather than guessing.
+_MAYBE_82_CMD = frozenset({
+    67,  # PGI302W  — DeviceVersionManager.m57412m
+    71,  # PGV528   — DeviceVersionManager.m57414o
+})
+
+# isVision()
+_VISION = frozenset({
+    35,   # PGD798
+    54,   # PGI303FC
+    69,   # PGD698L
+    74,   # PGD698D
+    78,   # PGD898
+    79,   # PGD798C
+    80,   # PGD798NV
+    84,   # PGD899
+    93,   # PGD798D
+    94,   # PGD698LL
+    95,   # PGD698DL
+    96,   # PGD898D
+    97,   # PGD898S
+    100,  # PGD898X
+    107,  # PGD897D
+    112,  # PGD899X
+    113,  # PGD899G
+    115,  # PGD798UZ
+    117,  # PGK798HK
+})
+
+# lithiumBattery(): locks on a rechargeable pack, not AA cells. Their status
+# response carries a battery percentage in byte 7 instead of the two voltage
+# fields AA locks send there (QueryLockStatusCmd, both apps). Read as a voltage,
+# a PGK728WRHK reported 653.76 V on #10. LOCKLY 3.2.9 lists the first nine;
+# Lockly Home 1.4.8 adds the last four.
+LITHIUM_BATTERY_TYPES = frozenset({
+    80,   # PGD798NV (is7ModeLithiumBattery)
+    84,   # PGD899
+    94,   # PGD698LL
+    95,   # PGD698DL
+    96,   # PGD898D
+    105,  # PGK728WRHK
+    112,  # PGD899X
+    113,  # PGD899G
+    117,  # PGK798HK
+    130,  # PGD899B
+    136,  # PGD899GR
+    137,  # PGD899BR
+    141,  # PGD898DS
+})
+
+# isSupport500GroupPassword(): PGD728FN21 always, PGD238T from lock fw 1.00.01.
+_500_GROUP_PASSWORD = frozenset({129})       # PGD728FN21
+_500_GROUP_PASSWORD_VERSIONED = frozenset({88})  # PGD238T
+
+# Model string -> lock type, for the models this project has evidence for.
+# Only used as a hint before the first status response arrives; the lock's own
+# reported type always wins.
+MODEL_LOCK_TYPES = {
+    "PGD628F": 4,
+    "PGD628FN": 21,
+    "PGD628FG25": 127,
+    "PGD728F": 2,
+    "PGD728FN": 22,
+    "PGD728FG25": 124,
+    "PGD728FNG25": 125,
+    "PGD728FN21": 129,
+}
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted firmware string into comparable integers.
+
+    Returns an empty tuple for anything unparseable, so a version check on an
+    unknown string fails closed rather than guessing.
+    """
+    parts: list[int] = []
+    for part in str(version or "").split("."):
+        part = part.strip()
+        if not part.isdigit():
+            return ()
+        parts.append(int(part))
+    return tuple(parts)
+
+
+def _version_between(version: str, minimum: str, maximum: str) -> bool:
+    """True when minimum <= version < maximum, as the app's version gates read."""
+    current = _version_tuple(version)
+    if not current:
+        return False
+    return _version_tuple(minimum) <= current < _version_tuple(maximum)
+
+
+@dataclass(frozen=True)
+class LockCapabilities:
+    """Frame-shaping capabilities for one lock."""
+
+    lock_type: int = _LOCK_TYPE_FALLBACK
+    model: str = ""
+    is_host: bool = True
+    firmware: str = ""
+
+    @property
+    def supports_auto_detection_auto_lock(self) -> bool:
+        """Whether native Auto-Detection (time=1) is verified for this model."""
+        return self.lock_type == 105
+
+    @property
+    def supports_detection_door_sensor_when_locked(self) -> bool:
+        """Whether SetAutoLockCmd includes its conditional door-sensor byte."""
+        return self.lock_type == 105
+
+    @property
+    def supports_82_cmd(self) -> bool:
+        """isSupport82Cmd(): lock uses the 0x52 command set."""
+        return self.lock_type in _SUPPORTS_82_CMD
+
+    @property
+    def is_vision(self) -> bool:
+        """isVision(): Lockly Vision family (camera doorbell locks)."""
+        return self.lock_type in _VISION
+
+    @property
+    def supports_500_group_password(self) -> bool:
+        """isSupport500GroupPassword(): extra "02" + wide slot id in the frame.
+
+        The PGD238T half of this predicate is firmware-gated in the app; we
+        report False for it so we build the frame we can verify.
+        """
+        return self.lock_type in _500_GROUP_PASSWORD
+
+    @property
+    def supports_timestamp(self) -> bool:
+        """isSupportTimestamp(): nonce field carries a timestamp, not the stored value.
+
+        ``(isHost() && isVision()) || (isSupport82Cmd() && !isPGI301())``
+        """
+        if self.is_host and self.is_vision:
+            return True
+        return self.supports_82_cmd and self.lock_type != _PGI301
+
+    @property
+    def cmd_code(self) -> str:
+        """BLE command code for lock/unlock on this hardware."""
+        return CMD_UNLOCK_82 if self.supports_82_cmd else CMD_UNLOCK
+
+    @property
+    def slot_id(self) -> int:
+        """Value of the frame's slot field.
+
+        On the 0x22 path this is the credential slot, DataUtils.m86645J(pwdId).
+        LockerManager sets pwdId to "0" when it builds the bean for a host that
+        is not a sub-admin, and NewUnlockCmd's 0x52 branch does the same
+        explicitly for hosts.  ``getPwdId()``'s "1" is only the fallback for a
+        bean where pwdId was never assigned — so a host command carries slot 0,
+        which is where the host credential actually lives.
+
+        Sending slot 1 with the host password makes the lock compare that
+        password against a different credential and reject it with BLE error FF.
+
+        On the 0x52 path the field is getUserId() instead, and for hardware whose
+        isSupportAccessUser() is true that reads BluetoothBean.getUserId() rather
+        than the pwdId this property models.  For a host that is still 0:
+        ``isOwner()`` is defined as ``userId == 0 && adminId == 0``, and nothing
+        in either decompiled app assigns a host a non-zero userId — the cloud
+        restore path (UserManager.O0) copies sixty-odd fields out of the device
+        record and never that one.  A guest's userId arrives in their key blob
+        and is not something this integration has.
+        """
+        return 0 if self.is_host else 1
+
+    @property
+    def wide_slot_field(self) -> bool:
+        """The slot field is two bytes, little-endian, rather than one.
+
+        NewUnlockCmd.getUserId() runs both of its branches through
+        getCmdLenString(), which is ``{i % 256, i / 256}`` — so every 0x52
+        command carries a two-byte field where the 0x22 path carries one.
+        Sending one byte leaves the frame short, and the lock then reads the
+        action, str3 and timestamp fields each a byte early.
+        """
+        return self.supports_82_cmd
+
+    @property
+    def encrypt_type(self) -> int:
+        """Low nibble of the outer frame's type byte.
+
+        getEncryptType() returns 5 (AES-128/ECB) for a host, but NewUnlockCmd
+        overrides it twice: a Vision host takes 11 before either branch, and the
+        0x52 branch sets ``isHost() ? 11 : isLongTerm() ? 13 : 12``.  The
+        long-term-guest case is not modelled because this integration only ever
+        builds host and plain-guest commands.
+
+        This applies to the lock/unlock frame only.  The status query and
+        QueryPwd147 stay at 5: QueryPwd147Cmd asks getTenantAccessEncryptType(),
+        which falls straight through to getEncryptType() for a host.
+        """
+        if self.supports_82_cmd:
+            return 11 if self.is_host else 12
+        if self.is_host and self.is_vision:
+            return 11
+        return 5
+
+    @property
+    def is_simple_attendance(self) -> bool:
+        """isSimpleAttendance(): attendance-style locks."""
+        return self.lock_type in _SIMPLE_ATTENDANCE
+
+    @property
+    def supports_log_120(self) -> bool:
+        """isSupportLog120(): the wider access-log record format.
+
+        PGD628FN qualifies from lock firmware 4.03.10 up to (not including)
+        8.00.00 — DeviceVersionManager's gate for this predicate.
+        """
+        if self.lock_type != 21:  # PGD628FN
+            return False
+        return _version_between(self.firmware, "4.03.10", "8.00.00")
+
+    @property
+    def log_cmd_code(self) -> str:
+        """BLE command that reads the access log from the lock."""
+        if self.is_simple_attendance:
+            return CMD_LOG_ATTENDANCE
+        if self.supports_log_120:
+            return CMD_LOG_120
+        return CMD_LOG_LEGACY
+
+    @property
+    def log_record_chars(self) -> int:
+        """Hex characters per record in the access-log response."""
+        if self.is_simple_attendance or self.supports_log_120:
+            return LOG_RECORD_CHARS_WIDE
+        return LOG_RECORD_CHARS_LEGACY
+
+    @property
+    def supports_148_cmd(self) -> bool:
+        """isSupport148Cmd(): the 0x94 form of the paged log query."""
+        return self.lock_type in _SUPPORTS_148_CMD
+
+    @property
+    def paging_log_cmd_code(self) -> str:
+        """BLE command for the paged, date-bounded access-log query."""
+        return CMD_PAGING_LOG_148 if self.supports_148_cmd else CMD_PAGING_LOG_124
+
+    @property
+    def needs_firmware_check(self) -> bool:
+        """True when a firmware-gated predicate makes the frame choice uncertain."""
+        return self.lock_type in _MAYBE_82_CMD
+
+    def __str__(self) -> str:
+        parts = [f"type={self.lock_type}"]
+        if self.model:
+            parts.append(self.model)
+        parts.append(f"cmd=0x{self.cmd_code}")
+        parts.append(f"enc=0x{self.encrypt_type:X}")
+        if self.supports_82_cmd:
+            parts.append("82cmd")
+        if self.is_vision:
+            parts.append("vision")
+        if self.supports_500_group_password:
+            parts.append("500group")
+        if self.supports_timestamp:
+            parts.append("timestamp")
+        return " ".join(parts)
+
+
+DEFAULT_CAPABILITIES = LockCapabilities()
+
+
+def resolve_capabilities(lock: dict, lock_type: int | None = None) -> LockCapabilities:
+    """Build capabilities for a lock.
+
+    ``lock_type`` is the value the lock reported in its status ACK.  When it is
+    None we fall back to the model-string hint, then to the app's default of 1.
+    """
+    model = str(lock.get("mod") or "")
+    if lock_type is None:
+        lock_type = MODEL_LOCK_TYPES.get(model.upper(), _LOCK_TYPE_FALLBACK)
+    return LockCapabilities(
+        lock_type=lock_type,
+        model=model,
+        is_host=str(lock.get("secondAdm") or "N").upper() != "Y",
+        firmware=str(lock.get("fwv") or ""),
+    )

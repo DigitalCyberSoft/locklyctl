@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>locklyctl</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Starting up: silent sign-in with the saved login -->
+  <main id="boot" class="screen boot" aria-busy="true">
+    <p class="boot-mark">locklyctl</p>
+    <p class="muted" id="boot-msg">Signing in…</p>
+  </main>
+
+  <!-- Sign in -->
+  <main id="signin" class="screen signin" hidden>
+    <form id="signin-form" class="signin-plate" novalidate>
+      <h1 class="signin-title">locklyctl</h1>
+      <p class="muted">Sign in with your Lockly account.</p>
+      <label class="field">
+        <span>Email</span>
+        <input name="email" type="email" autocomplete="username" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <label class="check">
+        <input name="remember" type="checkbox" checked>
+        <span>Stay signed in on this computer</span>
+      </label>
+      <p class="form-error" id="signin-error" role="alert"></p>
+      <button class="btn btn-primary" type="submit">Sign in</button>
+      <p class="fine">Unofficial. Not affiliated with Lockly. Your sign-in stays on this computer.</p>
+    </form>
+  </main>
+
+  <!-- Doors -->
+  <div id="app" class="screen app" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <p class="brand">locklyctl</p>
+        <nav class="views" aria-label="View">
+          <button type="button" id="view-doors" aria-pressed="true">Doors</button>
+          <button type="button" id="view-people" aria-pressed="false">People</button>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <span class="muted" id="who"></span>
+        <button class="btn btn-quiet" id="check-all" type="button"
+                title="Asks every lock for its live status. Each lock wakes and beeps.">Check all doors</button>
+        <button class="btn btn-quiet" id="sign-out" type="button"
+                title="Signs out and forgets the saved sign-in on this computer.">Sign out</button>
+      </div>
+    </header>
+
+    <div class="workspace" id="doors-ws">
+      <nav class="cabinet" aria-label="Doors">
+        <ul id="plates" class="plates"></ul>
+      </nav>
+
+      <section class="door" id="door" aria-live="polite">
+        <div class="door-empty" id="door-empty">
+          <p>Choose a door.</p>
+        </div>
+
+        <div id="door-body" hidden>
+          <header class="door-head">
+            <p class="door-unit" id="d-unit"></p>
+            <div class="door-title">
+              <h1 id="d-name"></h1>
+              <p class="muted" id="d-model"></p>
+            </div>
+          </header>
+
+          <div class="door-state">
+            <p class="state-word" id="d-state"></p>
+            <ul class="facts" id="d-facts"></ul>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-ink" id="btn-lock" type="button">Lock</button>
+            <button class="btn btn-hold" id="btn-unlock" type="button"
+                    aria-describedby="hold-hint"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label">Hold to unlock</span></button>
+            <button class="btn btn-quiet" id="btn-check" type="button">Check now</button>
+          </div>
+          <p class="fine" id="hold-hint">Press and hold Unlock (or hold Space) until it fills. Check now wakes the lock, so it beeps.</p>
+
+          <div class="tabs" role="tablist" aria-label="Door details">
+            <button role="tab" id="tab-activity" aria-controls="panel-activity" aria-selected="true">Activity</button>
+            <button role="tab" id="tab-guests" aria-controls="panel-guests" aria-selected="false" tabindex="-1">Guest PINs</button>
+            <button role="tab" id="tab-schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1">Schedules</button>
+            <button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="false" tabindex="-1">Connection</button>
+          </div>
+
+          <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" class="panel"></div>
+
+          <div role="tabpanel" id="panel-guests" aria-labelledby="tab-guests" class="panel" hidden>
+            <div id="guest-list"></div>
+            <form id="guest-form" class="inline-form" novalidate>
+              <h2>Add a guest PIN</h2>
+              <div class="row">
+                <label class="field"><span>Name</span><input name="name" required maxlength="20"></label>
+                <label class="field field-short"><span>PIN</span><input name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required></label>
+                <label class="field field-short"><span>Works for</span>
+                  <select name="duration">
+                    <option value="4h">4 hours</option>
+                    <option value="24h" selected>24 hours</option>
+                    <option value="72h">3 days</option>
+                    <option value="1w">1 week</option>
+                    <option value="permanent">No end date</option>
+                  </select>
+                </label>
+              </div>
+              <p class="form-error" id="guest-error" role="alert"></p>
+              <button class="btn btn-ink" type="submit">Add guest PIN</button>
+              <p class="fine">Lockly saves the PIN in the cloud straight away. Whether the lock accepts it at once hasn't been confirmed, so try it at the door.</p>
+            </form>
+          </div>
+
+          <div role="tabpanel" id="panel-schedules" aria-labelledby="tab-schedules" class="panel" hidden>
+            <p class="caution">Tested on a Visage: Welcome Mode (8-slot schedule) and Rain Mode. The single-schedule form used by Touch locks is checked against the Lockly app but hasn't been tried on a real lock yet. Read from lock only asks; Preview shows the command without sending it.</p>
+
+            <form id="welcome-form" class="inline-form" novalidate>
+              <h2>Welcome Mode</h2>
+              <p class="muted">Keeps the door unlocked during set hours, then locks it again. The lock runs the schedule itself.</p>
+              <div class="row" id="w-form-row"></div>
+              <fieldset class="seg" id="w-action">
+                <legend>What to do</legend>
+                <label><input type="radio" name="action" value="set" checked><span>Set hours</span></label>
+                <label id="w-always-opt"><input type="radio" name="action" value="always"><span>Always unlocked</span></label>
+                <label><input type="radio" name="action" value="off"><span>Turn off</span></label>
+              </fieldset>
+              <div id="w-hours">
+                <fieldset class="days" id="w-days">
+                  <legend>Days</legend>
+                </fieldset>
+                <div class="row">
+                  <label class="field field-short"><span>From</span><input name="start" type="time" value="08:00" required></label>
+                  <label class="field field-short"><span>Until</span><input name="end" type="time" value="18:00" required></label>
+                </div>
+                <p class="fine" id="w-slot-note"></p>
+              </div>
+              <p class="form-error" id="welcome-error" role="alert"></p>
+              <div class="row">
+                <button class="btn btn-quiet" type="button" id="w-read">Read from lock</button>
+                <button class="btn btn-quiet" type="submit" value="preview">Preview</button>
+                <button class="btn btn-ink" type="submit" value="send">Send to lock</button>
+              </div>
+              <pre class="output" id="welcome-out" hidden></pre>
+            </form>
+
+            <form id="rain-form" class="inline-form" novalidate>
+              <h2>Rain Mode</h2>
+              <p class="muted">Turns the keypad off so rain on the screen can't press keys.</p>
+              <fieldset class="seg">
+                <legend>Rain Mode</legend>
+                <label><input type="radio" name="on" value="1" checked><span>On</span></label>
+                <label><input type="radio" name="on" value="0"><span>Off</span></label>
+              </fieldset>
+              <p class="form-error" id="rain-error" role="alert"></p>
+              <div class="row">
+                <button class="btn btn-quiet" type="button" id="r-read">Read from lock</button>
+                <button class="btn btn-quiet" type="submit" value="preview">Preview</button>
+                <button class="btn btn-ink" type="submit" value="send">Send to lock</button>
+              </div>
+              <pre class="output" id="rain-out" hidden></pre>
+            </form>
+          </div>
+
+          <div role="tabpanel" id="panel-connection" aria-labelledby="tab-connection" class="panel" hidden>
+            <p class="muted">Finds out which route reaches this lock: the hub relay, or Lockly's device channel. It wakes the lock.</p>
+            <button class="btn btn-ink" id="btn-diagnose" type="button">Test connection</button>
+            <div id="diag-out"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="workspace" id="people-ws" hidden>
+      <nav class="roster" aria-label="People">
+        <label class="field search">
+          <span>Find a person</span>
+          <input type="search" id="people-search" autocomplete="off">
+        </label>
+        <button class="btn btn-ink" id="add-person" type="button">Add a person</button>
+        <ul id="people-list" class="people-list"></ul>
+      </nav>
+
+      <section class="door person" aria-live="polite">
+        <div class="door-empty" id="person-empty"><p>Choose a person.</p></div>
+        <div id="person-body" hidden>
+          <header class="person-head">
+            <h1 id="p-name"></h1>
+            <p class="muted" id="p-sub"></p>
+          </header>
+          <table class="access-table">
+            <thead><tr><th scope="col">Door</th><th scope="col">Role</th><th scope="col">When</th><th scope="col">Can unlock with</th><th scope="col"><span class="sr-only">Changes</span></th></tr></thead>
+            <tbody id="p-doors"></tbody>
+          </table>
+          <form class="inline-form grant" id="grant-form" novalidate>
+            <h2 id="grant-title">Give access to another door</h2>
+            <div class="row">
+              <label class="field" id="grant-name-field" hidden><span>Name</span><input name="name" maxlength="40" autocomplete="off"></label>
+              <label class="field"><span>Door</span><select name="door" required></select></label>
+              <label class="field field-short"><span>PIN (4–8 digits)</span><input name="pin" inputmode="numeric" maxlength="8" autocomplete="off"></label>
+            </div>
+            <fieldset class="seg" id="grant-kind">
+              <legend>When</legend>
+              <label><input type="radio" name="kind" value="always" checked><span>Always</span></label>
+              <label><input type="radio" name="kind" value="weekly"><span>Set hours</span></label>
+              <label><input type="radio" name="kind" value="dates"><span>Between dates</span></label>
+            </fieldset>
+            <div id="grant-weekly" hidden>
+              <fieldset class="days" id="grant-days"><legend>Days</legend></fieldset>
+              <div class="row">
+                <label class="field field-short"><span>From</span><input name="start" type="time" value="09:00"></label>
+                <label class="field field-short"><span>Until</span><input name="end" type="time" value="18:00"></label>
+              </div>
+            </div>
+            <div class="row" id="grant-dates" hidden>
+              <label class="field"><span>Starts</span><input name="from" type="datetime-local"></label>
+              <label class="field"><span>Ends</span><input name="to" type="datetime-local"></label>
+            </div>
+            <p class="form-error" id="grant-error" role="alert"></p>
+            <div class="row"><button class="btn btn-ink" type="submit" id="grant-submit">Give access</button></div>
+            <p class="fine">The PIN is written to the lock straight away. Faces and fingerprints stay with the lock they were enrolled on; enrol them again at the new door.</p>
+          </form>
+
+          <section class="merge" id="p-merge">
+            <h2>Same person?</h2>
+            <p class="muted">If this person also appears under another name, merge them here. This only changes how this app groups people; the locks and Lockly's records stay as they are.</p>
+            <div class="row" id="p-merge-row"></div>
+            <div id="p-merged"></div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <p class="toast" id="toast" role="status" aria-live="polite"></p>
+  </div>
+
+  <dialog id="confirm" class="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <div class="row row-end">
+        <button class="btn btn-quiet" value="cancel">Cancel</button>
+        <button class="btn btn-ink" value="ok" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
