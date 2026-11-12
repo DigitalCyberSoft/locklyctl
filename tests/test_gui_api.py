@@ -97,6 +97,28 @@ class FakeClient:
                 {"tm": 1794464133000, "co": "999", "na": "", "pid": 65535, "id": 3, "logVer": 0},
                 {"tm": 1794464119000, "co": "117", "na": "", "pid": 65535, "id": 2, "logVer": 0}], since_ms
 
+    def query_status(self, lock):
+        return {"is_locked": True, "lock_type": 105, "firmware_version": "1.14.24",
+                "sub_version": "1.00.72", "wifi_version": "2.02.72", "ble_version": "1.14.24"}
+
+    def firmware_offer(self, lock, lock_type=None):
+        kind = F.firmware_check_kind(lock)
+        if kind == F.FW_SINGLE:
+            return {"kind": kind, "release": "2.02.80", "title": "", "notes": "",
+                    "parts": [{"part": "main", "version": "2.02.80", "size_kb": None}]}
+        return {"kind": kind, "release": "1.14.34", "title": "", "notes": "", "parts": [
+            {"part": "front", "version": "1.00.95", "size_kb": 87},
+            {"part": "back", "version": "1.00.76", "size_kb": 35},
+            {"part": "wifi", "version": "2.02.72", "size_kb": 1180},
+            {"part": "ble", "version": "1.14.28", "size_kb": 280}]}
+
+    # 0A9B as 11D sent it: one one-time slot 07:00-21:00, switched off, first entry
+    welcome_table = "00" + "04" + "01" + "08" + "8007001500" + "00FFFFFFFF" * 7 + "00" + "00"
+
+    def exchange_built(self, lock, build):
+        build("AB" * 16)
+        return "ACK", self.welcome_table
+
     def lock(self, lock): return True, "lock ACK"
     def unlock(self, lock): return False, "lock rejected the command: FF — wrong password"
 
@@ -160,6 +182,58 @@ def test_lock_views_and_actions(api):
         pass
     else:
         raise AssertionError("unknown lock accepted")
+
+
+@_api_in_tmp_home
+def test_keep_unlocked(api):
+    import locklyctl.gui.api as A
+    from datetime import datetime
+    from locklyctl import protocol as P
+
+    class Now(datetime):                       # a fixed clock, far enough ahead to be "not over yet"
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2099, 1, 1, 14, 5, 30, tzinfo=tz)
+    real, A.datetime = A.datetime, Now
+    try:
+        api.sign_in("a@b", "right", False)
+        c = api._client
+        r = api.keep_unlocked(B2, 60)
+        assert r["until"] == "15:05" and r["lock"]["keepUnlockedUntil"] == "15:05"
+        frame, _ = c.sent[-1]
+        plain = P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(frame)[6:-2]).hex().upper()
+        # 11D's own slot kept as it was (off, first entry); the new one-time slot on, auto entry
+        assert "0301" + "08" + "8007001500" + "800E050F05" + "00FFFFFFFF" * 6 + "02" + "02" in plain
+        assert config.load_config()["keep_unlocked"][B2]["slots"] == [[0x80, 14, 5, 15, 5]]
+        # later, once the lock has run and switched it off, it's cleared to make room
+        c.welcome_table = "00040108" + "8007001500" + "800E050F05" + "00FFFFFFFF" * 6 + "02" + "00"
+        api.keep_unlocked(B2, 30)
+        plain = P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(c.sent[-1][0])[6:-2]).hex().upper()
+        assert "0301" + "08" + "8007001500" + "800E050E23" + "00FFFFFFFF" * 6 in plain
+        try:
+            api.keep_unlocked(UUID, 60)                    # a PGD7Y: single-slot Welcome Mode
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("single-slot lock accepted")
+        r = api.end_keep_unlocked(B2)
+        assert r["ok"] and B2 not in config.load_config()["keep_unlocked"]
+    finally:
+        A.datetime = real
+
+
+@_api_in_tmp_home
+def test_firmware_check(api):
+    api.sign_in("a@b", "right", False)
+    r = api.firmware(B2)                                     # a Visage
+    parts = {p["name"]: p for p in r["parts"]}
+    assert r["release"] == "1.14.34" and r["lockFirmware"] == "1.14.24"
+    assert parts["Back board"]["newer"] and parts["Bluetooth chip"]["newer"]
+    assert not parts["Wi-Fi module"]["newer"]                           # same version
+    assert parts["Front board"]["current"] == "" and not parts["Front board"]["newer"]   # not traced
+    assert parts["Bluetooth chip"]["byPhone"] and not parts["Back board"]["byPhone"]
+    r = api.firmware(UUID)                                   # a PGD7Y: Bluetooth only
+    assert [(p["name"], p["newer"], p["byPhone"]) for p in r["parts"]] == [("Lock firmware", True, True)]
 
 
 @_api_in_tmp_home

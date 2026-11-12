@@ -174,6 +174,26 @@ def _lock_date(u: dict, tz) -> str:
     return F.access_date_permanent()
 
 
+def _keep_until(cfg: dict, lock: dict) -> str | None:
+    """When a keep-unlocked window set from here ends, in the lock's own time
+    ("18:30", "08:30 tomorrow"), or None once it's over."""
+    until = ((cfg.get("keep_unlocked") or {}).get(lock["ID"]) or {}).get("until") or 0
+    if until <= time.time():
+        return None
+    tz = lock_tz(lock)
+    end, now = datetime.fromtimestamp(until, tz), datetime.now(tz)
+    return end.strftime("%H:%M") + (" tomorrow" if end.date() > now.date() else "")
+
+
+def _keep_max_minutes(lock: dict) -> int:
+    """The longest keep-unlocked window this lock can take now: until 23:59 its
+    time, unless windows past midnight are switched on."""
+    if F.KEEP_UNLOCKED_PAST_MIDNIGHT:
+        return 24 * 60 - 1
+    now = datetime.now(lock_tz(lock))
+    return 23 * 60 + 59 - (now.hour * 60 + now.minute)
+
+
 def _favorite_ids(cfg: dict) -> list[str]:
     """Lock ids pinned as favorites, in the order they were added."""
     favs = cfg.get("favorites")
@@ -251,8 +271,8 @@ class Api:
                 return lk
         raise LocklyError("That lock is no longer on this account.")
 
-    def _view(self, lock: dict, favs: list[str] | None = None) -> dict:
-        favs = _favorite_ids(config.load_config()) if favs is None else favs
+    def _view(self, lock: dict, cfg: dict | None = None) -> dict:
+        cfg = config.load_config() if cfg is None else cfg
         name = str(lock.get("na") or lock.get("blename") or lock.get("ID", "?"))
         unit, rest = split_unit(name)
         e = self._c().status_cache.get(lock["ID"]) or {}
@@ -271,37 +291,39 @@ class Api:
             "battery": e.get("battery_percent"),
             "lowBattery": bool(e.get("low_battery") or e.get("battery_invalid")),
             "doorOpen": e.get("door_sensor_open"),
-            "firmware": e.get("firmware_version") or "",
+            "firmware": e.get("firmware_version") or str(lock.get("fwv") or ""),
             "cached": bool(e.get("cached")),
             "checkedAt": e.get("ts"),
             "welcomeForm": F.welcome_form(lock),
             "route": F.remote_route(lock),
             "faceCapable": F.supports_face(lock),
-            "favorite": lock["ID"] in favs,
+            "favorite": lock["ID"] in _favorite_ids(cfg),
+            "keepUnlockedUntil": _keep_until(cfg, lock),
+            "keepMaxMinutes": _keep_max_minutes(lock),
         }
 
     def locks(self) -> list[dict]:
         """All locks, with the silent hub-cached status where a hub has one."""
         c = self._c()
-        favs = _favorite_ids(config.load_config())
-        self._warm_up(favs)
+        cfg = config.load_config()
+        self._warm_up(_favorite_ids(cfg))
         c.prime_cached_status(c.locks)
-        return [self._view(lk, favs) for lk in c.locks]
+        return [self._view(lk, cfg) for lk in c.locks]
 
     def check_all(self) -> list[dict]:
         """Live status for every lock. Wakes them all (they beep)."""
         c = self._c()
         c.refresh_all_status(c.locks)
-        favs = _favorite_ids(config.load_config())
-        return [self._view(lk, favs) for lk in c.locks]
+        cfg = config.load_config()
+        return [self._view(lk, cfg) for lk in c.locks]
 
     def check_doors(self, lock_ids: list[str]) -> list[dict]:
         """Live status for some locks, e.g. the ones that seemed asleep. Wakes them."""
         c = self._c()
         wanted = [self._lock(i) for i in lock_ids]
         c.refresh_all_status(wanted)
-        favs = _favorite_ids(config.load_config())
-        return [self._view(lk, favs) for lk in wanted]
+        cfg = config.load_config()
+        return [self._view(lk, cfg) for lk in wanted]
 
     def check(self, lock_id: str) -> dict:
         """Live status for one lock (wakes it)."""
@@ -344,7 +366,7 @@ class Api:
         cfg["favorites"] = favs
         config.save_config(cfg)
         self._warm_up(favs)
-        return self._view(lock, favs)
+        return self._view(lock, cfg)
 
     def _warm_up(self, favs: list[str]) -> None:
         """Connect Lockly's device channel in the background when a favorite
@@ -418,11 +440,11 @@ class Api:
             results = list(ex.map(fetch, c.locks))
 
         cfg = config.load_config()
-        merges, favs = cfg.get("people_merges") or {}, _favorite_ids(cfg)
+        merges = cfg.get("people_merges") or {}
         people: dict[str, dict] = {}
         failed = []
         for lk, users in results:
-            door = self._view(lk, favs)
+            door = self._view(lk, cfg)
             if users is None:
                 failed.append(door["name"])
                 continue
@@ -555,6 +577,72 @@ class Api:
         config.save_config(cfg)
         return self.people()
 
+    # ── keep a door unlocked for a while (one-time Welcome Mode slots) ────
+
+    _SLOT_KEYS = ("week", "begin", "end", "enabled", "sync")
+
+    def _welcome8_table(self, lock: dict) -> list[dict]:
+        """The lock's 0x9B slots with their on/off and entry bits (wakes it)."""
+        ack, d = self._c().exchange_built(lock, lambda n: F.build_welcome8_query(lock, n))
+        w = F.parse_welcome8(d) if d else None
+        if not w or w["status"] != "00" or any("enabled" not in s for s in w["segments"]):
+            raise LocklyError("The lock didn't send its Welcome Mode schedule: "
+                              + F.check_reply(ack, lock)[1])
+        return [{k: s[k] for k in self._SLOT_KEYS} for s in w["segments"]]
+
+    @staticmethod
+    def _slot_key(s: dict) -> list[int]:
+        return [s["week"], *s["begin"], *s["end"]]
+
+    def keep_unlocked(self, lock_id: str, minutes: int) -> dict:
+        """Keep a door unlocked from now for ``minutes`` with one-time Welcome
+        Mode slots that the lock runs and then switches off by itself (8-slot
+        locks). The door's other slots are written back unchanged. Wakes it."""
+        lock = self._lock(lock_id)
+        if F.welcome_form(lock) != F.WELCOME_9B:
+            raise ValueError("Keeping a door unlocked for a while needs an 8-slot lock (Visage or Vision).")
+        if F.remote_route(lock) == "bluetooth":
+            raise ValueError("This door has no hub, so it can only be changed over Bluetooth.")
+        start = datetime.now(lock_tz(lock))
+        new = F.plan_keep_unlocked(start, int(minutes))
+        cfg = config.load_config()
+        mine = ((cfg.get("keep_unlocked") or {}).get(lock["ID"]) or {}).get("slots") or []
+        # One-time slots this app added earlier, which the lock has run and
+        # switched off, only take up room. Anything else is left alone.
+        table = [s for s in self._welcome8_table(lock)
+                 if s["enabled"] or self._slot_key(s) not in mine]
+        if len(table) + len(new) > 8:
+            raise LocklyError("All 8 Welcome Mode slots on this door are in use; "
+                              "clear some in the Schedules tab first.")
+        ok, detail = self._c().send_built(lock, lambda n: F.build_welcome8_set(lock, n, table + new))
+        if not ok:
+            raise LocklyError(detail)
+        eh, em = new[-1]["end"]
+        until = (start + timedelta(days=len(new) - 1)).replace(hour=eh, minute=em, second=0, microsecond=0)
+        cfg.setdefault("keep_unlocked", {})[lock["ID"]] = {
+            "until": int(until.timestamp()), "slots": [self._slot_key(s) for s in new]}
+        config.save_config(cfg)
+        return {"ok": True, "until": _keep_until(cfg, lock), "detail": detail,
+                "lock": self._view(lock, cfg)}
+
+    def end_keep_unlocked(self, lock_id: str) -> dict:
+        """End a keep-unlocked window early: take its slots off the lock, then
+        lock the door."""
+        lock = self._lock(lock_id)
+        cfg = config.load_config()
+        rec = (cfg.get("keep_unlocked") or {}).get(lock["ID"])
+        if rec:
+            table = [s for s in self._welcome8_table(lock) if self._slot_key(s) not in rec["slots"]]
+            ok, detail = self._c().send_built(lock, lambda n: F.build_welcome8_set(lock, n, table))
+            if not ok:
+                raise LocklyError(detail)
+            cfg["keep_unlocked"].pop(lock["ID"], None)
+            config.save_config(cfg)
+        ok, detail = self._c().lock(lock)
+        if ok:
+            self._note_state(lock, locked=True)
+        return {"ok": ok, "detail": detail, "lock": self._view(lock, cfg)}
+
     # ── experimental: Welcome Mode, Rain Mode ────────────────────────────
 
     def _experimental(self, lock: dict, build, needs_nonce: bool, send: bool) -> dict:
@@ -591,6 +679,36 @@ class Api:
     def welcome_state(self, lock_id: str, form: str | None) -> dict:
         """Read the Welcome Mode schedule from the lock (read-only; wakes it)."""
         return self.welcome(lock_id, form, "query", [], "", "", True)
+
+    # ── firmware ─────────────────────────────────────────────────────────
+
+    _PART_NAMES = {"main": "Lock firmware", "front": "Front board", "back": "Back board",
+                   "wifi": "Wi-Fi module", "ble": "Bluetooth chip", "screen": "Screen",
+                   "camera": "Camera", "gateway": "Camera gateway"}
+
+    def firmware(self, lock_id: str) -> dict:
+        """Newer firmware Lockly offers for this lock, next to what the lock
+        reports running. Asks the lock for its versions, so it wakes (beeps)."""
+        lock = self._lock(lock_id)
+        c = self._c()
+        st = c.query_status(lock) or {}
+        offer = c.firmware_offer(lock, st.get("lock_type"))
+        # The lock's own version per part, where the app's chain from the
+        # status reply to the part is traced (back, Wi-Fi, Bluetooth). The
+        # front board's source isn't, so it's left blank rather than guessed.
+        on_lock = {"back": st.get("sub_version"), "wifi": st.get("wifi_version"),
+                   "ble": st.get("ble_version"),
+                   "main": st.get("firmware_version") or str(lock.get("fwv") or "")}
+        multi = offer["kind"] == F.FW_MULTI_PART
+        parts = [{"name": self._PART_NAMES.get(p["part"], p["part"]), "offered": p["version"],
+                  "current": on_lock.get(p["part"]) or "",
+                  "newer": F.version_lower(on_lock.get(p["part"]), p["version"]),
+                  "sizeKb": p["size_kb"],
+                  "byPhone": not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock))}
+                 for p in offer["parts"]]
+        return {"kind": offer["kind"], "release": offer["release"], "title": offer["title"],
+                "notes": offer["notes"], "parts": parts, "lockFirmware": on_lock["main"],
+                "answered": bool(st), "lock": self._view(lock)}
 
     # ── connection test ──────────────────────────────────────────────────
 

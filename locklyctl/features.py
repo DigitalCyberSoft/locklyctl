@@ -93,6 +93,40 @@ def build_welcome8_set(lock: dict, nonce: str, schedules: list[dict],
     return P._aes_wrap(raw, key)
 
 
+# ── Keep unlocked for a while (one-time 0x9B slots) ──────────────────────────
+# Seen on a Visage (11D, 2026-11-12): a one-time slot (week 0x80) with auto entry
+# whose window contains the current time opens the door within ~20 s, locks it
+# again at the end, and the lock then switches that slot off by itself, so it
+# never repeats. One-time slots carry no date, and the lock drops weekday bits
+# from them (0x90 was stored and run as 0x80), so a window past midnight needs
+# a second one-time slot for tomorrow's part; that one must not contain the
+# current time, or it would run straight away instead of tomorrow.
+SYNC_AUTO_ENTRY = 1          # WelcomeModeRequest.AUTO_ENTRY_WELCOME_MODE: unlocks by itself
+SYNC_FIRST_ENTRY = 0         # MANUAL_ENTRY: stays locked until someone opens it once
+KEEP_UNLOCKED_PAST_MIDNIGHT = False   # on once a slot for 00:00 is seen to run the next day
+
+
+def plan_keep_unlocked(start, minutes: int) -> list[dict]:
+    """The one-time slots that keep a door unlocked from ``start`` (a datetime in
+    the lock's time zone; seconds are dropped) for ``minutes``."""
+    if not 1 <= minutes < 24 * 60:
+        raise ValueError("Choose between 1 minute and 23 hours 59 minutes.")
+    begin = start.replace(second=0, microsecond=0)
+    end = begin + _td(minutes=minutes)
+    if end.date() != begin.date() and (end.hour, end.minute) == (0, 0):
+        end -= _td(minutes=1)                   # "until midnight" is until 23:59
+    slot = lambda b, e: {"week": WEEK_ONCE, "begin": b, "end": e, "enabled": True,
+                         "sync": SYNC_AUTO_ENTRY}
+    if end.date() == begin.date():
+        return [slot((begin.hour, begin.minute), (end.hour, end.minute))]
+    if not KEEP_UNLOCKED_PAST_MIDNIGHT:
+        raise ValueError(f"The lock can only do this until 23:59 tonight (its time is "
+                         f"{begin:%H:%M}).")
+    if (end.hour, end.minute) >= (begin.hour, begin.minute):   # would run today instead
+        raise ValueError("Past midnight, the most is just under 24 hours.")
+    return [slot((begin.hour, begin.minute), (23, 59)), slot((0, 0), (end.hour, end.minute))]
+
+
 def build_welcome8_query(lock: dict, nonce: str) -> str:
     enc_mc, mc_len, key = _enc(lock)
     raw = P._assemble_fields("9B", mc_len, enc_mc, _WM_FLAG_QUERY, _WM_MODE_CUSTOM,
@@ -550,6 +584,50 @@ def remote_route(lock: dict) -> str:
     if str(lock.get("mod") or "").upper() in WIFI_MODELS:
         return "wifi"
     return "bluetooth"
+
+
+# ── firmware: which check the app uses (FirmwareUpgradeCheckerRepositoryImpl.b,
+# app 3.3.4). Multi-part Wi-Fi locks ask fwver/msh/new and update over MQTT;
+# camera locks ask fwver/new; the rest ask lockly/syspara and are updated by
+# the phone over Bluetooth. PGD238T joins the multi-part list from firmware
+# 1.01.01; it's left out rather than guessed.
+FW_MULTI_PART = "multi"
+FW_CAMERA = "camera"
+FW_SINGLE = "single"
+_MULTI_PART_MODELS = {"PGK7SWH", "PGK7SWHK", "PGK728WHK", "PGK728WRHK", "PGD728FN25", "PGK6SWH",
+                      "PGD679LEW", "PGK628WH", "PGD628FG25", "PGK728WKL", "PGD728FG25", "PGI301",
+                      "PGD7AWG25", "PGD7YWG25"}
+_CAMERA_MODELS = {"PGK798HK"}            # isCameraLock: only the model checked live
+# isSupportSuotaUpgrade: the Bluetooth chip is flashed by the phone, not over MQTT
+_SUOTA_MODELS = {"PGK728WHK", "PGK728WRHK", "PGK7SWHK"}
+# Lock types the multi-part check sends as "model" when no live status is at
+# hand (seen live: a PGK728WRHK reports 105).
+_KNOWN_LOCK_TYPES = {"PGK728WRHK": 105}
+
+
+def firmware_check_kind(lock: dict) -> str:
+    model = str(lock.get("mod") or "").upper()
+    if model in _MULTI_PART_MODELS:
+        return FW_MULTI_PART
+    return FW_CAMERA if model in _CAMERA_MODELS else FW_SINGLE
+
+
+def bluetooth_chip_needs_phone(lock: dict) -> bool:
+    return str(lock.get("mod") or "").upper() in _SUOTA_MODELS
+
+
+def version_lower(current: str | None, offered: str | None) -> bool:
+    """HexUtils.o (app 3.3.4): True when both are set, the same length, and
+    ``current`` is lower at the first dot-separated field that differs."""
+    if not current or not offered or len(current) != len(offered):
+        return False
+    cur, new = current.split("."), offered.split(".")
+    if not all(p.isdigit() for p in cur + new):
+        return False
+    for a, b in zip(cur, new):
+        if int(a) != int(b):
+            return int(a) < int(b)
+    return False
 
 
 def is_access_user_lock(lock: dict) -> bool:

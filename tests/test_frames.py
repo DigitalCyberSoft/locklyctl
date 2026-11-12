@@ -128,6 +128,64 @@ def test_welcome8_per_slot_bits():
     assert F.describe_week(F.WEEK_ONCE | 0x04) == "once (Wed)"
 
 
+def test_firmware_offer_shapes():
+    """fwver/msh/new, lockly/syspara and a 920 answer, shaped as Lockly sent
+    them on 2026-11-12 (versions and file names made up)."""
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.des3_key = bytes(range(24))           # any non-degenerate 3DES key
+    replies = {
+        "fwver/msh/new": {"cod": "200", "verNum": "1.14.40", "title": "New Firmware",
+                          "content": "Changes:<br><br>1. Fixed <b>bugs</b>",
+                          "frontVer": "1.00.99", "frontUrl": "u", "frontName": "f.bin", "frontSize": "87",
+                          "backVer": "1.00.80", "backUrl": "u", "backName": "b.bin", "backSize": "35",
+                          "hubVer": "2.02.80", "hubUrl": "u", "hubName": "h.img", "hubSize": "1180",
+                          "bleVer": "1.14.30", "bleUrl": "u", "bleName": "l.img", "bleSize": "280",
+                          "screenVer": "", "screenUrl": "", "screenName": "", "screenSize": None},
+        "lockly/syspara": {"cod": "200", "para": "firmware_ver", "value": "2.02.80", "notify": "N"},
+        "fwver/new": {"cod": "920", "msg": "920"},
+    }
+    sent = {}
+    c._post = lambda ep, body, **kw: sent.setdefault(ep, body) and replies[ep]
+    o = c.firmware_offer({"ID": UUID, "mod": "PGK728WRHK"})
+    assert o["release"] == "1.14.40" and o["notes"] == "Changes:\n1. Fixed bugs"
+    assert [(p["part"], p["version"], p["size_kb"]) for p in o["parts"]] == [
+        ("front", "1.00.99", 87), ("back", "1.00.80", 35), ("wifi", "2.02.80", 1180), ("ble", "1.14.30", 280)]
+    assert sent["fwver/msh/new"]["mod"] == "PGK728WRHK" and "para" in sent["fwver/msh/new"]
+    o = c.firmware_offer({"ID": UUID, "mod": "PGD7Y"})
+    assert o["kind"] == F.FW_SINGLE and o["parts"] == [{"part": "main", "version": "2.02.80", "size_kb": None}]
+    assert sent["lockly/syspara"]["para"] == "firmware_ver" and sent["lockly/syspara"]["did"] == UUID
+    assert c.firmware_offer({"ID": UUID, "mod": "PGK798HK"})["release"] is None       # 920: nothing newer
+    assert F.version_lower("1.00.72", "1.00.76") and not F.version_lower("1.14.24", "1.00.95")
+    assert not F.version_lower("3.2.02.02", "2.02.72")                               # lengths differ
+
+
+def test_plan_keep_unlocked():
+    from datetime import datetime
+    at = lambda h, m: datetime(2026, 11, 12, h, m, 30)
+    slot = lambda b, e: {"week": 0x80, "begin": b, "end": e, "enabled": True, "sync": F.SYNC_AUTO_ENTRY}
+    assert F.plan_keep_unlocked(at(14, 5), 60) == [slot((14, 5), (15, 5))]
+    assert F.plan_keep_unlocked(at(23, 0), 60) == [slot((23, 0), (23, 59))]       # until midnight
+    for bad in ((at(20, 0), 600), (at(14, 0), 0), (at(14, 0), 24 * 60)):
+        try:
+            F.plan_keep_unlocked(*bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+    old, F.KEEP_UNLOCKED_PAST_MIDNIGHT = F.KEEP_UNLOCKED_PAST_MIDNIGHT, True
+    try:
+        assert F.plan_keep_unlocked(at(20, 0), 600) == [slot((20, 0), (23, 59)), slot((0, 0), (6, 0))]
+        assert F.plan_keep_unlocked(at(20, 0), 1439)[-1]["end"] == (19, 59)
+    finally:
+        F.KEEP_UNLOCKED_PAST_MIDNIGHT = old
+
+
+def test_format_version():
+    assert P.format_version("00241401") == "1.14.24"      # BCD, bytes 3.2.1
+    assert P.format_version("00950001") == "1.00.95"
+    assert P.format_version("00720202") == "2.02.72"
+
+
 def test_status_retries_only_fast_failures():
     """A lock the broker calls offline (3005) or a hub relay timeout (942) is
     asked again, twice at most; a 20 s timeout or a refused hub (930) is not."""

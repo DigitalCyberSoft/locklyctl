@@ -232,6 +232,18 @@ h1, h2, p { margin: 0; }
 .btn-hold.holding .hold-fill { transition: transform 900ms linear; transform: scaleX(1); }
 .btn-hold.done .hold-fill { transform: scaleX(1); }
 
+/* keep unlocked for a while */
+.keep { margin-top: 1.25rem; display: grid; gap: 0.45rem; }
+.keep-title { font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft); }
+.keep-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.keep-chips .btn { padding: 0.45rem 0.8rem; }
+.keep-custom { display: inline-flex; gap: 0.35rem; align-items: center; font-size: var(--fs-sm); }
+.keep-hours {
+  width: 4.2rem; font: inherit; padding: 0.4rem 0.5rem; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+}
+#keep-note .btn { padding: 0.3rem 0.6rem; font-size: var(--fs-xs); margin-left: 0.25rem; }
+
 /* ── tabs & panels ────────────────────────────────────────────────── */
 .tabs { display: flex; gap: 1.5rem; margin-top: 2.25rem; border-bottom: 1px solid var(--rule); }
 .tabs [role="tab"] {
@@ -272,6 +284,9 @@ legend { font-size: var(--fs-sm); color: var(--ink-soft); margin-bottom: 0.35rem
   font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; max-width: 62ch;
 }
 .diag { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; font-size: var(--fs-sm); margin-top: 1rem; }
+.fw-table th { text-align: left; font-weight: 600; color: var(--ink-soft); padding: 0 0.75rem 0.4rem 0; border-bottom: 1px solid var(--rule); }
+.fw-table td:first-child { color: var(--ink); white-space: normal; }
+.fw-notes { white-space: pre-line; }
 .diag dt { color: var(--ink-soft); }
 .diag dd { margin: 0; }
 .ok { color: var(--locked); }

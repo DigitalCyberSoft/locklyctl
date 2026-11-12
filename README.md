@@ -35,14 +35,16 @@ way the official app does.
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
-| Access log (last 7 days) | ✅ |
+| Access log (last 7 days), in the Lockly app's own words | ✅ from Lockly's cloud, which only holds what a phone uploaded: often empty. Reading the lock's own log isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
 | Visage/Vision: add a person with a PIN (always, set hours, or between dates), change PIN, remove from a door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted |
 | Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |
 | Guest PIN codes: add, list, delete | ✅ on Visage/Vision written to the lock; PGD7Y unverified |
-| Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore) |
+| Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore). Set writes "first entry" slots: the door stays locked until someone opens it once |
+| Keep a Visage/Vision unlocked for a while (one-time `0x9B` slot that unlocks by itself) | ✅ tested on a Visage: opened within ~20 s, relocked at the end, and the lock switched the slot off. Until 23:59 lock time |
 | Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
+| Firmware: what Lockly offers, part by part, next to what the lock runs | ✅ checked against Lockly for a Visage, a PGD7Y, a Vision and PGH200 hubs. Installing isn't built: use the Lockly app |
 | Slot locks (e.g. PGD7Y): PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; not yet working on a lock |
 | Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 
@@ -56,7 +58,11 @@ Every door is a plate showing its state. Select one to lock it, *hold to
 unlock* (press and hold until the button fills, so a stray click can't open a
 door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
 test. Star a door to pin it to **Favorites** at the top of the list, where
-Lock and Unlock are a single tap each, without the hold. The **People** view
+Lock and Unlock are a single tap each, without the hold. **Keep unlocked for**
+1 to 12 hours (Visage, Vision) sets a one-time Welcome Mode window that the
+lock runs and ends by itself. Doors that didn't answer can be asked again
+with **Retry asleep**. The **Device** tab tests the connection and checks
+for newer firmware. The **People** view
 shows everyone who can get in, across every door, and lets you give, change
 and take away access.
 
@@ -107,14 +113,14 @@ For Claude Desktop, add this to `claude_desktop_config.json`:
 ```
 
 By default it can only look and lock: `list_doors`, `check_door`,
-`door_activity`, `list_people`, `read_door_modes` and `lock_door`. Two flags add
+`door_activity`, `list_people`, `read_door_modes`, `check_firmware` and `lock_door`. Two flags add
 more:
 
 | Flag | Adds |
 |---|---|
-| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `turn_off_welcome_mode`, `set_rain_mode` |
+| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `turn_off_welcome_mode`, `end_keep_unlocked`, `set_rain_mode` |
 | `--allow-unlock` | `unlock_door` |
-| both | `set_welcome_mode`, since a Welcome Mode schedule keeps a door unlocked |
+| both | `set_welcome_mode` and `keep_unlocked_for`, since both keep a door unlocked |
 
 Tools a flag doesn't allow aren't offered at all, so the assistant never sees
 them. Existing PINs are never returned; a PIN the server creates is returned

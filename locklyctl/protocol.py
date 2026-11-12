@@ -662,10 +662,25 @@ def parse_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
             result["ble_nonce"] = d[38:54].upper()
         if len(d) >= 62:
             result["ble_module_version"] = d[54:62]
+        # Version fields as QueryLockStatusCmd (app 3.3.4) reads them: the main
+        # firmware first, then on newer locks the second board, Wi-Fi module and
+        # Bluetooth chip, each only when the reply is long enough to hold it.
+        for key, start in (("firmware_version", 0), ("sub_version", 136),
+                           ("wifi_version", 152), ("ble_version", 172)):
+            if len(d) >= start + 8:
+                result[key] = format_version(d[start:start + 8])
         return result
     except Exception:
         _LOGGER.exception("Failed to parse ACK: %s", ack_hex[:60])
         return {}
+
+
+def format_version(field: str) -> str:
+    """A 4-byte version field the way the app shows it (setVersionName and
+    friends): bytes 3, 2, 1 as hex, the last two zero-padded. The bytes are
+    BCD, so 00241401 reads 1.14.24."""
+    b = bytes.fromhex(field)
+    return f"{b[3]:x}.{b[2]:02x}.{b[1]:02x}"
 
 def parse_cached_status(sts: int) -> dict[str, Any]:
     """Parse the `sts` integer from lock/cachedstatus/get response."""

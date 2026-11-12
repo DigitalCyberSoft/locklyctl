@@ -42,6 +42,20 @@ _LOGGER = logging.getLogger(__name__)
 _CERT_DIR = Path(__file__).parent / "certs"
 
 
+def _plain(html_text: str) -> str:
+    """Lockly's release notes are HTML fragments; keep the words, one line per <br>."""
+    import html
+    import re
+    text = re.sub(r"(?i)<br\s*/?>", "\n", html_text)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _int_or_none(value) -> int | None:
+    text = str(value).strip() if value is not None else ""
+    return int(text) if text.isdigit() else None
+
+
 class LocklyError(Exception):
     """A REST/transport error carrying the Lockly ``cod`` where known."""
 
@@ -513,6 +527,57 @@ class LocklyClient:
             return False, f"no response (last cod={self.last_cod})"
         ok, detail = P._ack_reports_success(ack, mc, uuid_)
         return ok, detail
+
+    # -- firmware: what Lockly offers (cloud only; no lock is woken) -----------
+    # Request shapes as app 3.3.4 sends them; all three were answered live on
+    # 2026-11-12 (a Visage, a PGD7Y and a Vision).
+
+    _FW_PARTS = (("front", "front"), ("back", "back"), ("hub", "wifi"), ("ble", "ble"),
+                 ("screen", "screen"))
+
+    def firmware_offer(self, lock: dict, lock_type: int | None = None) -> dict:
+        """Lockly's newest firmware for this lock: {"kind", "release", "parts":
+        [{"part", "version", "size_kb"}], "title", "notes"}; release is None
+        when Lockly has nothing newer (cod 920)."""
+        kind = F.firmware_check_kind(lock)
+        model = str(lock.get("mod") or "")
+        out = {"kind": kind, "release": None, "parts": [], "title": "", "notes": ""}
+        if kind == F.FW_SINGLE:
+            body = self._post("lockly/syspara", {**COMMON_BODY, "para": "firmware_ver", "mod": model,
+                                                 "ref": self.email, "did": lock["ID"]})
+        else:
+            if kind == F.FW_MULTI_PART:
+                endpoint, req = "fwver/msh/new", {"acct": self.email, "did": lock["ID"],
+                                                  "model": int(lock_type or F._KNOWN_LOCK_TYPES.get(model.upper(), 0))}
+            else:
+                endpoint, req = "fwver/new", {"acct": self.email, "dv": lock["ID"]}
+            assert self.des3_key is not None, "des3 key not available — call load_devices() first"
+            para = P.des3_encrypt(self.des3_key, json.dumps(req, separators=(",", ":")))
+            body = self._post(endpoint, {**COMMON_BODY, "mod": model, "para": para})
+        cod = str(body.get("cod"))
+        if cod == "920":
+            return out
+        if cod != "200":
+            raise LocklyError(f"firmware check failed: {P.describe_cod(cod)}", cod)
+        out["title"] = body.get("title") or ""
+        out["notes"] = _plain(body.get("content") or "")
+        if kind == F.FW_MULTI_PART:
+            out["release"] = body.get("verNum") or None
+            for prefix, part in self._FW_PARTS:
+                ver, url, name, size = (body.get(prefix + k) for k in ("Ver", "Url", "Name", "Size"))
+                if ver and url and name and size is not None:      # FirmwareUpgradeCheckerResponse
+                    out["parts"].append({"part": part, "version": ver, "size_kb": _int_or_none(size)})
+        elif kind == F.FW_SINGLE:
+            out["release"] = body.get("value") or None
+            if out["release"]:
+                out["parts"].append({"part": "main", "version": out["release"], "size_kb": None})
+        else:
+            out["release"] = body.get("ver") or None
+            for key, part in (("ver", "main"), ("lkmver", "front"), ("lksver", "back"),
+                              ("camver", "camera"), ("gwver", "gateway")):
+                if body.get(key):
+                    out["parts"].append({"part": part, "version": body[key], "size_kb": None})
+        return out
 
     # -- high-level: access log ------------------------------------------------
 

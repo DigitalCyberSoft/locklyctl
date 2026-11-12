@@ -254,7 +254,7 @@ $("retry-asleep").addEventListener("click", async (ev) => {
 // ── favorites: one tap to lock or unlock, without opening the door ─────
 
 const pending = new Map();    // lock id → "lock" | "unlock" | "check" while it's out
-const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…" };
+const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…", keep: "Setting it to stay unlocked…" };
 
 function renderFavs() {
   const favs = locks.filter((v) => v.favorite);
@@ -357,6 +357,69 @@ function renderDoor() {
   if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}` : `Checked ${since}`));
   if (v.firmware) facts.push(h("li", {}, `Firmware ${v.firmware}`));
   $("d-facts").replaceChildren(...facts);
+  renderKeep(v);
+}
+
+// ── keep unlocked for a while: one-time Welcome Mode slots the lock runs ─
+
+const KEEP_PRESETS = [[60, "1 h"], [120, "2 h"], [240, "4 h"], [480, "8 h"], [720, "12 h"]];
+const hoursText = (min) => `${min / 60} ${min === 60 ? "hour" : "hours"}`;
+
+function renderKeep(v) {
+  const box = $("keep");
+  box.hidden = v.welcomeForm !== "9B" || v.route === "bluetooth";
+  if (box.hidden) return;
+  const off = pending.has(v.id);
+  const tooLate = "That would run past midnight at the lock, which it can't do.";
+  const chips = KEEP_PRESETS.map(([min, label]) => h("button", {
+    class: "btn btn-quiet", type: "button", disabled: off || min > v.keepMaxMinutes,
+    title: min > v.keepMaxMinutes ? tooLate : null, onclick: () => keepUnlocked(v, min),
+  }, label));
+  const hours = h("input", { class: "keep-hours", type: "number", min: "1", max: "23", step: "1", value: "3",
+    inputmode: "numeric", "aria-label": "Hours to keep it unlocked" });
+  const custom = h("span", { class: "keep-custom" }, hours, h("span", {}, "h"),
+    h("button", { class: "btn btn-quiet", type: "button", disabled: off, onclick: () => {
+      const n = Number(hours.value);
+      if (!Number.isInteger(n) || n < 1 || n > 23) { toast("Choose 1 to 23 hours.", true); return; }
+      if (n * 60 > v.keepMaxMinutes) { toast(tooLate, true); return; }
+      keepUnlocked(v, n * 60);
+    } }, "Keep unlocked"));
+  $("keep-chips").replaceChildren(...chips, custom);
+  $("keep-note").replaceChildren(...(v.keepUnlockedUntil
+    ? [`Kept unlocked until ${v.keepUnlockedUntil}, lock time. `,
+       h("button", { class: "btn btn-quiet", type: "button", disabled: off, onclick: () => endKeep(v) },
+         "End now and lock")]
+    : ["The lock runs it itself, so it works with this app closed. "
+       + "The door's other Welcome Mode schedules stay as they are."]));
+}
+
+async function keepUnlocked(v, minutes) {
+  const ok = await confirmDialog(`Keep ${doorLabel(v)} unlocked for ${hoursText(minutes)}?`,
+    "It opens within about 20 seconds and locks again by itself when the time is up, even with this app closed.",
+    "Keep unlocked");
+  if (!ok || pending.has(v.id)) return;
+  pending.set(v.id, "keep");
+  refreshControls(v.id);
+  toast(`Setting ${doorLabel(v)} to stay unlocked…`);
+  try {
+    const r = await call("keep_unlocked", v.id, minutes);
+    updateLock(r.lock);
+    toast(`${doorLabel(v)} stays unlocked until ${r.until}.`);
+  } catch (e) { toast(e.message, true); }
+  finally { pending.delete(v.id); refreshControls(v.id); }
+}
+
+async function endKeep(v) {
+  if (pending.has(v.id)) return;
+  pending.set(v.id, "lock");
+  refreshControls(v.id);
+  toast(`Ending it and locking ${doorLabel(v)}…`);
+  try {
+    const r = await call("end_keep_unlocked", v.id);
+    updateLock(r.lock);
+    toast(r.ok ? `${doorLabel(v)} locked.` : `${doorLabel(v)} didn't lock: ${r.detail}`, !r.ok);
+  } catch (e) { toast(e.message, true); }
+  finally { pending.delete(v.id); refreshControls(v.id); }
 }
 
 $("btn-lock").addEventListener("click", () => { const v = current(); if (v) runCommand(v, "lock"); });
@@ -450,7 +513,7 @@ function loadTab(name) {
   if (name === "activity") loadActivity();
   else if (name === "guests") loadGuests();
   else if (name === "schedules") setupSchedules();
-  else if (name === "connection") $("diag-out").replaceChildren();
+  else if (name === "connection") { $("diag-out").replaceChildren(); $("fw-out").replaceChildren(); }
 }
 
 async function loadActivity() {
@@ -673,6 +736,39 @@ $("btn-diagnose").addEventListener("click", async (ev) => {
         r.hub && h("dd", {}, yes(r.cachedOk, "Answering", "Not available (older hub firmware, or hub offline)")),
         h("dt", {}, "Commands"), h("dd", {}, yes(r.liveOk, "Reach the lock", "Don't reach the lock")),
         h("dt", {}, "Route tried"), h("dd", {}, r.trail)));
+    } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  });
+});
+
+// ── firmware ───────────────────────────────────────────────────────────
+
+$("btn-firmware").addEventListener("click", async (ev) => {
+  const v = current();
+  const out = $("fw-out");
+  out.replaceChildren(h("p", { class: "muted" }, "Asking Lockly, and the lock for its versions…"));
+  await busy(ev.currentTarget, async () => {
+    try {
+      const r = await call("firmware", v.id);
+      if (r.lock.id === currentId) updateLock(r.lock);
+      if (!r.release) {
+        out.replaceChildren(h("p", { class: "ok" },
+          "Up to date" + (r.lockFirmware ? `: firmware ${r.lockFirmware}.` : ".")));
+        return;
+      }
+      const rows = r.parts.map((p) => h("tr", {},
+        h("td", {}, p.name),
+        h("td", {}, p.current || h("span", { class: "muted" }, "not reported")),
+        h("td", { class: p.newer ? "bad" : "" }, p.offered, p.newer ? " (newer)" : ""),
+        h("td", { class: "muted" }, p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
+      out.replaceChildren(
+        h("p", {}, `Lockly offers ${r.kind === "multi" ? "release " : "firmware "}${r.release}`
+          + (r.answered ? "." : ". The lock didn't answer, so its own versions are missing.")),
+        h("table", { class: "log fw-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Part"), h("th", {}, "On the lock"), h("th", {}, "Newest"),
+            h("th", {}, "Installed by"))),
+          h("tbody", {}, rows)),
+        r.notes && h("p", { class: "fine fw-notes" }, r.notes),
+        h("p", { class: "fine" }, "Installing from locklyctl isn't built yet. For now, install with the Lockly app."));
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });

@@ -95,11 +95,17 @@
           </div>
           <p class="fine" id="hold-hint">Press and hold Unlock<span class="kbd-only"> (or hold Space)</span> until it fills. Check now wakes the lock, so it beeps.</p>
 
+          <section class="keep" id="keep" aria-labelledby="keep-title" hidden>
+            <h2 class="keep-title" id="keep-title">Keep unlocked for</h2>
+            <div class="keep-chips" id="keep-chips"></div>
+            <p class="fine" id="keep-note"></p>
+          </section>
+
           <div class="tabs" role="tablist" aria-label="Door details">
             <button role="tab" id="tab-activity" aria-controls="panel-activity" aria-selected="true">Activity</button>
             <button role="tab" id="tab-guests" aria-controls="panel-guests" aria-selected="false" tabindex="-1">Guest PINs</button>
             <button role="tab" id="tab-schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1">Schedules</button>
-            <button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="false" tabindex="-1">Connection</button>
+            <button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="false" tabindex="-1">Device</button>
           </div>
 
           <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" class="panel"></div>
@@ -178,9 +184,14 @@
           </div>
 
           <div role="tabpanel" id="panel-connection" aria-labelledby="tab-connection" class="panel" hidden>
+            <h2>Connection</h2>
             <p class="muted">Finds out which route reaches this lock: the hub relay, or Lockly's device channel. It wakes the lock.</p>
-            <button class="btn btn-ink" id="btn-diagnose" type="button">Test connection</button>
+            <div><button class="btn btn-ink" id="btn-diagnose" type="button">Test connection</button></div>
             <div id="diag-out"></div>
+            <h2>Firmware</h2>
+            <p class="muted">Asks Lockly for newer firmware and the lock for what it runs. It wakes the lock.</p>
+            <div><button class="btn btn-ink" id="btn-firmware" type="button">Check for updates</button></div>
+            <div id="fw-out"></div>
           </div>
         </div>
       </section>

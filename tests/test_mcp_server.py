@@ -57,14 +57,16 @@ def _call(server, tool, **args):
 
 
 def test_tools_offered_by_flag(home):
-    reads = {"list_doors", "check_door", "door_activity", "list_people", "read_door_modes", "lock_door"}
-    writes = {"grant_access", "change_pin", "revoke_access", "turn_off_welcome_mode", "set_rain_mode"}
+    reads = {"list_doors", "check_door", "door_activity", "list_people", "read_door_modes", "lock_door",
+             "check_firmware"}
+    writes = {"grant_access", "change_pin", "revoke_access", "turn_off_welcome_mode", "set_rain_mode",
+              "end_keep_unlocked"}
     assert _names(_server()[1]) == reads
     assert _names(_server(allow_unlock=True)[1]) == reads | {"unlock_door"}
     assert _names(_server(allow_writes=True)[1]) == reads | writes
     # a schedule that keeps a door unlocked is an unlock: it needs both flags
     assert _names(_server(allow_writes=True, allow_unlock=True)[1]) == (
-        reads | writes | {"unlock_door", "set_welcome_mode"})
+        reads | writes | {"unlock_door", "set_welcome_mode", "keep_unlocked_for"})
 
 
 def test_doors_and_lookup(home):

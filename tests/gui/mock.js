@@ -9,7 +9,8 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   id, name, unit, rest, model, hub, state, battery, lowBattery: battery != null && battery < 20,
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
-  route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", favorite: false, ...extra,
+  route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", favorite: false,
+  keepUnlockedUntil: null, keepMaxMinutes: 540, ...extra,
 });
 
 const locks = [
@@ -17,7 +18,7 @@ const locks = [
   mk("3200", "3 Server", "3", "Server", "PGD7Y", "PGH200U00000002T", "locked", 64),
   mk("3900", "4C", "4C", "", "PGD7Y", "", "unknown", null),
   mk("4c00", "3B Patio", "3B", "Patio", "PGD7Y", "", "asleep", null),
-  mk("2d32", "3A", "3A", "", "PGK728WRHK", "", "unlocked", 47),
+  mk("2d32", "3A", "3A", "", "PGK728WRHK", "", "unlocked", 47, { keepUnlockedUntil: "18:30" }),
   mk("4300", "2C Spare", "2C", "Spare", "PGK728WRHK", "", "unknown", null),
   mk("1e00", "3C Vision", "3C", "Vision", "PGK798HK", "", "locked", 91),
   mk("2d3e", "2A Front", "2A", "Front", "PGK728WRHK", "", "locked", 18, { favorite: true }),
@@ -41,6 +42,13 @@ window.pywebview = {
     async check_doors(ids) { await wait(900); return ids.map((id) => Object.assign(find(id), { state: "locked", checkedAt: Date.now() / 1000 })).map((l) => ({ ...l })); },
     async lock(id) { await wait(700); Object.assign(find(id), { state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async unlock(id) { await wait(700); Object.assign(find(id), { state: "unlocked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
+    async keep_unlocked(id, minutes) { await wait(500); const until = new Date(Date.now() + minutes * 60000).toTimeString().slice(0, 5); Object.assign(find(id), { keepUnlockedUntil: until, state: "unlocked" }); return { ok: true, until, detail: "", lock: { ...find(id) } }; },
+    async end_keep_unlocked(id) { await wait(500); Object.assign(find(id), { keepUnlockedUntil: null, state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
+    async firmware(id) { await wait(500); return { kind: "multi", release: "1.14.34", title: "New firmware", notes: "Changes in release 1.14.34:\n1. Fixed bugs", answered: true, lockFirmware: "1.14.24", lock: { ...find(id) }, parts: [
+      { name: "Front board", current: "", offered: "1.00.95", newer: false, sizeKb: 87, byPhone: false },
+      { name: "Back board", current: "1.00.72", offered: "1.00.76", newer: true, sizeKb: 35, byPhone: false },
+      { name: "Wi-Fi module", current: "2.02.72", offered: "2.02.72", newer: false, sizeKb: 1180, byPhone: false },
+      { name: "Bluetooth chip", current: "1.14.24", offered: "1.14.28", newer: true, sizeKb: 280, byPhone: true }] }; },
     async set_favorite(id, on) { await wait(150); Object.assign(find(id), { favorite: !!on }); return { ...find(id) }; },
     async activity() {
       await wait(200);
@@ -95,6 +103,7 @@ setTimeout(() => {
   if (scene === "schedules") { click('.plate[aria-label^="4C,"]'); click("#tab-schedules"); }
   if (scene === "guests") { click('.plate[aria-label^="2A Office"]'); click("#tab-guests"); }
   if (scene === "dark-detail") { click('.plate[aria-label^="3A"]'); }
+  if (scene === "firmware") { click('.plate[aria-label^="2A Front"]'); click("#tab-connection"); setTimeout(() => click("#btn-firmware"), 200); }
   if (scene === "hold") {
     click('.plate[aria-label^="1204"]');
     document.getElementById("btn-unlock").dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true }));

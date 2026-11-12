@@ -192,6 +192,15 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         return {"people": people, "doorsThatFailedToLoad": out["failedDoors"]}
 
     @mcp.tool(annotations=READ)
+    async def check_firmware(door: str) -> dict:
+        """Newer firmware Lockly offers for a door, part by part, next to what
+        the lock reports running. Wakes the lock. Installing isn't offered here."""
+        v = await anyio.to_thread.run_sync(doors.remote, door)
+        r = await run(doors.api.firmware, v["id"])
+        return {"door": v["name"], "release": r["release"], "lockFirmware": r["lockFirmware"],
+                "parts": r["parts"], "notes": r["notes"]}
+
+    @mcp.tool(annotations=READ)
     async def read_door_modes(door: str) -> dict:
         """Read Welcome Mode (auto-unlock schedule) and Rain Mode from the lock
         itself. Wakes the lock."""
@@ -270,6 +279,13 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
 
     @mcp.tool(annotations=WRITE)
+    async def end_keep_unlocked(door: str) -> dict:
+        """End a keep-unlocked window early and lock the door."""
+        v = await anyio.to_thread.run_sync(doors.remote, door)
+        r = await run(doors.api.end_keep_unlocked, v["id"])
+        return {"ok": r["ok"], "door": v["name"], "detail": r["detail"]}
+
+    @mcp.tool(annotations=WRITE)
     async def set_rain_mode(door: str, on: bool) -> dict:
         """Rain Mode turns the keypad off so rain can't press keys."""
         v = await anyio.to_thread.run_sync(doors.remote, door)
@@ -291,6 +307,15 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         v = await anyio.to_thread.run_sync(doors.remote, door)
         r = await run(doors.api.welcome, v["id"], None, action, days or [], start or "", end or "", True)
         return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
+
+    @mcp.tool(annotations=RISKY)
+    async def keep_unlocked_for(door: str, hours: float) -> dict:
+        """Keep a Visage/Vision door unlocked from now for some hours; the lock
+        relocks by itself at the end (it can't run past its midnight). Only
+        when the user explicitly asked for this door to stay unlocked."""
+        v = await anyio.to_thread.run_sync(doors.remote, door)
+        r = await run(doors.api.keep_unlocked, v["id"], round(hours * 60))
+        return {"ok": True, "door": v["name"], "until": r["until"], "detail": r["detail"]}
 
     return mcp
 
