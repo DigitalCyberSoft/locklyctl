@@ -175,7 +175,7 @@ def _lock_date(u: dict, tz) -> str:
 
 
 def _favorite_ids(cfg: dict) -> list[str]:
-    """Lock ids pinned as favourites, in the order they were added."""
+    """Lock ids pinned as favorites, in the order they were added."""
     favs = cfg.get("favorites")
     return [f for f in favs if isinstance(f, str)] if isinstance(favs, list) else []
 
@@ -295,6 +295,14 @@ class Api:
         favs = _favorite_ids(config.load_config())
         return [self._view(lk, favs) for lk in c.locks]
 
+    def check_doors(self, lock_ids: list[str]) -> list[dict]:
+        """Live status for some locks, e.g. the ones that seemed asleep. Wakes them."""
+        c = self._c()
+        wanted = [self._lock(i) for i in lock_ids]
+        c.refresh_all_status(wanted)
+        favs = _favorite_ids(config.load_config())
+        return [self._view(lk, favs) for lk in wanted]
+
     def check(self, lock_id: str) -> dict:
         """Live status for one lock (wakes it)."""
         lock = self._lock(lock_id)
@@ -321,10 +329,10 @@ class Api:
         entry = {k: v for k, v in (cache.get(lock["ID"]) or {}).items() if k != "cached"}
         cache[lock["ID"]] = {**entry, "reachable": True, "is_locked": locked, "ts": time.time()}
 
-    # ── favourites: doors pinned to the top for one-tap lock/unlock ──────
+    # ── favorites: doors pinned to the top for one-tap lock/unlock ──────
 
     def set_favorite(self, lock_id: str, on: bool) -> dict:
-        """Pin a door to (or unpin it from) the favourites. Stored only in this
+        """Pin a door to (or unpin it from) the favorites. Stored only in this
         device's config; nothing on the lock or in Lockly's cloud changes."""
         lock = self._lock(lock_id)
         cfg = config.load_config()
@@ -339,7 +347,7 @@ class Api:
         return self._view(lock, favs)
 
     def _warm_up(self, favs: list[str]) -> None:
-        """Connect Lockly's device channel in the background when a favourite
+        """Connect Lockly's device channel in the background when a favorite
         is a Wi-Fi lock, so its first lock/unlock doesn't wait for it."""
         c = self._c()
         if any(F.remote_route(lk) == "wifi" for lk in c.locks if lk["ID"] in favs):
@@ -354,14 +362,11 @@ class Api:
         res = self._c().get_history(lock, since)
         if res is None:
             raise LocklyError("Lockly didn't return the access log.")
-        out = []
-        for ev in reversed(res[0]):
-            code = str(ev.get("openType") or ev.get("type") or "?")
-            raw_t = ev.get("time") or ev.get("eventTime") or ""
-            out.append({"time": _fmt_ms(raw_t) or str(raw_t),
-                        "what": P.describe_open_type(code),
-                        "who": ev.get("name") or ev.get("userName") or ""})
-        return out
+        # getlkhist events are {tm: epoch ms, co: event code, na: name, pid, id, logVer}
+        # (seen live, and the shape protocol.parse_log_ack builds).
+        return [{"time": _fmt_ms(ev.get("tm")) or "", "what": P.describe_open_type(ev.get("co")),
+                 "who": ev.get("na") or ""}
+                for ev in sorted(res[0], key=lambda e: e.get("tm") or 0, reverse=True)]
 
     def guests(self, lock_id: str) -> list[dict]:
         lock = self._lock(lock_id)

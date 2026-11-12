@@ -105,6 +105,48 @@ def test_welcome_form():
     assert F.welcome_form({}) is None
 
 
+def test_welcome8_per_slot_bits():
+    """The sync and toggle bytes after the 8 slots are per-slot bitmasks, slot 0
+    = bit 0 (SyncToggleState.b + Strings.f in app 3.3.4), both ways."""
+    n = "00112233445566778899AABBCCDDEEFF"
+    slots = [{"week": F.WEEK_WEEKDAYS, "begin": (8, 0), "end": (18, 0)},
+             {"week": F.WEEK_ONCE, "begin": (14, 0), "end": (16, 0), "enabled": False},
+             {"week": F.WEEK_DAILY, "begin": (9, 0), "end": (10, 0), "sync": 1}]
+    frame = _check_frame(F.build_welcome8_set(LOCK, n, slots))
+    plain = P.AES.new(P.derive_aes_key(MC, UUID), P.AES.MODE_ECB).decrypt(frame[6:-2]).hex().upper()
+    table = "08" + "1F08001200" + "800E001000" + "7F09000A00" + "00FFFFFFFF" * 5 + "04" + "05"
+    assert "0301" + table + n in plain                    # flag 03 set, mode 01 custom
+    one = _check_frame(F.build_welcome8_set(LOCK, n, slots[:1]))       # the single-slot case
+    plain = P.AES.new(P.derive_aes_key(MC, UUID), P.AES.MODE_ECB).decrypt(one[6:-2]).hex().upper()
+    assert "0301" + "08" + "1F08001200" + "00FFFFFFFF" * 7 + "00" + "01" + n in plain
+    LK = {"mc": MC, "ID": UUID}
+    w = F.parse_welcome8("00" + "04" + "01" + table)
+    assert [(s["enabled"], s["sync"]) for s in w["segments"]] == [(True, 0), (False, 0), (True, 1)]
+    ok, d = F.check_reply(_reply("9B", "00" + "04" + "01" + table), LK)
+    assert ok and d == ("Welcome Mode: Mon–Fri 08:00–18:00 (on); once 14:00–16:00 (off); "
+                        "every day 09:00–10:00 (on)"), d
+    assert F.describe_week(F.WEEK_ONCE | 0x04) == "once (Wed)"
+
+
+def test_status_retries_only_fast_failures():
+    """A lock the broker calls offline (3005) or a hub relay timeout (942) is
+    asked again, twice at most; a 20 s timeout or a refused hub (930) is not."""
+    from locklyctl.transport import LocklyClient
+    for mqtt_code, cod, calls in (("3005", None, 3), (None, "942", 3), ("timeout", None, 1),
+                                  (None, "930", 1)):
+        c = LocklyClient("a@b")
+        c.ASLEEP_RETRY_DELAYS = (0, 0)
+        sent = []
+
+        def fake(lock, frame, directive=None, c=c, sent=sent, mqtt_code=mqtt_code, cod=cod):
+            sent.append(frame)
+            c._tl.mqtt_code, c._tl.last_cod = mqtt_code, cod
+            return None
+        c.exchange_frame = fake
+        assert c.query_status(LOCK) is None and c.status_cache[UUID]["reachable"] is False
+        assert len(sent) == calls, (mqtt_code, cod, len(sent))
+
+
 def test_welcome_off_frames():
     n = "00112233445566778899AABBCCDDEEFF"
     _check_frame(F.build_welcome46_off(LOCK, n))

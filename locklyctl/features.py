@@ -70,18 +70,24 @@ def _segment(week: int, bh: int, bm: int, eh: int, em: int) -> str:
 
 def build_welcome8_set(lock: dict, nonce: str, schedules: list[dict],
                        *, enable: bool = True, sync_log: bool = True) -> str:
-    """0x9B set. ``schedules`` is a list (max 8) of
-    {week:int, begin:(h,m), end:(h,m)}. Writes the full 8-slot table."""
+    """0x9B set. ``schedules`` is a list (max 8) of {week:int, begin:(h,m),
+    end:(h,m)}, optionally with per-slot ``enabled`` (default ``enable``) and
+    ``sync`` (0/1; default 0 when ``sync_log``). Writes the full 8-slot table.
+
+    The two bytes after the slots are bitmasks with slot 0 in bit 0: the app
+    joins one bit per slot, last slot first, and parses that as binary
+    (SyncToggleState.b + Strings.f, app 3.3.4)."""
     enc_mc, mc_len, key = _enc(lock)
-    segs = []
-    for s in schedules[:8]:
+    segs, sync_bits, on_bits = [], 0, 0
+    for i, s in enumerate(schedules[:8]):
         bh, bm = s["begin"]; eh, em = s["end"]
         segs.append(_segment(s["week"], bh, bm, eh, em))
+        if s.get("enabled", enable):
+            on_bits |= 1 << i
+        if s.get("sync", 0 if sync_log else 1):
+            sync_bits |= 1 << i
     segs += [_SEG_INVALID] * (8 - len(segs))
-    configurator = (
-        f"{8:02X}" + "".join(segs)
-        + f"{(0 if sync_log else 1):02X}" + f"{(1 if enable else 0):02X}"
-    )
+    configurator = f"{8:02X}" + "".join(segs) + f"{sync_bits:02X}" + f"{on_bits:02X}"
     raw = P._assemble_fields("9B", mc_len, enc_mc, _WM_FLAG_SET, _WM_MODE_CUSTOM,
                              configurator, (nonce or "").upper())
     return P._aes_wrap(raw, key)
@@ -212,8 +218,8 @@ def describe_week(week: int) -> str:
         return "every day"
     if week == WEEK_WEEKDAYS:
         return "Mon–Fri"
-    if week & WEEK_ONCE:
-        return "once"
+    if week & WEEK_ONCE:                 # the app sends 0x80 alone; day bits are untested
+        return "once" + (f" ({describe_week(week & 0x7F)})" if week & 0x7F else "")
     days = [n for i, n in enumerate(_DAY_NAMES) if week & (1 << i)]
     return ",".join(days) or "no days"
 
@@ -223,7 +229,11 @@ def _seg_text(week: int, bh: int, bm: int, eh: int, em: int) -> str:
 
 
 def parse_welcome8(d: str) -> dict:
-    """0A9B payload: status flag mode N N×segment sync toggle (segments unused = 00FFFFFFFF)."""
+    """0A9B payload: status flag mode N N×segment sync toggle (segments unused
+    = 00FFFFFFFF). sync and toggle are per-slot bitmasks, indexed by position
+    among the valid segments, as the app reads them back
+    (EnergySavingWelcomeModeEntity, app 3.3.4). ``enabled`` is whether any
+    slot is on (None when the reply has no toggle byte)."""
     out = {"status": d[0:2], "segments": [], "enabled": None}
     if len(d) < 8:
         return out
@@ -235,9 +245,14 @@ def parse_welcome8(d: str) -> dict:
         if len(seg) < 10 or seg.upper() == _SEG_INVALID:
             continue
         w, bh, bm, eh, em = (int(seg[i:i + 2], 16) for i in range(0, 10, 2))
+        if bh > 23 or bm > 59 or eh > 23 or em > 59:       # TimeSegment.isValid
+            continue
         out["segments"].append({"week": w, "begin": (bh, bm), "end": (eh, em)})
     if len(d) >= pos + 4:
-        out["enabled"] = d[pos + 2:pos + 4] == "01"
+        sync, toggle = int(d[pos:pos + 2], 16), int(d[pos + 2:pos + 4], 16)
+        for i, s in enumerate(out["segments"]):
+            s["sync"], s["enabled"] = sync >> i & 1, bool(toggle >> i & 1)
+        out["enabled"] = toggle != 0
     return out
 
 
@@ -259,6 +274,11 @@ def check_reply(ack_hex: str | None, lock: dict) -> tuple[bool, str]:
             return False, f"lock answered 0x9B with status {w['status']}"
         if not w["segments"]:
             return True, "Welcome Mode: no schedules set"
+        states = {s.get("enabled") for s in w["segments"]}
+        if len(states) > 1:                                # some slots on, some off
+            return True, "Welcome Mode: " + "; ".join(
+                _seg_text(s["week"], *s["begin"], *s["end"]) + (" (on)" if s["enabled"] else " (off)")
+                for s in w["segments"])
         state = "on" if w["enabled"] else "off" if w["enabled"] is False else "?"
         return True, (f"Welcome Mode {state}: "
                       + "; ".join(_seg_text(s["week"], *s["begin"], *s["end"]) for s in w["segments"]))

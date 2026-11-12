@@ -225,7 +225,31 @@ function renderPlates() {
         v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, "★")));
   });
   $("plates").replaceChildren(...items);
+  renderRetry();
 }
+
+// Doors that didn't answer and can be asked again from here.
+const asleepDoors = () => locks.filter((v) => v.state === "asleep" && v.route !== "bluetooth");
+
+function renderRetry() {
+  const n = asleepDoors().length;
+  $("retry-asleep").hidden = !n || !$("people-ws").hidden;
+  $("retry-asleep").textContent = `Retry ${n} asleep`;
+}
+
+$("retry-asleep").addEventListener("click", async (ev) => {
+  const ids = asleepDoors().map((v) => v.id);
+  if (!ids.length) return;
+  await busy(ev.currentTarget, async () => {
+    toast(`Asking ${ids.length} ${ids.length === 1 ? "door" : "doors"} again…`);
+    try {
+      const fresh = await call("check_doors", ids);
+      fresh.forEach(updateLock);
+      const answered = fresh.filter((l) => l.state === "locked" || l.state === "unlocked").length;
+      toast(`${answered} of ${fresh.length} answered.`, answered === 0);
+    } catch (e) { toast(e.message, true); }
+  });
+});
 
 // ── favorites: one tap to lock or unlock, without opening the door ─────
 
@@ -246,6 +270,8 @@ function renderFavs() {
         h("span", { class: "fav-name" }, doorLabel(v)),
         h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || STATE_WORD[st])),
       h("span", { class: "fav-actions" },
+        st === "asleep" && h("button", { class: "btn btn-quiet", type: "button", disabled: off,
+          "aria-label": `Check ${doorLabel(v)} again`, title: "Ask it again", onclick: () => runCommand(v, "check") }, "↻"),
         h("button", { class: "btn btn-ink", type: "button", disabled: off, "aria-label": `Lock ${doorLabel(v)}`,
           onclick: () => runCommand(v, "lock") }, "Lock"),
         h("button", { class: "btn btn-open", type: "button", disabled: off, "aria-label": `Unlock ${doorLabel(v)}`,
@@ -664,6 +690,7 @@ function showView(view) {
   $("view-doors").setAttribute("aria-pressed", String(!isPeople));
   $("view-people").setAttribute("aria-pressed", String(isPeople));
   $("check-all").hidden = isPeople;
+  renderRetry();
   if (isPeople && !peopleLoaded) loadPeople();
 }
 $("view-doors").addEventListener("click", () => showView("doors"));

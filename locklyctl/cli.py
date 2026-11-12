@@ -259,11 +259,9 @@ def do_history(client: LocklyClient, lock: dict) -> None:
         print(dim("  no events in the last 7 days"))
         return
     print(bold(f"\n  last {min(len(events), 20)} events:"))
-    for ev in events[-20:]:
-        code = str(ev.get("openType") or ev.get("type") or "?")
-        who = ev.get("name") or ev.get("userName") or ""
-        t = _fmt_event_time(ev.get("time") or ev.get("eventTime") or "")
-        print(f"   {dim(f'{t:>16}')}  {P.describe_open_type(code):<22} {who}")
+    for ev in sorted(events, key=lambda e: e.get("tm") or 0)[-20:]:
+        t = _fmt_event_time(ev.get("tm") or "")
+        print(f"   {dim(f'{t:>16}')}  {P.describe_open_type(ev.get('co')):<22} {ev.get('na') or ''}")
 
 
 def _fmt_event_time(t) -> str:

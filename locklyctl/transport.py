@@ -70,6 +70,7 @@ class MqttChannel:
         self._pending: dict[str, dict] = {}
         self._events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._tl = threading.local()       # last failure code, per calling thread
 
         try:
             cli = mqtt.Client(
@@ -121,10 +122,17 @@ class MqttChannel:
         except Exception:
             pass
 
+    @property
+    def last_code(self) -> str | None:
+        """Why this thread's last exchange failed: the broker's code (e.g. 3005,
+        device offline), "timeout", or None after a reply."""
+        return getattr(self._tl, "code", None)
+
     def exchange_frame(self, device_id: str, frame_hex: str,
                        timeout: float = MQTT_RESPONSE_TIMEOUT) -> str | None:
         """Relay a BLE frame to the lock, return the lock's ACK hex (or None)."""
         import base64
+        self._tl.code = None
         rid = str(uuid.uuid4())
         ev = threading.Event()
         self._events[rid] = ev
@@ -138,6 +146,7 @@ class MqttChannel:
             self._client.publish(MQTT_PUBLISH_TOPIC, json.dumps(envelope, separators=(",", ":")), qos=1)
             if not ev.wait(timeout):
                 _LOGGER.warning("MQTT: no reply within %ss for %s", timeout, device_id)
+                self._tl.code = "timeout"
                 return None
             payload = self._pending.get(rid) or {}
         finally:
@@ -145,6 +154,7 @@ class MqttChannel:
             self._pending.pop(rid, None)
         code = payload.get("code")
         if code not in (0, "0", None):
+            self._tl.code = str(code)
             # 3005 "device is offline" is an expected state for a sleeping
             # battery lock, not a fault — log it quietly; warn on anything else.
             level = logging.DEBUG if str(code) == "3005" else logging.WARNING
@@ -336,6 +346,7 @@ class LocklyClient:
         to the MQTT device channel.
         """
         self._tl.last_cod = None
+        self._tl.mqtt_code = None
         trail: list[str] = []
         self._tl.trail = trail
         has_hub = bool(lock.get("hubid")) and not self._is_matter(lock)
@@ -355,19 +366,39 @@ class LocklyClient:
             trail.append("MQTT → could not connect")
             return None
         ack = ch.exchange_frame(lock["ID"], frame_hex)
-        trail.append(
-            f"MQTT → {'ACK' if ack else 'no usable reply (e.g. 3005 device offline)'}")
+        self._tl.mqtt_code = ch.last_code
+        trail.append("MQTT → ACK" if ack else
+                     f"MQTT → no usable reply ({ch.last_code or 'empty'}"
+                     f"{', device offline / asleep' if ch.last_code == '3005' else ''})")
         return ack
 
     def last_transport_trail(self) -> str:
         return " ; ".join(getattr(self._tl, "trail", None) or ["(none)"])
 
+    def _worth_retrying(self) -> bool:
+        """Whether this thread's last exchange failed fast in a way that can
+        clear up: the broker answering 3005 (the lock is asleep or between
+        connections), or a hub relay timeout (408 / 942). A 20 s MQTT timeout or
+        a refused hub (930, 943) is not retried."""
+        return (getattr(self._tl, "mqtt_code", None) == "3005"
+                or P.is_transient_cod(getattr(self._tl, "last_cod", None)))
+
+    # Pauses before the extra status attempts for a lock that seemed asleep.
+    # Not tuned on hardware: chosen so a door that stays asleep costs ~10 s more.
+    ASLEEP_RETRY_DELAYS = (3.0, 6.0)
+
     # -- high-level: status, nonce, caps --------------------------------------
 
     def query_status(self, lock: dict) -> dict | None:
-        """Live status query (wakes the lock). Returns parsed dict incl. nonce."""
+        """Live status query (wakes the lock). Returns parsed dict incl. nonce.
+        A lock that answers "offline" (asleep) is asked again, up to twice."""
         mc, uuid_ = str(lock["mc"]), lock["ID"]
         ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_))
+        for delay in self.ASLEEP_RETRY_DELAYS:
+            if ack or not self._worth_retrying():
+                break
+            time.sleep(delay)
+            ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_))
         if not ack:
             self.status_cache[uuid_] = {"reachable": False, "ts": time.time()}
             return None

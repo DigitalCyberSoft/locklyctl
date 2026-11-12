@@ -91,6 +91,12 @@ class FakeClient:
         self._log("rest", endpoint, req)
         return {}
 
+    def get_history(self, lock, since_ms):
+        """getlkhist's event shape, as Lockly returned it for a Visage (2026-11-12)."""
+        return [{"tm": 1794464102000, "co": "92", "na": "Dana", "pid": 7, "id": 1, "logVer": 0},
+                {"tm": 1794464133000, "co": "999", "na": "", "pid": 65535, "id": 3, "logVer": 0},
+                {"tm": 1794464119000, "co": "117", "na": "", "pid": 65535, "id": 2, "logVer": 0}], since_ms
+
     def lock(self, lock): return True, "lock ACK"
     def unlock(self, lock): return False, "lock rejected the command: FF — wrong password"
 
@@ -157,6 +163,15 @@ def test_lock_views_and_actions(api):
 
 
 @_api_in_tmp_home
+def test_activity_reads_getlkhist_fields(api):
+    api.sign_in("a@b", "right", False)
+    rows = api.activity(B2)
+    assert [(r["what"], r["who"]) for r in rows] == [          # newest first, by tm
+        ("Event 999", ""), ("Door sensor closing", ""), ("Unlocked via Visage ID", "Dana")]
+    assert all(len(r["time"]) == 16 and r["time"][4] == "-" for r in rows)   # "YYYY-MM-DD HH:MM"
+
+
+@_api_in_tmp_home
 def test_favorites(api):
     api.sign_in("a@b", "right", False)
     c = api._client
@@ -165,7 +180,7 @@ def test_favorites(api):
     assert api.set_favorite(UUID, True)["favorite"] is True
     assert not c.warmed.is_set()                  # a hub lock doesn't use the device channel
     api.set_favorite(B2, True)
-    assert c.warmed.wait(2)                       # a Wi-Fi favourite connects it ahead of time
+    assert c.warmed.wait(2)                       # a Wi-Fi favorite connects it ahead of time
     assert config.load_config()["favorites"] == [UUID, B2]     # kept in the order they were added
     again = Api(client_factory=FakeClient)        # survives a restart
     again.sign_in("a@b", "right", False)

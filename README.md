@@ -112,8 +112,9 @@ more:
 
 | Flag | Adds |
 |---|---|
-| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `set_welcome_mode`, `set_rain_mode` |
+| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `turn_off_welcome_mode`, `set_rain_mode` |
 | `--allow-unlock` | `unlock_door` |
+| both | `set_welcome_mode`, since a Welcome Mode schedule keeps a door unlocked |
 
 Tools a flag doesn't allow aren't offered at all, so the assistant never sees
 them. Existing PINs are never returned; a PIN the server creates is returned

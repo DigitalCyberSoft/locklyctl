@@ -743,38 +743,113 @@ _BLE_ERRORS = {
     "FF": "wrong password — the lock rejected the credential in the command",
 }
 
-# Access-log event types.  The app resolves these through a two-stage string
-# switch — the code maps to an index, and the index maps to a label hundreds of
-# lines away — so the code and its meaning are never adjacent in the source.
-#
-# This table is as complete as the app itself.  The label switch stops at index
-# 31, and higher codes (42 and up, which these locks emit often) map to indices
-# beyond that and fall through to a default branch which renders them
-# generically.  So there is no per-code label to recover for them: the app does
-# not distinguish them either, and reporting the raw number is more honest than
-# inventing a name.
+# Access-log event codes (getlkhist "co") in the LOCKLY app's own words, from
+# the history list of app 3.3.4 (EventStreamFragment, which maps each code to a
+# string resource; extracted mechanically, not retyped). An older analysis
+# found only the first 31 codes because it read UnlockRecordAdapter, whose
+# label switch stops early. 6, 16 and 31 aren't in the app's table and keep
+# LocklyHA's labels. Codes neither knows show as "Event <code>".
 #
 # Note this identifies *how* the lock was opened, not which credential type was
 # used: fingerprint and RFID are distinguished via separate sensor lists that
 # these locks do not expose.
 _OPEN_TYPE_LABELS = {
-    "2": "keypad",
-    "4": "physical key",
-    "6": "lock clock updated",
-    "7": "alarm",
-    "8": "low battery",
-    "9": "emergency code",
-    "16": "guest code",
-    "17": "guest one-time code",
-    "21": "one-time code",
-    "31": "long-term guest one-time code",
+    "2": "Unlocked by LOCKLY Touch Screen",
+    "3": "Unlocked by Regular User",
+    "4": "Unlocked Manually",
+    "5": "Unlocked by Family Users",
+    "6": "Lock clock updated",
+    "7": "Lock Alarm",
+    "8": "Low Battery",
+    "9": "Unlock with Access Code under duress",
+    "12": "Unlocked by One-Time Access",
+    "14": "Unlocked by Family User LOCKLY Touch Screen",
+    "16": "Guest code",
+    "17": "Unlocked by One-Time Access",
+    "21": "Unlocked by Sub Admin - One-Time Access",
+    "31": "Long-term guest one-time code",
+    "32": "Unlocked by Sub Admin - Fingerprint",
+    "33": "Unlocked by Sub Admin - RFID Card",
+    "34": "Unlocked by fingerprint by temporary user",
+    "35": "Unlocked by fingerprint by OAC user",
+    "37": "Door Jammed",
+    "38": "Autolock is disabled due to the door is open",
+    "39": "Key cover is on",
+    "40": "Key cover is off",
+    "41": "Touchscreen Locking",
+    "42": "Auto lock",
+    "43": "Locked by App",
+    "44": "Locked by keypad",
+    "45": "Rain Mode Activate",
+    "46": "Rain Mode Deactivated",
+    "47": "Locked by LOCKLY button logo",
+    "48": "Locked by lifting the exterior handle",
+    "49": "Locked by pushing down the exterior handle",
+    "50": "Unlocked by pushing down the exterior handle",
+    "51": "Welcome Mode enabled",
+    "52": "Welcome Mode disabled",
+    "54": "Unlocked by Unit Owner",
+    "55": "Unlock by Unit Owner (Access Code)",
+    "56": "Unlock by Unit Owner (Fingerprint)",
+    "57": "Unlock by Unit Owner (RFID card)",
+    "58": "Locked by Z-WAVE",
+    "59": "Lock calibration",
+    "60": "Exit Button Unlocked",
+    "61": "Wireless Doorbell",
+    "62": "Door is not closed",
+    "63": "Unlocked via eBadge",
+    "64": "Locked via eBadge",
+    "71": "Unlock by force",
+    "72": "Power on again and get the time",
+    "73": "Unlocked during hostage incident",
+    "76": "Smart Safe power cable is disconnected",
+    "77": "Duress Alert",
+    "78": "Enter Safe Mode",
+    "79": "Disable Safe Mode",
+    "80": "Manual Locking",
+    "81": "Autolock",
+    "82": "Door sensor opening",
+    "83": "Unlocked by key",
+    "84": "Press the Doorbell",
+    "85": "Door sensor is normal, but the bolt is malfunctioning",
+    "86": "Error connecting to the router",
+    "87": "Successfully connected to the router",
+    "88": "Error connecting to the server",
+    "89": "Successfully connected to the server",
+    "90": "Can’t find the router",
+    "91": "Received an empty data frame",
+    "92": "Unlocked via Visage ID",
+    "93": "Unlocked via Apple home key",
+    "94": "Locked via Apple home key",
+    "95": "Router disconnected",
+    "96": "Disconnected from the service",
+    "97": "Lock malfunction",
+    "98": "Error exiting the Welcome Mode",
+    "99": "Unlocked via access code with Homekey",
+    "100": "Locked via access code",
+    "101": "Locked via access code with Homekey",
+    "102": "Visage ID detection failed consecutively",
+    "103": "Visage ID is being triggered frequently",
+    "104": "4 consecutive Visage ID failures in one day",
+    "105": "Unlocked via virtual keypad",
+    "106": "Unlocked via HomeKit NFC",
+    "107": "Locked via HomeKit NFC",
+    "108": "Fingerprint was triggered incorrectly",
+    "110": "Inconsistent statuses between door lock and door sensor are detected",
+    "111": "Unlocked via Portal",
+    "112": "Locked via Portal",
+    "113": "Unlocked via Google",
+    "114": "Locked via Google",
+    "115": "Unlocked via Alexa",
+    "116": "Locked via Alexa",
+    "117": "Door sensor closing",
 }
 
 def describe_open_type(code: str | None) -> str:
-    """Readable name for an access-log event type, or the raw code if unknown."""
+    """The app's text for an access-log event code, or "Event <code>" if unknown."""
     if code is None:
         return "unknown"
-    return _OPEN_TYPE_LABELS.get(str(code), f"type {code}")
+    return _OPEN_TYPE_LABELS.get(str(code), f"Event {code}")
 
 # Codes worth trying the same call again for. These are timeouts somewhere in
 # the chain — the cloud relaying, or the hub reaching the lock over BLE — rather
