@@ -559,6 +559,96 @@ def test_access_user_parsers():
     assert (u["pwd_id"], u["user_id"], u["pin"], u["fingerprints"], u["faces"], u["user_type"]) == (5, 25, "", 0, 0, 0x42), u
 
 
+FW_REPLY = {   # fwver/msh/new, made-up files; the screen entry has no URL, so it isn't a part
+    "cod": "200", "verNum": "1.14.34", "downloadUrl": "https://files.example.com/fw/",
+    "hubVer": "2.02.72", "hubUrl": "https://files.example.com/fw/w.img", "hubName": "w.img",
+    "hubSize": "1180", "hubCrc": "123456789", "hubMd5": "",
+    "bleVer": "1.14.28", "bleUrl": "https://files.example.com/fw/b.img", "bleName": "b.img",
+    "bleSize": "280", "bleCrc": "a",
+    "frontVer": "1.00.95", "frontUrl": "https://files.example.com/fw/f.bin", "frontName": "f.bin",
+    "frontSize": "87", "frontCrc": "abc", "frontMd5": "0123456789abcdef0123456789abcdef",
+    "backVer": "1.00.76", "backUrl": "https://files.example.com/fw/k.bin", "backName": "k.bin",
+    "backSize": "35", "backCrc": "",
+    "screenVer": "1.00.01", "screenName": "s.bin", "screenSize": "9"}
+
+
+def test_firmware_install_request():
+    parts, problems = F.firmware_reply_parts(FW_REPLY)
+    assert [p["part"] for p in parts] == ["wifi", "ble", "front", "back"] and problems == []   # app's order
+    on_lock = F.firmware_versions_on_lock({"firmware_version": "1.00.87", "sub_version": "1.00.72",
+                                           "wifi_version": "1.02.70", "ble_version": "1.14.21"})
+    send = F.firmware_parts_to_install(parts, on_lock, phone_does_ble=True)
+    assert [p["part"] for p in send] == ["wifi", "front", "back"]                 # Bluetooth: the phone's
+    assert [p["part"] for p in F.firmware_parts_to_install(parts, on_lock, False)] == ["wifi", "ble", "front", "back"]
+    # not sent: a part the lock gives no version for, or 0.00.00, or one that's current
+    assert F.firmware_parts_to_install(parts, {**on_lock, "front": None, "back": "0.00.00", "wifi": "2.02.72"},
+                                       True) == []
+    # file_ver: dots dropped, "00" added, read as hex; file_crc32: CRC-32 of the CRC text
+    # (standard check values: "123456789" → CBF43926, "abc" → 352441C2)
+    assert F.build_firmware_upgrade("u-1", "dev-1", FW_REPLY["downloadUrl"], send) == {
+        "id": "u-1", "deviceId": "dev-1", "type": "MULTIPLE", "downloadUrl": "https://files.example.com/fw",
+        "crc32": 0, "version": 0, "needReboot": False,
+        "args": {"flag": 1 + 2 + 4,                                                # front, back, Wi-Fi
+                 "first_md5": "0123456789abcdef0123456789abcdef", "first_file_name": "f.bin",
+                 "first_file_size": 87, "first_file_ver": 0x1009500, "first_file_crc32": 0x352441C2,
+                 "second_file_name": "k.bin", "second_file_size": 35, "second_file_ver": 0x1007600,
+                 "three_md5": "", "three_file_name": "w.img", "three_file_size": 1180,
+                 "three_file_ver": 0x2027200, "three_file_crc32": 0xCBF43926,
+                 "four_file_size": 0, "four_file_ver": 0, "five_file_size": 0, "five_file_ver": 0}}
+    assert F.firmware_long_version("0") == 0 and F.firmware_long_version(None) == 0
+    parts, problems = F.firmware_reply_parts({**FW_REPLY, "backSize": "35k"})
+    assert "back" not in [p["part"] for p in parts] and problems == ["the back part's size is '35k', not a number"]
+    assert F.version_at_least("1.00.76", "1.00.76") and F.version_at_least("1.00.80", "1.00.76")
+    assert not F.version_at_least("1.00.72", "1.00.76") and not F.version_at_least("0.00.00", "0.00.00")
+    assert not F.version_at_least("1.0.76", "1.00.76") and not F.version_at_least(None, "1.00.76")
+    assert F.describe_firmware_progress({"stage": "install", "progress": 40}) == "Installing 40 %"
+    assert F.describe_firmware_progress({"stage": "final", "progress": 100}) == "Finished"
+
+
+def test_follow_firmware_upgrade():
+    import json
+    from types import SimpleNamespace
+    from locklyctl.transport import LocklyError, MqttChannel
+    ch = MqttChannel("a@b.c", "jwt")                 # never connected: publish is replaced below
+    sent = []
+
+    def run(messages, idle_timeout=5.0, rc=0):
+        def publish(topic, data, qos):
+            sent.append((topic, json.loads(data), qos))
+            for m in messages:                       # the broker's answers, as paho delivers them
+                ch._on_message(None, None, SimpleNamespace(payload=json.dumps(m).encode()))
+            return SimpleNamespace(rc=rc)            # paho's MQTTMessageInfo
+        ch._client = SimpleNamespace(publish=publish)
+        seen = []
+        result = ch.follow_firmware_upgrade({"id": "u-1", "deviceId": "dev-1"}, seen.append, idle_timeout)
+        return result, seen
+
+    def msg(name, rid="r", **payload):
+        return {"header": {"name": name, "requestId": rid}, "payload": payload}
+
+    result, seen = run([msg("firmwareUpgradeProgress", upgradeId="other", stage="final", progress=100),
+                        msg("firmwareUpgradeResponse", rid="u-1", code=0),
+                        msg("firmwareUpgradeProgress", upgradeId="u-1", stage="download", progress=50),
+                        msg("firmwareUpgradeProgress", upgradeId="u-1", stage="final", progress=100)])
+    assert [s["stage"] for s in seen] == ["download", "final"] and result["stage"] == "final"
+    topic, envelope, qos = sent[-1]
+    assert (topic, qos, envelope["header"]["name"], envelope["header"]["requestId"]) == \
+        ("server", 2, "firmwareUpgradeRequest", "u-1")
+    assert envelope["payload"] == {"id": "u-1", "deviceId": "dev-1"}
+    for messages, rc, cod in (([msg("firmwareUpgradeFailure", upgradeId="u-1", stage="install",
+                                    errorMessage="crc error")], 0, "failure"),
+                              ([msg("firmwareUpgradeResponse", rid="u-1", code=3005)], 0, "3005"),
+                              ([], 0, "timeout"),
+                              ([], 4, "publish")):                 # 4: paho's MQTT_ERR_NO_CONN
+        try:
+            run(messages, idle_timeout=0.05, rc=rc)
+        except LocklyError as e:
+            assert e.cod == cod, (e.cod, cod)
+        else:
+            raise AssertionError(f"no error for {cod}")
+    assert ch._listeners == {}                       # nothing left listening
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

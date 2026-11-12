@@ -40,6 +40,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 _CERT_DIR = Path(__file__).parent / "certs"
+# MQTT message names for a firmware upgrade (RequestType / ResponseType, app 3.3.4)
+FW_REQUEST, FW_PROGRESS, FW_FAILURE = ("firmwareUpgradeRequest", "firmwareUpgradeProgress",
+                                       "firmwareUpgradeFailure")
 
 
 def _plain(html_text: str) -> str:
@@ -54,6 +57,11 @@ def _plain(html_text: str) -> str:
 def _int_or_none(value) -> int | None:
     text = str(value).strip() if value is not None else ""
     return int(text) if text.isdigit() else None
+
+
+def _fw_parts_text(parts: list[dict], on_lock: dict) -> str:
+    """'back 1.00.72 (offered 1.00.76), wifi ? (offered 2.02.72)'"""
+    return ", ".join(f"{p['part']} {on_lock.get(p['part']) or '?'} (offered {p['version']})" for p in parts)
 
 
 class LocklyError(Exception):
@@ -83,6 +91,7 @@ class MqttChannel:
         self._connected = threading.Event()
         self._pending: dict[str, dict] = {}
         self._events: dict[str, threading.Event] = {}
+        self._listeners: dict[str, tuple[Callable[[dict], bool], Callable[[dict], None]]] = {}
         self._lock = threading.Lock()
         self._tl = threading.local()       # last failure code, per calling thread
 
@@ -123,6 +132,11 @@ class MqttChannel:
             with self._lock:
                 self._pending[rid] = data.get("payload") or {}
                 self._events[rid].set()
+        with self._lock:
+            listeners = list(self._listeners.values())
+        for accept, deliver in listeners:          # message streams (firmware progress)
+            if accept(data):
+                deliver(data)
 
     def connect(self, timeout: float = 15.0) -> bool:
         self._client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
@@ -184,6 +198,64 @@ class MqttChannel:
             return base64.b64decode(content).hex().upper()
         except Exception:
             return None
+
+    def follow_firmware_upgrade(self, payload: dict, on_progress: Callable[[dict], None],
+                                idle_timeout: float = 120.0) -> dict:
+        """Publish a firmwareUpgradeRequest and follow it to the lock's "final"
+        stage, returning that message's payload. Replies are matched as the
+        app's FirmwareUpgradeController matches them: by this request's
+        requestId, or by name and the payload's upgradeId. Raises LocklyError
+        on a failure message, a refused request, or ``idle_timeout`` seconds
+        without a message (the app's timeout, which each message restarts)."""
+        upgrade_id = payload["id"]
+        inbox: list[dict] = []
+        arrived = threading.Condition()
+
+        def accept(data: dict) -> bool:
+            header, body = data.get("header") or {}, data.get("payload") or {}
+            return header.get("requestId") == upgrade_id or (
+                header.get("name") in (FW_PROGRESS, FW_FAILURE) and body.get("upgradeId") == upgrade_id)
+
+        def deliver(data: dict) -> None:
+            with arrived:
+                inbox.append(data)
+                arrived.notify()
+
+        with self._lock:
+            self._listeners[upgrade_id] = (accept, deliver)
+        envelope = {"header": {"namespace": "com.lockly", "name": FW_REQUEST, "requestId": upgrade_id,
+                               "timestamp": int(time.time() * 1000)},
+                    "payload": payload}
+        try:
+            # QoS 2 as the app publishes (PahoManager.createMqttMessage): exactly once.
+            info = self._client.publish(MQTT_PUBLISH_TOPIC, json.dumps(envelope, separators=(",", ":")), qos=2)
+            if info.rc != 0:
+                raise LocklyError(f"Couldn't send the upgrade request to Lockly (MQTT rc {info.rc}).", "publish")
+            while True:
+                with arrived:
+                    if not arrived.wait_for(lambda: inbox, timeout=idle_timeout):
+                        raise LocklyError(f"The lock sent no progress for {idle_timeout:.0f} seconds.", "timeout")
+                    data = inbox.pop(0)
+                name = (data.get("header") or {}).get("name")
+                body = data.get("payload") or {}
+                if name == FW_FAILURE:
+                    stage = F.FW_STAGES.get(str(body.get("stage")), str(body.get("stage") or "")).lower()
+                    raise LocklyError(f"The lock reported a failure{' while ' + stage if stage else ''}: "
+                                      f"{body.get('errorMessage') or 'no reason given'}", "failure")
+                if name == FW_PROGRESS:
+                    on_progress(body)
+                    if body.get("stage") == "final":
+                        return body
+                    continue
+                code = body.get("code")
+                if code not in (0, "0", None):
+                    raise LocklyError(f"Lockly refused the upgrade (code {code}"
+                                      f"{': ' + body['errorMessage'] if body.get('errorMessage') else ''}).",
+                                      str(code))
+                _LOGGER.debug("firmware upgrade: %s %s", name, body)
+        finally:
+            with self._lock:
+                self._listeners.pop(upgrade_id, None)
 
 
 # ── The client ──────────────────────────────────────────────────────────────
@@ -535,25 +607,31 @@ class LocklyClient:
     _FW_PARTS = (("front", "front"), ("back", "back"), ("hub", "wifi"), ("ble", "ble"),
                  ("screen", "screen"))
 
+    def _firmware_reply(self, lock: dict, lock_type: int | None = None) -> dict:
+        """Lockly's raw answer to the firmware check this lock's kind uses."""
+        kind = F.firmware_check_kind(lock)
+        model = str(lock.get("mod") or "")
+        if kind == F.FW_SINGLE:
+            return self._post("lockly/syspara", {**COMMON_BODY, "para": "firmware_ver", "mod": model,
+                                                 "ref": self.email, "did": lock["ID"]})
+        if kind == F.FW_MULTI_PART:
+            endpoint, req = "fwver/msh/new", {"acct": self.email, "did": lock["ID"],
+                                              "model": int(lock_type or F._KNOWN_LOCK_TYPES.get(model.upper(), 0))}
+        else:
+            endpoint, req = "fwver/new", {"acct": self.email, "dv": lock["ID"]}
+        assert self.des3_key is not None, "des3 key not available — call load_devices() first"
+        para = P.des3_encrypt(self.des3_key, json.dumps(req, separators=(",", ":")))
+        return self._post(endpoint, {**COMMON_BODY, "mod": model, "para": para})
+
     def firmware_offer(self, lock: dict, lock_type: int | None = None) -> dict:
         """Lockly's newest firmware for this lock: {"kind", "release", "parts":
         [{"part", "version", "size_kb"}], "title", "notes"}; release is None
         when Lockly has nothing newer (cod 920)."""
+        return self._offer_from_reply(lock, self._firmware_reply(lock, lock_type))
+
+    def _offer_from_reply(self, lock: dict, body: dict) -> dict:
         kind = F.firmware_check_kind(lock)
-        model = str(lock.get("mod") or "")
         out = {"kind": kind, "release": None, "parts": [], "title": "", "notes": ""}
-        if kind == F.FW_SINGLE:
-            body = self._post("lockly/syspara", {**COMMON_BODY, "para": "firmware_ver", "mod": model,
-                                                 "ref": self.email, "did": lock["ID"]})
-        else:
-            if kind == F.FW_MULTI_PART:
-                endpoint, req = "fwver/msh/new", {"acct": self.email, "did": lock["ID"],
-                                                  "model": int(lock_type or F._KNOWN_LOCK_TYPES.get(model.upper(), 0))}
-            else:
-                endpoint, req = "fwver/new", {"acct": self.email, "dv": lock["ID"]}
-            assert self.des3_key is not None, "des3 key not available — call load_devices() first"
-            para = P.des3_encrypt(self.des3_key, json.dumps(req, separators=(",", ":")))
-            body = self._post(endpoint, {**COMMON_BODY, "mod": model, "para": para})
         cod = str(body.get("cod"))
         if cod == "920":
             return out
@@ -578,6 +656,89 @@ class LocklyClient:
                 if body.get(key):
                     out["parts"].append({"part": part, "version": body[key], "size_kb": None})
         return out
+
+    # -- firmware: install over Wi-Fi (multi-part locks), as app 3.3.4 does ------
+
+    FW_IDLE_TIMEOUT_S = 120.0     # MultipleFirmwareUpgradeRepository's default; each message restarts it
+    FW_SETTLE_S = 10.0            # MultipleUpgradeViewModel waits this long before checking
+    FW_VERIFY_S = 300.0           # MultipleFirmwareRebootRepository gives the check 5 minutes
+    FW_VERIFY_EVERY_S = 15.0
+
+    def firmware_plan(self, lock: dict) -> dict:
+        """What installing over Wi-Fi would do now. Asks the lock for its
+        versions and battery (wakes it) and Lockly for its offer. Returns
+        {"offer", "status", "onLock", "send": the parts the app would install
+        over MQTT, "downloadUrl", "blocked": why it can't start, or ""}."""
+        st = self.query_status(lock) or {}
+        body = self._firmware_reply(lock, st.get("lock_type"))
+        offer = self._offer_from_reply(lock, body)
+        plan = {"offer": offer, "status": st, "onLock": F.firmware_versions_on_lock(st), "send": [],
+                "downloadUrl": str(body.get("downloadUrl") or ""), "blocked": ""}
+        if offer["kind"] != F.FW_MULTI_PART:
+            plan["blocked"] = "This lock's firmware is installed from a phone over Bluetooth: use the Lockly app."
+            return plan
+        if not st:
+            plan["blocked"] = "The lock didn't answer, so what it runs isn't known."
+            return plan
+        parts, problems = F.firmware_reply_parts(body) if offer["release"] else ([], [])
+        if problems:
+            plan["blocked"] = "Lockly's offer looks wrong: " + "; ".join(problems) + "."
+            return plan
+        plan["send"] = F.firmware_parts_to_install(parts, plan["onLock"], F.bluetooth_chip_needs_phone(lock))
+        battery = st.get("battery_percent")
+        if not plan["send"]:
+            plan["blocked"] = "Nothing to install over Wi-Fi."
+        elif not plan["downloadUrl"]:
+            plan["blocked"] = "Lockly's offer has no download address."
+        elif battery is None or st.get("battery_invalid"):
+            plan["blocked"] = "The lock didn't report its battery level."
+        elif battery < F.FW_MIN_BATTERY:
+            plan["blocked"] = (f"The battery is at {battery} %. The Lockly app won't update a lock at "
+                               f"30 % or less either; change the batteries first.")
+        return plan
+
+    def firmware_install(self, lock: dict, send: list[dict], download_url: str,
+                         on_event: Callable[[dict], None]) -> dict:
+        """Install ``send`` (from firmware_plan) over MQTT, then confirm it: follows
+        the lock's progress, then asks the lock for its versions until every part
+        reports the offered one (5 minutes at most). Calls on_event with {"stage",
+        "progress", "text"} along the way and returns {"versions"}. Raises
+        LocklyError when the lock reports a failure, goes quiet, or doesn't come
+        back on the new versions."""
+        if not send:
+            raise ValueError("Nothing to install.")
+        ch = self._mqtt_channel()
+        if ch is None:
+            raise LocklyError("Couldn't connect to Lockly's device channel.")
+        payload = F.build_firmware_upgrade(str(uuid.uuid4()), lock["ID"], download_url, send)
+
+        def progress(body: dict) -> None:
+            on_event({"stage": body.get("stage"), "progress": body.get("progress"),
+                      "text": F.describe_firmware_progress(body)})
+
+        ch.follow_firmware_upgrade(payload, progress, idle_timeout=self.FW_IDLE_TIMEOUT_S)
+        on_event({"stage": "verify", "progress": None, "text": "Waiting for the lock to restart"})
+        time.sleep(self.FW_SETTLE_S)
+        deadline = time.monotonic() + self.FW_VERIFY_S
+        seen: dict = {}
+        behind = send
+        while True:
+            st = self.query_status(lock)
+            if st:
+                seen = F.firmware_versions_on_lock(st)
+                behind = [p for p in send if not F.version_at_least(seen.get(p["part"]), p["version"])]
+                if not behind:
+                    on_event({"stage": "done", "progress": 100, "text": "Installed and confirmed on the lock"})
+                    return {"versions": seen}
+                on_event({"stage": "verify", "progress": None,
+                          "text": "The lock still reports " + _fw_parts_text(behind, seen)})
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.FW_VERIFY_EVERY_S)
+        if not seen:
+            raise LocklyError("The upgrade finished, but the lock hasn't answered for 5 minutes since.", "verify")
+        raise LocklyError("After the upgrade the lock still reports " + _fw_parts_text(behind, seen) + ".",
+                          "verify")
 
     # -- high-level: access log ------------------------------------------------
 

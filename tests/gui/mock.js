@@ -30,6 +30,7 @@ const locks = [
 ];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = (id) => locks.find((l) => l.id === id);
+let fwPolls = 0, fwParts = [];             // the mock firmware install's progress
 
 window.pywebview = {
   api: {
@@ -44,11 +45,22 @@ window.pywebview = {
     async unlock(id) { await wait(700); Object.assign(find(id), { state: "unlocked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async keep_unlocked(id, minutes) { await wait(500); const until = new Date(Date.now() + minutes * 60000).toTimeString().slice(0, 5); Object.assign(find(id), { keepUnlockedUntil: until, state: "unlocked" }); return { ok: true, until, detail: "", lock: { ...find(id) } }; },
     async end_keep_unlocked(id) { await wait(500); Object.assign(find(id), { keepUnlockedUntil: null, state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
-    async firmware(id) { await wait(500); return { kind: "multi", release: "1.14.34", title: "New firmware", notes: "Changes in release 1.14.34:\n1. Fixed bugs", answered: true, lockFirmware: "1.14.24", lock: { ...find(id) }, parts: [
-      { name: "Front board", current: "", offered: "1.00.95", newer: false, sizeKb: 87, byPhone: false },
+    async firmware(id) { await wait(500); return { kind: "multi", release: "1.14.34", title: "New firmware", notes: "Changes in release 1.14.34:\n1. Fixed bugs", answered: true, lockFirmware: "1.00.87", lock: { ...find(id) }, parts: [
+      { name: "Front board", current: "1.00.87", offered: "1.00.95", newer: true, sizeKb: 87, byPhone: false },
       { name: "Back board", current: "1.00.72", offered: "1.00.76", newer: true, sizeKb: 35, byPhone: false },
       { name: "Wi-Fi module", current: "2.02.72", offered: "2.02.72", newer: false, sizeKb: 1180, byPhone: false },
-      { name: "Bluetooth chip", current: "1.14.24", offered: "1.14.28", newer: true, sizeKb: 280, byPhone: true }] }; },
+      { name: "Bluetooth chip", current: "1.14.24", offered: "1.14.28", newer: true, sizeKb: 280, byPhone: true }],
+      install: { blocked: "", parts: [
+        { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
+        { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
+    async firmware_install(id, parts) { await wait(400); fwPolls = 0; fwParts = parts.map((p) => ({ name: p.name, version: p.version })); return this.firmware_install_status(id); },
+    async firmware_install_status() {
+      await wait(150);
+      const steps = [["download", 40, "Downloading 40 %"], ["install", 70, "Installing 70 %"], ["verify", null, "Waiting for the lock to restart"]];
+      const step = steps[fwPolls++];
+      return step ? { running: true, ok: null, stage: step[0], progress: step[1], text: step[2], error: "", parts: fwParts, versions: {} }
+        : { running: false, ok: true, stage: "done", progress: 100, text: "Installed and confirmed on the lock", error: "", parts: fwParts, versions: {} };
+    },
     async set_favorite(id, on) { await wait(150); Object.assign(find(id), { favorite: !!on }); return { ...find(id) }; },
     async activity() {
       await wait(200);
@@ -103,7 +115,8 @@ setTimeout(() => {
   if (scene === "schedules") { click('.plate[aria-label^="4C,"]'); click("#tab-schedules"); }
   if (scene === "guests") { click('.plate[aria-label^="2A Office"]'); click("#tab-guests"); }
   if (scene === "dark-detail") { click('.plate[aria-label^="3A"]'); }
-  if (scene === "firmware") { click('.plate[aria-label^="2A Front"]'); click("#tab-connection"); setTimeout(() => click("#btn-firmware"), 200); }
+  if (scene.startsWith("firmware")) { click('.plate[aria-label^="2A Front"]'); click("#tab-connection"); setTimeout(() => click("#btn-firmware"), 200); }
+  if (scene === "firmware-install") { setTimeout(() => { click(".fw-install button"); setTimeout(() => click("#confirm-ok"), 300); }, 1200); }
   if (scene === "hold") {
     click('.plate[aria-label^="1204"]');
     document.getElementById("btn-unlock").dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true }));

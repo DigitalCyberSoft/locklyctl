@@ -204,6 +204,8 @@ class Api:
     def __init__(self, client_factory=LocklyClient) -> None:
         self._factory = client_factory
         self._client: LocklyClient | None = None
+        self._fw_jobs: dict[str, dict] = {}     # lock id → firmware install in progress or done
+        self._fw_lock = threading.Lock()
 
     # ── session ──────────────────────────────────────────────────────────
 
@@ -689,27 +691,82 @@ class Api:
 
     def firmware(self, lock_id: str) -> dict:
         """Newer firmware Lockly offers for this lock, next to what the lock
-        reports running. Asks the lock for its versions, so it wakes (beeps)."""
+        reports running, and what installing over Wi-Fi would send. Asks the
+        lock for its versions, so it wakes (beeps)."""
         lock = self._lock(lock_id)
-        c = self._c()
-        st = c.query_status(lock) or {}
-        offer = c.firmware_offer(lock, st.get("lock_type"))
-        # The lock's own version per part, where the app's chain from the
-        # status reply to the part is traced (back, Wi-Fi, Bluetooth). The
-        # front board's source isn't, so it's left blank rather than guessed.
-        on_lock = {"back": st.get("sub_version"), "wifi": st.get("wifi_version"),
-                   "ble": st.get("ble_version"),
-                   "main": st.get("firmware_version") or str(lock.get("fwv") or "")}
+        with self._fw_lock:
+            job = self._fw_jobs.get(lock["ID"]) or {}
+            if job.get("running"):
+                raise ValueError(f"A firmware install is running on this door: {job['text'] or 'starting'}.")
+        plan = self._c().firmware_plan(lock)
+        st, offer = plan["status"], plan["offer"]
         multi = offer["kind"] == F.FW_MULTI_PART
+        on_lock = F.firmware_display_versions(lock, st, offer["kind"])
         parts = [{"name": self._PART_NAMES.get(p["part"], p["part"]), "offered": p["version"],
                   "current": on_lock.get(p["part"]) or "",
                   "newer": F.version_lower(on_lock.get(p["part"]), p["version"]),
                   "sizeKb": p["size_kb"],
                   "byPhone": not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock))}
                  for p in offer["parts"]]
+        send = [{"part": p["part"], "name": self._PART_NAMES[p["part"]], "version": p["version"],
+                 "current": on_lock.get(p["part"]) or ""} for p in plan["send"]]
         return {"kind": offer["kind"], "release": offer["release"], "title": offer["title"],
                 "notes": offer["notes"], "parts": parts, "lockFirmware": on_lock["main"],
-                "answered": bool(st), "lock": self._view(lock)}
+                "answered": bool(st), "install": {"parts": send, "blocked": plan["blocked"]},
+                "lock": self._view(lock)}
+
+    def firmware_install(self, lock_id: str, expected: list[dict]) -> dict:
+        """Start installing over Wi-Fi what the last check showed (``expected``:
+        its install parts). Checks the lock and Lockly again first and refuses
+        if anything changed. Runs in the background: poll firmware_install_status."""
+        lock = self._lock(lock_id)
+        with self._fw_lock:
+            if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
+                raise ValueError("A firmware install is already running on this door.")
+        plan = self._c().firmware_plan(lock)
+        if plan["blocked"]:
+            raise ValueError(plan["blocked"])
+        now = [(p["part"], p["version"]) for p in plan["send"]]
+        if now != [(e.get("part"), e.get("version")) for e in expected]:
+            raise ValueError("What the lock runs or Lockly offers changed since the check. Check again.")
+        job = {"running": True, "ok": None, "stage": "start", "progress": None,
+               "text": "Sending the request", "error": "", "versions": {},
+               "parts": [{"name": self._PART_NAMES[p["part"]], "version": p["version"]} for p in plan["send"]]}
+        with self._fw_lock:
+            if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
+                raise ValueError("A firmware install is already running on this door.")
+            self._fw_jobs[lock["ID"]] = job
+        threading.Thread(target=self._run_firmware_install, args=(lock, plan, job),
+                         name="locklyctl-firmware", daemon=True).start()
+        return self.firmware_install_status(lock_id)
+
+    def firmware_install_status(self, lock_id: str) -> dict:
+        """Where the firmware install on this door is: {"running", "ok", "stage",
+        "progress", "text", "error", "parts", "versions"}, or running False and
+        ok None when none was started."""
+        lock = self._lock(lock_id)
+        with self._fw_lock:
+            job = self._fw_jobs.get(lock["ID"])
+            return dict(job) if job else {"running": False, "ok": None, "stage": "", "progress": None,
+                                          "text": "", "error": "", "parts": [], "versions": {}}
+
+    def _run_firmware_install(self, lock: dict, plan: dict, job: dict) -> None:
+        """Thread entry point: runs the install and records how it ended."""
+        def on_event(event: dict) -> None:
+            with self._fw_lock:
+                job.update(stage=event.get("stage"), progress=event.get("progress"),
+                           text=event.get("text") or "")
+        try:
+            result = self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event)
+        except (LocklyError, ValueError) as e:
+            outcome = {"ok": False, "error": str(e)}
+        except Exception as e:          # thread boundary: record it, or the page would wait forever
+            _LOG.exception("firmware install on %s stopped", lock.get("ID"))
+            outcome = {"ok": False, "error": f"It stopped with an unexpected error: {e}"}
+        else:
+            outcome = {"ok": True, "versions": result["versions"]}
+        with self._fw_lock:
+            job.update(running=False, **outcome)
 
     # ── connection test ──────────────────────────────────────────────────
 

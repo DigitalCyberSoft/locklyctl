@@ -9,11 +9,13 @@
     locklyctl welcome LOCK off|always [--send]
     locklyctl welcome LOCK query
     locklyctl rain LOCK query|on|off [--send]
+    locklyctl firmware LOCK [--install [--yes]]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
 commands (welcome, rain) are dry runs that print the frame unless --send is
-given. Unlock asks for confirmation, or needs --yes when nothing can be asked.
+given. Unlock and firmware --install ask for confirmation, or need --yes when
+nothing can be asked.
 Exit status: 0 ok, 1 the lock or cloud failed, 2 usage error.
 """
 from __future__ import annotations
@@ -95,6 +97,13 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("state", choices=["query", "on", "off"])
     p.add_argument("--send", action="store_true",
                    help="actually transmit (default: print the frame only)")
+
+    p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
+                                        "runs (wakes it)")
+    p.add_argument("lock")
+    p.add_argument("--install", action="store_true",
+                   help="install it over Wi-Fi (multi-part locks such as the Visage), then confirm it")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -202,5 +211,50 @@ def _rain(client: LocklyClient, args) -> int:
     return EXIT_OK if ok else EXIT_FAIL
 
 
+def _firmware(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    plan = client.firmware_plan(lock)
+    offer = plan["offer"]
+    if not offer["release"]:
+        print(C.green(f"  {_name(lock)}: nothing newer from Lockly"))
+        return EXIT_OK
+    multi = offer["kind"] == F.FW_MULTI_PART
+    on_lock = F.firmware_display_versions(lock, plan["status"], offer["kind"])
+    print(f"  {_name(lock)}: Lockly offers {'release ' if multi else ''}{offer['release']}")
+    for p in offer["parts"]:
+        current = on_lock.get(p["part"]) or "?"
+        newer = F.version_lower(on_lock.get(p["part"]), p["version"])
+        by_phone = not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock))
+        print(f"    {p['part']:<7} {current:>8} → {p['version']:<9} "
+              + (C.yellow("newer") if newer else C.dim("current"))
+              + C.dim(", Lockly app at the door" if by_phone else ", over Wi-Fi"))
+    send = ", ".join(f"{p['part']} {p['version']}" for p in plan["send"])
+    if not args.install:
+        print(C.dim(f"  --install sends over Wi-Fi: {send}") if send and not plan["blocked"]
+              else C.dim(f"  {plan['blocked']}"))
+        return EXIT_OK
+    if plan["blocked"]:
+        print(C.red(f"  can't install: {plan['blocked']}"))
+        return EXIT_FAIL
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("firmware --install needs --yes when it can't ask for confirmation")
+        print(C.yellow("  The lock downloads and installs it itself, then restarts; leave the door "
+                       "alone until this finishes."))
+        if not C.confirm(f"  install {send} on {C.bold(_name(lock))}?", default=False):
+            return EXIT_OK
+    last = [""]
+
+    def progress(event: dict) -> None:
+        if event["text"] != last[0]:
+            last[0] = event["text"]
+            print(C.dim(f"    {event['text']}"))
+
+    result = client.firmware_install(lock, plan["send"], plan["downloadUrl"], progress)
+    print(C.green(f"  {_name(lock)}: installed, the lock reports "
+                  + ", ".join(f"{p['part']} {result['versions'].get(p['part'])}" for p in plan["send"]) + " ✓"))
+    return EXIT_OK
+
+
 _HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
-             "welcome": _welcome, "rain": _rain}
+             "welcome": _welcome, "rain": _rain, "firmware": _firmware}

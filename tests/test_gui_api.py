@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from locklyctl import config
 from locklyctl import features as F
 from locklyctl.gui.api import Api, split_unit
-from locklyctl.transport import LocklyError
+from locklyctl.transport import LocklyClient, LocklyError
 
 MC, UUID = "12345678", "aa0011223344556677889900"
 B2 = "bb0011223344556677889900"
@@ -29,6 +29,7 @@ class FakeClient:
         self.pw_hash = None
         self.status_cache = {}
         self.sent = []
+        self.fw_installs = []
         self.locks = [
             {"ID": UUID, "na": "2A Office", "mod": "PGD7Y", "hubid": "PGH200X", "mc": MC},
             {"ID": B2, "na": "1204", "mod": "PGK728WRHK", "mc": MC},
@@ -101,16 +102,30 @@ class FakeClient:
         return {"is_locked": True, "lock_type": 105, "firmware_version": "1.14.24",
                 "sub_version": "1.00.72", "wifi_version": "2.02.72", "ble_version": "1.14.24"}
 
-    def firmware_offer(self, lock, lock_type=None):
-        kind = F.firmware_check_kind(lock)
-        if kind == F.FW_SINGLE:
-            return {"kind": kind, "release": "2.02.80", "title": "", "notes": "",
-                    "parts": [{"part": "main", "version": "2.02.80", "size_kb": None}]}
-        return {"kind": kind, "release": "1.14.34", "title": "", "notes": "", "parts": [
-            {"part": "front", "version": "1.00.95", "size_kb": 87},
-            {"part": "back", "version": "1.00.76", "size_kb": 35},
-            {"part": "wifi", "version": "2.02.72", "size_kb": 1180},
-            {"part": "ble", "version": "1.14.28", "size_kb": 280}]}
+    # Lockly's raw firmware answers (made-up files); the client's own code
+    # turns them into the offer and the install plan.
+    def _firmware_reply(self, lock, lock_type=None):
+        if F.firmware_check_kind(lock) == F.FW_SINGLE:
+            return {"cod": "200", "value": "2.02.80"}
+        reply = {"cod": "200", "verNum": "1.14.34", "downloadUrl": "https://files.example.com/fw/"}
+        for prefix, ver, size in (("front", "1.00.95", "87"), ("back", "1.00.76", "35"),
+                                  ("hub", "2.02.72", "1180"), ("ble", "1.14.28", "280")):
+            reply.update({prefix + "Ver": ver, prefix + "Url": f"https://files.example.com/fw/{prefix}.bin",
+                          prefix + "Name": f"{prefix}.bin", prefix + "Size": size, prefix + "Crc": "abc"})
+        return reply
+
+    firmware_offer = LocklyClient.firmware_offer
+    firmware_plan = LocklyClient.firmware_plan
+    _offer_from_reply = LocklyClient._offer_from_reply
+    _FW_PARTS = LocklyClient._FW_PARTS
+    fw_install_error = None
+
+    def firmware_install(self, lock, send, download_url, on_event):
+        on_event({"stage": "install", "progress": 50, "text": "Installing 50 %"})
+        if self.fw_install_error:
+            raise self.fw_install_error
+        self.fw_installs.append((lock["ID"], [(p["part"], p["version"]) for p in send], download_url))
+        return {"versions": {p["part"]: p["version"] for p in send}}
 
     # 0A9B as a Visage sent it: one one-time slot 07:00-21:00, switched off, first entry
     welcome_table = "00" + "04" + "01" + "08" + "8007001500" + "00FFFFFFFF" * 7 + "00" + "00"
@@ -238,10 +253,60 @@ def test_firmware_check(api):
     assert r["release"] == "1.14.34" and r["lockFirmware"] == "1.14.24"
     assert parts["Back board"]["newer"] and parts["Bluetooth chip"]["newer"]
     assert not parts["Wi-Fi module"]["newer"]                           # same version
-    assert parts["Front board"]["current"] == "" and not parts["Front board"]["newer"]   # not traced
+    assert parts["Front board"]["current"] == "1.14.24" and not parts["Front board"]["newer"]
     assert parts["Bluetooth chip"]["byPhone"] and not parts["Back board"]["byPhone"]
+    assert "battery" in r["install"]["blocked"]              # this status reports none
     r = api.firmware(UUID)                                   # a PGD7Y: Bluetooth only
     assert [(p["name"], p["newer"], p["byPhone"]) for p in r["parts"]] == [("Lock firmware", True, True)]
+    assert r["install"] == {"parts": [], "blocked": "This lock's firmware is installed from a phone "
+                                                    "over Bluetooth: use the Lockly app."}
+
+
+@_api_in_tmp_home
+def test_firmware_install(api):
+    import time
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    reported = FakeClient.query_status(c, None)
+    c.query_status = lambda lock: {**reported, "battery_percent": 80}
+    r = api.firmware(B2)
+    # the back board is the one part behind that goes over Wi-Fi (Bluetooth is the phone's)
+    assert r["install"] == {"blocked": "", "parts": [
+        {"part": "back", "name": "Back board", "version": "1.00.76", "current": "1.00.72"}]}
+
+    def finished():
+        for _ in range(200):
+            st = api.firmware_install_status(B2)
+            if not st["running"]:
+                return st
+            time.sleep(0.01)
+        raise AssertionError("install didn't finish")
+
+    try:
+        api.firmware_install(B2, [{"part": "back", "version": "1.00.70"}])   # not what's offered now
+    except ValueError as e:
+        assert "changed since the check" in str(e)
+    else:
+        raise AssertionError("a changed plan was installed")
+    assert c.fw_installs == []
+    api.firmware_install(B2, r["install"]["parts"])
+    st = finished()
+    assert st["ok"] and st["versions"] == {"back": "1.00.76"} and st["text"] == "Installing 50 %"
+    assert c.fw_installs == [(B2, [("back", "1.00.76")], "https://files.example.com/fw/")]
+
+    c.fw_install_error = LocklyError("The lock reported a failure while installing: crc", "failure")
+    api.firmware_install(B2, r["install"]["parts"])
+    st = finished()
+    assert st["ok"] is False and st["error"].endswith("crc") and len(c.fw_installs) == 1
+
+    c.query_status = lambda lock: {**reported, "battery_percent": 30}           # isBatteryLow
+    assert "30 %" in api.firmware(B2)["install"]["blocked"]
+    try:
+        api.firmware_install(B2, r["install"]["parts"])
+    except ValueError as e:
+        assert "30 %" in str(e)
+    else:
+        raise AssertionError("installed on a low battery")
 
 
 @_api_in_tmp_home

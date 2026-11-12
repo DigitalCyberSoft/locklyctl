@@ -254,7 +254,8 @@ $("retry-asleep").addEventListener("click", async (ev) => {
 // ── favorites: one tap to lock or unlock, without opening the door ─────
 
 const pending = new Map();    // lock id → "lock" | "unlock" | "check" while it's out
-const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…", keep: "Setting it to stay unlocked…" };
+const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…", keep: "Setting it to stay unlocked…",
+  firmware: "Updating firmware…" };
 
 function renderFavs() {
   const favs = locks.filter((v) => v.favorite);
@@ -760,6 +761,8 @@ $("btn-firmware").addEventListener("click", async (ev) => {
         h("td", {}, p.current || h("span", { class: "muted" }, "not reported")),
         h("td", { class: p.newer ? "bad" : "" }, p.offered, p.newer ? " (newer)" : ""),
         h("td", { class: "muted" }, p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
+      const install = r.install;
+      const byPhone = r.parts.filter((p) => p.newer && p.byPhone).map((p) => p.name);
       out.replaceChildren(
         h("p", {}, `Lockly offers ${r.kind === "multi" ? "release " : "firmware "}${r.release}`
           + (r.answered ? "." : ". The lock didn't answer, so its own versions are missing.")),
@@ -767,11 +770,51 @@ $("btn-firmware").addEventListener("click", async (ev) => {
           h("thead", {}, h("tr", {}, h("th", {}, "Part"), h("th", {}, "On the lock"), h("th", {}, "Newest"),
             h("th", {}, "Installed by"))),
           h("tbody", {}, rows)),
-        r.notes && h("p", { class: "fine fw-notes" }, r.notes),
-        h("p", { class: "fine" }, "Installing from locklyctl isn't built yet. For now, install with the Lockly app."));
+        r.notes ? h("p", { class: "fine fw-notes" }, r.notes) : null,
+        install.parts.length && !install.blocked
+          ? h("div", { class: "fw-install" },
+            h("p", {}, "Over Wi-Fi this sends " + install.parts.map((p) => `${p.name} ${p.version}`).join(", ") + "."),
+            h("button", { class: "btn btn-ink", type: "button", onclick: () => installFirmware(v, install) },
+              "Install over Wi-Fi"))
+          : (r.kind === "multi" && install.blocked ? h("p", { class: "fine" }, install.blocked) : null),
+        byPhone.length ? h("p", { class: "fine" }, `${byPhone.join(", ")}: install with the Lockly app, at the door.`)
+          : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });
+
+async function installFirmware(v, install) {
+  const list = install.parts.map((p) => `${p.name} ${p.current || "?"} → ${p.version}`).join(", ");
+  const ok = await confirmDialog(`Install new firmware on ${doorLabel(v)}?`,
+    `${list}. The lock downloads the files and installs them itself, then restarts. Leave the door alone `
+    + "until this says it's done; it can take several minutes.", "Install");
+  if (!ok || pending.has(v.id)) return;
+  pending.set(v.id, "firmware");
+  refreshControls(v.id);
+  const show = (st) => {
+    if (v.id !== currentId || activeTab !== "connection") return;
+    $("fw-out").replaceChildren(
+      h("p", {}, `${doorLabel(v)}: ${st.parts.map((p) => `${p.name} ${p.version}`).join(", ")}`),
+      h("p", { class: st.ok === false ? "form-error" : (st.ok ? "ok" : "muted") },
+        st.ok === false ? st.error : (st.ok ? "Installed, and the lock reports the new versions." : st.text)));
+  };
+  try {
+    let st = await call("firmware_install", v.id, install.parts);
+    while (st.running) {
+      show(st);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      st = await call("firmware_install_status", v.id);
+    }
+    show(st);
+    toast(st.ok ? `${doorLabel(v)}: firmware installed.` : `${doorLabel(v)}: ${st.error}`, !st.ok);
+  } catch (e) {
+    if (v.id === currentId) $("fw-out").replaceChildren(h("p", { class: "form-error" }, e.message));
+    toast(e.message, true);
+  } finally {
+    pending.delete(v.id);
+    refreshControls(v.id);
+  }
+}
 
 // ── people ─────────────────────────────────────────────────────────────
 

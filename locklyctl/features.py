@@ -10,6 +10,7 @@ primitives as unlock, so the framing is sound; what is unproven is the field
 from __future__ import annotations
 
 import re
+import zlib
 from datetime import timedelta as _td, timezone as _tz
 
 from . import protocol as P
@@ -631,6 +632,115 @@ def version_lower(current: str | None, offered: str | None) -> bool:
         if int(a) != int(b):
             return int(a) < int(b)
     return False
+
+
+def version_at_least(current: str | None, offered: str | None) -> bool:
+    """After an install: ``current`` is a real version, comparable with
+    ``offered`` the way HexUtils.o compares, and not lower."""
+    if not current or not offered or current == "0.00.00" or len(current) != len(offered):
+        return False
+    cur, new = current.split("."), offered.split(".")
+    if len(cur) != len(new) or not all(p.isdigit() for p in cur + new):
+        return False
+    return [int(p) for p in cur] >= [int(p) for p in new]
+
+
+# ── firmware install over MQTT (multi-part locks), as app 3.3.4 does it ──────
+# One firmwareUpgradeRequest of type MULTIPLE names every part to install; the
+# lock fetches the files from downloadUrl and reports progress until "final".
+# Sources: FirmwareUpgradeCheckerResponse (parts), GetOtaUpdateBean
+# .getNeedUpgradeFirmwareList (which parts), LowWiFiEnergyUpgradeFirmwareArgs
+# and UpgradeFirmwareArgs (args), FirmwareUpgradeRequestData (request).
+FW_INSTALL_PARTS = (            # part, offer key prefix, args slot, UpgradeFirmwareFlag bit
+    ("wifi", "hub", "three", 4),
+    ("ble", "ble", "four", 8),
+    ("front", "front", "first", 1),
+    ("back", "back", "second", 2),
+    ("screen", "screen", "five", 16),
+)
+FW_MIN_BATTERY = 31             # BluetoothBean.isBatteryLow: 30 % or less is refused
+FW_STAGES = {"download": "Downloading", "transfer": "Transferring", "install": "Installing",
+             "final": "Finished"}
+
+
+def firmware_reply_parts(reply: dict) -> tuple[list[dict], list[str]]:
+    """The parts a fwver/msh/new reply offers, in the app's order, and what's
+    wrong with it. A part counts only with a version, URL, file name and size
+    (FirmwareUpgradeCheckerResponse); one whose size isn't a number is named
+    in the problems instead (the app's JSON parser would reject the reply)."""
+    parts, problems = [], []
+    for part, prefix, _slot, _bit in FW_INSTALL_PARTS:
+        ver, url, name, size = (reply.get(prefix + k) for k in ("Ver", "Url", "Name", "Size"))
+        if not (ver and url and name and size is not None):
+            continue
+        if not str(size).isdigit():
+            problems.append(f"the {part} part's size is {size!r}, not a number")
+            continue
+        parts.append({"part": part, "version": str(ver), "name": str(name), "size": int(size),
+                      "crc": reply.get(prefix + "Crc"), "md5": reply.get(prefix + "Md5")})
+    return parts, problems
+
+
+def firmware_versions_on_lock(status: dict) -> dict:
+    """Each part's version as the app reads it from a status reply: the front
+    board is the main version (HostLockFragment sets it as the lock's version,
+    FirmwareUpgradeUtils.getCurrentVersion reads it back); the screen has none."""
+    return {"front": status.get("firmware_version"), "back": status.get("sub_version"),
+            "wifi": status.get("wifi_version"), "ble": status.get("ble_version")}
+
+
+def firmware_display_versions(lock: dict, status: dict, kind: str) -> dict:
+    """The lock's version for each part an offer can name, to show beside it."""
+    on_lock = {**firmware_versions_on_lock(status),
+               "main": status.get("firmware_version") or str(lock.get("fwv") or "")}
+    if kind != FW_MULTI_PART:
+        on_lock.pop("front")            # front = main version is the multi-part app's reading only
+    return on_lock
+
+
+def firmware_parts_to_install(parts: list[dict], on_lock: dict, phone_does_ble: bool) -> list[dict]:
+    """The parts the app sends over MQTT: those whose version on the lock is known
+    and lower than offered. With SUOTA the Bluetooth chip is left to the phone."""
+    return [p for p in parts
+            if not (phone_does_ble and p["part"] == "ble")
+            and on_lock.get(p["part"]) not in (None, "", "0.00.00")
+            and version_lower(on_lock.get(p["part"]), p["version"])]
+
+
+def firmware_long_version(version: str | None) -> int:
+    """FirmwareUpgradeUtils.toLongVersion: drop the dots, add "00", read as hex."""
+    return 0 if version is None else int(version.replace(".", "") + "00", 16)
+
+
+def build_firmware_upgrade(upgrade_id: str, device_id: str, download_url: str,
+                           parts: list[dict]) -> dict:
+    """The firmwareUpgradeRequest payload for a MULTIPLE upgrade, as
+    createLowWiFiEnergyFirmwareUpgradeRequestData builds it (version "0", crc32 0,
+    needReboot false, no md5) and Gson writes it (nulls left out). The args CRC
+    is the CRC-32 of the offer's CRC text, as Crc32Utils.a computes it."""
+    by_part = {p["part"]: p for p in parts}
+    args: dict = {"flag": sum(bit for part, _prefix, _slot, bit in FW_INSTALL_PARTS if part in by_part)}
+    for part, _prefix, slot, _bit in FW_INSTALL_PARTS:
+        p = by_part.get(part, {})
+        if p.get("md5") is not None:
+            args[f"{slot}_md5"] = p["md5"]
+        if p.get("name") is not None:
+            args[f"{slot}_file_name"] = p["name"]
+        args[f"{slot}_file_size"] = p.get("size", 0)
+        args[f"{slot}_file_ver"] = firmware_long_version(p.get("version"))
+        if p.get("crc"):
+            args[f"{slot}_file_crc32"] = zlib.crc32(p["crc"].encode())
+    return {"id": upgrade_id, "deviceId": device_id, "type": "MULTIPLE",
+            "downloadUrl": download_url[:-1] if download_url.endswith("/") else download_url,
+            "crc32": 0, "version": 0, "needReboot": False, "args": args}
+
+
+def describe_firmware_progress(payload: dict) -> str:
+    """'Installing 40 %' from a firmwareUpgradeProgress payload."""
+    stage = str(payload.get("stage") or "")
+    label = FW_STAGES.get(stage, stage.capitalize() or "Working")
+    progress = payload.get("progress")
+    return label if stage == "final" or progress is None else f"{label} {progress} %"
 
 
 def is_access_user_lock(lock: dict) -> bool:

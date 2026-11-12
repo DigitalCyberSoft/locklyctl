@@ -46,7 +46,8 @@ way the official app does.
 | Keep a Visage/Vision unlocked for a while (one-time `0x9B` slot that unlocks by itself) | ✅ tested on a Visage: opened within ~20 s, relocked at the end, and the lock switched the slot off. Under 24 h: past midnight (lock time) a second slot from 00:00 takes over, and the lock was seen to run such a slot the next day. Not yet seen: whether the door locks for the minute between 23:59 and 00:00 |
 | Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
-| Firmware: what Lockly offers, part by part, next to what the lock runs | ✅ checked against Lockly for a Visage, a PGD7Y, a Vision and PGH200 hubs. Installing isn't built: use the Lockly app |
+| Firmware: what Lockly offers, part by part, next to what the lock runs | ✅ checked against Lockly for a Visage, a PGD7Y, a Vision and PGH200 hubs |
+| Firmware install over Wi-Fi (Visage and other multi-part Wi-Fi locks): front, back and Wi-Fi boards, as the app sends them over MQTT | ⚠️ built from the app's code and checked against Lockly's live offer; not yet run on a lock. The Bluetooth chip, and locks the app updates over Bluetooth (PGD7Y and others), still need the Lockly app |
 | Slot locks (e.g. PGD7Y): PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; not yet working on a lock |
 | Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 
@@ -62,9 +63,10 @@ door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
 test. Star a door to pin it to **Favorites** at the top of the list, where
 Lock and Unlock are a single tap each, without the hold. **Keep unlocked for**
 1 to 23 hours (Visage, Vision) sets a one-time Welcome Mode window that the
-lock runs and ends by itself; a new one replaces the last. Doors that didn't answer can be asked again
-with **Retry asleep**. The **Device** tab tests the connection and checks
-for newer firmware. The **People** view
+lock runs and ends by itself; a new one replaces the last. Doors that didn't
+answer can be asked again with **Retry asleep**. The **Device** tab tests the
+connection, checks for newer firmware and, on a Visage, installs it over
+Wi-Fi. The **People** view
 shows everyone who can get in, across every door, and lets you give, change
 and take away access.
 
@@ -126,7 +128,8 @@ more:
 
 Tools a flag doesn't allow aren't offered at all, so the assistant never sees
 them. Existing PINs are never returned; a PIN the server creates is returned
-once, in the reply that created it.
+once, in the reply that created it. Installing firmware isn't a tool under
+any flag: it's in the desktop app and the command line only.
 
 ## Command line
 
@@ -150,11 +153,15 @@ locklyctl unlock "Office" --yes         # --yes required when nothing can ask
 locklyctl welcome "Front" set --days weekdays --start 08:00 --end 18:00 --send
 locklyctl welcome "Front" off --send
 locklyctl rain "Office" on --send
+locklyctl firmware "Front" [--install] # newer firmware; --install sends it over Wi-Fi
 ```
 
 A door is named by its name (case-insensitive, a unique prefix is fine) or ID.
-`welcome` and `rain` only print the frame unless `--send` is given. Exit
-status: 0 ok, 1 the lock or cloud failed, 2 usage error.
+`welcome` and `rain` only print the frame unless `--send` is given.
+`firmware --install` asks first (or needs `--yes`), refuses at 30 % battery
+or less as the Lockly app does, follows the lock's progress, then waits up to
+5 minutes for the lock to report the new versions. Exit status: 0 ok, 1 the
+lock or cloud failed, 2 usage error.
 
 ## Building
 
