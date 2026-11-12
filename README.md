@@ -55,8 +55,10 @@ can only be reached over Bluetooth, which locklyctl doesn't do yet.
 Every door is a plate showing its state. Select one to lock it, *hold to
 unlock* (press and hold until the button fills, so a stray click can't open a
 door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
-test. The **People** view shows everyone who can get in, across every door,
-and lets you give, change and take away access.
+test. Star a door to pin it to **Favorites** at the top of the list, where
+Lock and Unlock are a single tap each, without the hold. The **People** view
+shows everyone who can get in, across every door, and lets you give, change
+and take away access.
 
 - **Windows / macOS:** download `locklyctl-windows.zip` or `locklyctl-macos.zip`
   from the latest [*Build apps*](../../actions/workflows/build.yml) run, or from
@@ -79,9 +81,10 @@ view.
 - **Android:** download `locklyctl-android.apk` from the latest *Build apps*
   run or a release, open it on the phone and allow installing from that
   source.
-- **iOS:** Apple only allows apps signed with a developer account on an
-  iPhone, so the build gives you a Simulator app; to put it on your phone,
-  build it on a Mac with your own Apple ID. See [mobile/README.md](mobile/README.md).
+- **iOS:** download `locklyctl-ios-unsigned.ipa` and install it with
+  Sideloadly or AltStore (Windows or macOS), which sign it with your Apple ID.
+  A free Apple ID works, but the app then has to be reinstalled every 7 days.
+  No Mac needed; see [mobile/README.md](mobile/README.md).
 
 Phones have no keyring, so a remembered sign-in is kept in the app's private
 storage, which other apps can't read.
@@ -148,8 +151,9 @@ status: 0 ok, 1 the lock or cloud failed, 2 usage error.
 
 Every push to `master` runs [`.github/workflows/build.yml`](.github/workflows/build.yml):
 tests (including a run with the iOS app's pure-Python ciphers), then the
-Windows and macOS apps (PyInstaller), the Android APK and the iOS Simulator app
-(Briefcase). Pushing a `v*` tag also attaches them to a release.
+Windows and macOS apps (PyInstaller), the Android APK, and the iOS Simulator
+app and unsigned iPhone `.ipa` (Briefcase, then `xcodebuild`). Pushing a `v*`
+tag also attaches them to a release.
 
 By hand:
 

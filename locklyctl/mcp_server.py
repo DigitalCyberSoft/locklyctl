@@ -2,8 +2,10 @@
 run your Lockly doors through locklyctl.
 
     locklyctl-mcp                    # read-only, plus locking doors
-    locklyctl-mcp --allow-writes     # also manage people, PINs and schedules
+    locklyctl-mcp --allow-writes     # also manage people, PINs, Rain Mode, Welcome off
     locklyctl-mcp --allow-unlock     # also unlock doors
+    locklyctl-mcp --allow-writes --allow-unlock   # also Welcome Mode schedules,
+                                                  # which keep a door unlocked
 
 It speaks MCP over stdio and signs in with the login saved by ``locklyctl`` or
 the desktop app (sign in there once with "remember me"). Tools that a flag
@@ -58,7 +60,8 @@ def _door(v: dict) -> dict:
     return {"id": v["id"], "name": v["name"], "model": v["model"],
             "connection": v.get("route") or "", "state": v["state"],
             "battery": v["battery"], "lowBattery": v["lowBattery"], "doorOpen": v["doorOpen"],
-            "checkedAt": _when(v["checkedAt"]), "statusFromHubCache": v["cached"]}
+            "checkedAt": _when(v["checkedAt"]), "statusFromHubCache": v["cached"],
+            "favorite": bool(v.get("favorite"))}
 
 
 class Doors:
@@ -259,13 +262,11 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
     # ── modes ────────────────────────────────────────────────────────────
 
     @mcp.tool(annotations=RISKY)
-    async def set_welcome_mode(door: str, action: Literal["set", "off", "always"],
-                               days: list[str] | None = None, start: str | None = None,
-                               end: str | None = None) -> dict:
-        """Welcome Mode keeps a door unlocked on a schedule. "set" with days
-        (mon..sun) and start/end "HH:MM"; "off"; or "always" (never locks)."""
+    async def turn_off_welcome_mode(door: str) -> dict:
+        """Turn Welcome Mode off so the door locks normally. On 8-slot locks
+        (Visage, Vision) this clears every Welcome Mode schedule on the door."""
         v = await anyio.to_thread.run_sync(doors.remote, door)
-        r = await run(doors.api.welcome, v["id"], None, action, days or [], start or "", end or "", True)
+        r = await run(doors.api.welcome, v["id"], None, "off", [], "", "", True)
         return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
 
     @mcp.tool(annotations=WRITE)
@@ -273,6 +274,22 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         """Rain Mode turns the keypad off so rain can't press keys."""
         v = await anyio.to_thread.run_sync(doors.remote, door)
         r = await run(doors.api.rain, v["id"], on, True)
+        return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
+
+    if not allow_unlock:
+        return mcp
+
+    # ── schedules that leave a door unlocked: --allow-unlock as well ─────
+
+    @mcp.tool(annotations=RISKY)
+    async def set_welcome_mode(door: str, action: Literal["set", "off", "always"],
+                               days: list[str] | None = None, start: str | None = None,
+                               end: str | None = None) -> dict:
+        """Welcome Mode keeps a door unlocked on a schedule. "set" with days
+        (mon..sun) and start/end "HH:MM"; "off"; or "always" (never locks).
+        Only when the user explicitly asked for this door to stay unlocked."""
+        v = await anyio.to_thread.run_sync(doors.remote, door)
+        r = await run(doors.api.welcome, v["id"], None, action, days or [], start or "", end or "", True)
         return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
 
     return mcp

@@ -1,6 +1,6 @@
 # Tests, then builds the apps:
 #   Windows and macOS (Apple silicon) desktop apps — PyInstaller
-#   Android APK and an iOS Simulator build — BeeWare Briefcase
+#   Android APK, iOS Simulator app and unsigned iPhone app — BeeWare Briefcase
 # Runs on every push to master and from the Actions tab. Push a tag like
 # v0.2.0 to also attach the builds to a GitHub release. Builds are unsigned.
 name: Build apps
@@ -106,10 +106,35 @@ jobs:
           app=$(find build -path '*iphonesimulator*' -name '*.app' -maxdepth 8 | head -1)
           echo "built $app"
           ditto -c -k --keepParent "$app" locklyctl-ios-simulator.zip
+      # Briefcase 0.4.7 only builds for the Simulator (`briefcase package iOS`
+      # does nothing), so the iPhone build runs xcodebuild itself, unsigned.
+      # The Python support package's build phase codesigns each extension
+      # module with $EXPANDED_CODE_SIGN_IDENTITY, which is empty when signing
+      # is off: default it to "-" (ad hoc). Sideloadly or AltStore re-signs the
+      # whole app with the user's Apple ID when installing it.
+      - name: Build for iPhone (unsigned, for sideloading)
+        run: |
+          xcode=build/locklyctl_app/ios/xcode
+          utils=$xcode/Support/Python.xcframework/build/utils.sh
+          sed -i '' 's/--sign "\$EXPANDED_CODE_SIGN_IDENTITY"/--sign "${EXPANDED_CODE_SIGN_IDENTITY:--}"/' "$utils"
+          grep -q 'EXPANDED_CODE_SIGN_IDENTITY:--' "$utils" || { echo "utils.sh changed; update this step"; exit 1; }
+          xcodebuild build -quiet -project $xcode/locklyctl.xcodeproj \
+            -configuration Release -sdk iphoneos -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          app=$xcode/build/Release-iphoneos/locklyctl.app
+          test -d "$app" || { find build -name '*.app' -maxdepth 8; exit 1; }
+          lipo -info "$app/locklyctl"
+          mkdir -p ipa/Payload
+          cp -R "$app" ipa/Payload/
+          (cd ipa && zip -qry ../locklyctl-ios-unsigned.ipa Payload)
       - uses: actions/upload-artifact@v4
         with:
           name: locklyctl-ios-simulator.zip
           path: locklyctl-ios-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locklyctl-ios-unsigned.ipa
+          path: locklyctl-ios-unsigned.ipa
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -131,4 +156,4 @@ jobs:
           --notes "Unsigned builds. macOS: right-click locklyctl.app and choose Open the first time.
           Windows: if SmartScreen warns, choose More info, then Run anyway.
           Android: open the APK on the phone and allow installing from this source.
-          iOS: the zip runs in the Simulator; installing on an iPhone needs your own Apple signing (see mobile/README.md)."
+          iOS: install locklyctl-ios-unsigned.ipa with Sideloadly or AltStore, which sign it with your Apple ID (see mobile/README.md); the zip runs in the Simulator."

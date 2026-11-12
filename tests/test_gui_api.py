@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,6 +47,12 @@ class FakeClient:
     def load_devices(self): return self.locks
     def prime_cached_status(self, locks): return 0
     def close(self): pass
+
+    warmed = None
+
+    def connect_device_channel(self):
+        self.warmed.set()
+        return True
 
     def list_users(self, lock):
         if lock["ID"] == UUID:
@@ -147,6 +154,33 @@ def test_lock_views_and_actions(api):
         pass
     else:
         raise AssertionError("unknown lock accepted")
+
+
+@_api_in_tmp_home
+def test_favorites(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    c.warmed = threading.Event()
+    assert not any(v["favorite"] for v in api.locks())
+    assert api.set_favorite(UUID, True)["favorite"] is True
+    assert not c.warmed.is_set()                  # a hub lock doesn't use the device channel
+    api.set_favorite(B2, True)
+    assert c.warmed.wait(2)                       # a Wi-Fi favourite connects it ahead of time
+    assert config.load_config()["favorites"] == [UUID, B2]     # kept in the order they were added
+    again = Api(client_factory=FakeClient)        # survives a restart
+    again.sign_in("a@b", "right", False)
+    again._client.warmed = threading.Event()
+    assert {v["id"] for v in again.locks() if v["favorite"]} == {UUID, B2}
+    assert api.set_favorite(UUID, False)["favorite"] is False
+    assert config.load_config()["favorites"] == [B2]
+    c.locks.append({"ID": "cc0011223344556677889900", "na": "5J", "mod": "PGD7Y", "mc": MC})
+    for lock_id, err in (("cc0011223344556677889900", ValueError), ("nope", LocklyError)):
+        try:
+            api.set_favorite(lock_id, True)    # no hub: can't be opened from here at all
+        except err:
+            continue
+        raise AssertionError(lock_id)
+    assert config.load_config()["favorites"] == [B2]
 
 
 @_api_in_tmp_home

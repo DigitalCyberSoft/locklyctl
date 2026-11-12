@@ -58,6 +58,10 @@
 
     <div class="workspace" id="doors-ws">
       <nav class="cabinet" aria-label="Doors">
+        <section class="favs" id="favs" aria-labelledby="favs-title" hidden>
+          <h2 class="favs-title" id="favs-title">Favorites</h2>
+          <ul class="fav-list" id="fav-list"></ul>
+        </section>
         <ul id="plates" class="plates"></ul>
       </nav>
 
@@ -73,6 +77,7 @@
               <h1 id="d-name"></h1>
               <p class="muted" id="d-model"></p>
             </div>
+            <button class="btn btn-quiet fav-toggle" id="btn-fav" type="button" aria-pressed="false">Add to favorites</button>
           </header>
 
           <div class="door-state">

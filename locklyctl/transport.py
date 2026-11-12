@@ -297,6 +297,12 @@ class LocklyClient:
                     return None
         return self._mqtt
 
+    def connect_device_channel(self) -> bool:
+        """Open the MQTT device channel now, so the first command to a Wi-Fi
+        lock doesn't also wait for the broker connection. Thread-safe (the
+        channel is built under a lock); returns whether the channel is up."""
+        return self._mqtt_channel() is not None
+
     def _senddata(self, lock: dict, frame_hex: str, directive: str | None) -> str | None:
         """One hub-relayed senddata call. Returns ACK hex, or None (logs cod)."""
         req = {

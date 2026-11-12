@@ -8,7 +8,8 @@ const now = Date.now() / 1000;
 const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   id, name, unit, rest, model, hub, state, battery, lowBattery: battery != null && battery < 20,
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
-  welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK", ...extra,
+  welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
+  route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", favorite: false, ...extra,
 });
 
 const locks = [
@@ -19,9 +20,9 @@ const locks = [
   mk("2d32", "3A", "3A", "", "PGK728WRHK", "", "unlocked", 47),
   mk("4300", "2C Spare", "2C", "Spare", "PGK728WRHK", "", "unknown", null),
   mk("1e00", "3C Vision", "3C", "Vision", "PGK798HK", "", "locked", 91),
-  mk("2d3e", "2A Front", "2A", "Front", "PGK728WRHK", "", "locked", 18),
+  mk("2d3e", "2A Front", "2A", "Front", "PGK728WRHK", "", "locked", 18, { favorite: true }),
   mk("1c00", "4C New", "4C", "New", "PGK728WRHK", "", "unknown", null),
-  mk("3000", "1204", "1204", "", "PGK728WRHK", "", "locked", 73),
+  mk("3000", "1204", "1204", "", "PGK728WRHK", "", "locked", 73, { favorite: true }),
   mk("2600", "1206", "1206", "", "PGK728WRHK", "", "unknown", null),
   mk("263e", "3C", "3C", "", "PGK728WRHK", "", "unknown", null),
   mk("4500", "2C", "2C", "", "PGK728WRHK", "", "unknown", null),
@@ -39,6 +40,7 @@ window.pywebview = {
     async check(id) { await wait(600); return { ...find(id), checkedAt: Date.now() / 1000 }; },
     async lock(id) { await wait(700); Object.assign(find(id), { state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async unlock(id) { await wait(700); Object.assign(find(id), { state: "unlocked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
+    async set_favorite(id, on) { await wait(150); Object.assign(find(id), { favorite: !!on }); return { ...find(id) }; },
     async activity() {
       await wait(200);
       return [

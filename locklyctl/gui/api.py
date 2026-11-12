@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -173,6 +174,12 @@ def _lock_date(u: dict, tz) -> str:
     return F.access_date_permanent()
 
 
+def _favorite_ids(cfg: dict) -> list[str]:
+    """Lock ids pinned as favourites, in the order they were added."""
+    favs = cfg.get("favorites")
+    return [f for f in favs if isinstance(f, str)] if isinstance(favs, list) else []
+
+
 class Api:
     def __init__(self, client_factory=LocklyClient) -> None:
         self._factory = client_factory
@@ -244,7 +251,8 @@ class Api:
                 return lk
         raise LocklyError("That lock is no longer on this account.")
 
-    def _view(self, lock: dict) -> dict:
+    def _view(self, lock: dict, favs: list[str] | None = None) -> dict:
+        favs = _favorite_ids(config.load_config()) if favs is None else favs
         name = str(lock.get("na") or lock.get("blename") or lock.get("ID", "?"))
         unit, rest = split_unit(name)
         e = self._c().status_cache.get(lock["ID"]) or {}
@@ -269,19 +277,23 @@ class Api:
             "welcomeForm": F.welcome_form(lock),
             "route": F.remote_route(lock),
             "faceCapable": F.supports_face(lock),
+            "favorite": lock["ID"] in favs,
         }
 
     def locks(self) -> list[dict]:
         """All locks, with the silent hub-cached status where a hub has one."""
         c = self._c()
+        favs = _favorite_ids(config.load_config())
+        self._warm_up(favs)
         c.prime_cached_status(c.locks)
-        return [self._view(lk) for lk in c.locks]
+        return [self._view(lk, favs) for lk in c.locks]
 
     def check_all(self) -> list[dict]:
         """Live status for every lock. Wakes them all (they beep)."""
         c = self._c()
         c.refresh_all_status(c.locks)
-        return [self._view(lk) for lk in c.locks]
+        favs = _favorite_ids(config.load_config())
+        return [self._view(lk, favs) for lk in c.locks]
 
     def check(self, lock_id: str) -> dict:
         """Live status for one lock (wakes it)."""
@@ -308,6 +320,31 @@ class Api:
         cache = self._c().status_cache
         entry = {k: v for k, v in (cache.get(lock["ID"]) or {}).items() if k != "cached"}
         cache[lock["ID"]] = {**entry, "reachable": True, "is_locked": locked, "ts": time.time()}
+
+    # ── favourites: doors pinned to the top for one-tap lock/unlock ──────
+
+    def set_favorite(self, lock_id: str, on: bool) -> dict:
+        """Pin a door to (or unpin it from) the favourites. Stored only in this
+        device's config; nothing on the lock or in Lockly's cloud changes."""
+        lock = self._lock(lock_id)
+        cfg = config.load_config()
+        favs = [f for f in _favorite_ids(cfg) if f != lock_id]
+        if on:
+            if F.remote_route(lock) == "bluetooth":
+                raise ValueError("This door has no hub, so it can only be opened over Bluetooth.")
+            favs.append(lock_id)
+        cfg["favorites"] = favs
+        config.save_config(cfg)
+        self._warm_up(favs)
+        return self._view(lock, favs)
+
+    def _warm_up(self, favs: list[str]) -> None:
+        """Connect Lockly's device channel in the background when a favourite
+        is a Wi-Fi lock, so its first lock/unlock doesn't wait for it."""
+        c = self._c()
+        if any(F.remote_route(lk) == "wifi" for lk in c.locks if lk["ID"] in favs):
+            threading.Thread(target=c.connect_device_channel, name="locklyctl-warm-up",
+                             daemon=True).start()
 
     # ── activity & guests ────────────────────────────────────────────────
 
@@ -375,11 +412,12 @@ class Api:
         with ThreadPoolExecutor(max_workers=6) as ex:
             results = list(ex.map(fetch, c.locks))
 
-        merges = config.load_config().get("people_merges") or {}
+        cfg = config.load_config()
+        merges, favs = cfg.get("people_merges") or {}, _favorite_ids(cfg)
         people: dict[str, dict] = {}
         failed = []
         for lk, users in results:
-            door = self._view(lk)
+            door = self._view(lk, favs)
             if users is None:
                 failed.append(door["name"])
                 continue

@@ -110,6 +110,7 @@ function updateLock(view) {
   const i = locks.findIndex((l) => l.id === view.id);
   if (i >= 0) locks[i] = view; else locks.push(view);
   renderPlates();
+  renderFavs();
   if (view.id === currentId) renderDoor();
 }
 
@@ -169,6 +170,7 @@ async function enterApp(email) {
     return;
   }
   locks.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  renderFavs();
   if (!locks.length) {
     $("plates").replaceChildren(h("li", { class: "muted" }, "No locks on this account. Add them in the Lockly app first."));
     return;
@@ -183,6 +185,7 @@ $("sign-out").addEventListener("click", async () => {
   if (!ok) return;
   const s = await call("sign_out");
   locks = []; currentId = null;
+  renderFavs();
   showSignin(s.email);
 });
 
@@ -211,22 +214,82 @@ function renderPlates() {
       h("button", {
         class: "plate", type: "button", "data-state": stateOf(v),
         "aria-current": v.id === currentId ? "true" : "false",
-        "aria-label": `${doorLabel(v)}, ${STATE_WORD[stateOf(v)]}`,
+        "aria-label": `${doorLabel(v)}, ${STATE_WORD[stateOf(v)]}${v.favorite ? ", favorite" : ""}`,
         onclick: () => selectLock(v.id),
       },
         h("span", { class: "plate-num" + (v.unit ? "" : " wordy") }, num),
         h("span", { class: "plate-rest" }, v.unit ? v.rest : ""),
         h("span", { class: "plate-state" },
           h("span", { class: "plate-word" }, STATE_WORD[stateOf(v)]),
-          batt && h("span", { class: "plate-batt" + (v.lowBattery || (v.battery != null && v.battery <= 20) ? " low" : "") }, batt))));
+          batt && h("span", { class: "plate-batt" + (v.lowBattery || (v.battery != null && v.battery <= 20) ? " low" : "") }, batt)),
+        v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, "★")));
   });
   $("plates").replaceChildren(...items);
+}
+
+// ── favorites: one tap to lock or unlock, without opening the door ─────
+
+const pending = new Map();    // lock id → "lock" | "unlock" | "check" while it's out
+const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…" };
+
+function renderFavs() {
+  const favs = locks.filter((v) => v.favorite);
+  $("favs").hidden = !favs.length;
+  $("fav-list").replaceChildren(...favs.map((v) => {
+    const st = stateOf(v);
+    const off = pending.has(v.id) || v.route === "bluetooth";
+    return h("li", { class: "fav", "data-state": st },
+      h("button", {
+        class: "fav-door", type: "button", "aria-current": v.id === currentId ? "true" : "false",
+        onclick: () => selectLock(v.id),
+      },
+        h("span", { class: "fav-name" }, doorLabel(v)),
+        h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || STATE_WORD[st])),
+      h("span", { class: "fav-actions" },
+        h("button", { class: "btn btn-ink", type: "button", disabled: off, "aria-label": `Lock ${doorLabel(v)}`,
+          onclick: () => runCommand(v, "lock") }, "Lock"),
+        h("button", { class: "btn btn-open", type: "button", disabled: off, "aria-label": `Unlock ${doorLabel(v)}`,
+          onclick: () => runCommand(v, "unlock") }, "Unlock")));
+  }));
+}
+
+// Lock, unlock or check one door. Its buttons (here and in the door panel)
+// stay disabled until the lock has answered.
+async function runCommand(v, kind) {
+  if (pending.has(v.id)) return;
+  const label = doorLabel(v);
+  pending.set(v.id, kind);
+  refreshControls(v.id);
+  try {
+    if (kind === "check") {
+      toast(`Waking ${label}…`);
+      const view = await call("check", v.id);
+      updateLock(view);
+      toast(view.state === "asleep" ? `${label} didn't answer.` : `${label}: ${STATE_WORD[view.state]}.`,
+        view.state === "asleep");
+    } else {
+      toast(`${kind === "lock" ? "Locking" : "Unlocking"} ${label}…`);
+      const r = await call(kind, v.id);
+      updateLock(r.lock);
+      toast(r.ok ? `${label} ${kind}ed.` : `${label} didn't ${kind}: ${r.detail}`, !r.ok);
+    }
+  } catch (e) { toast(e.message, true); }
+  finally {
+    pending.delete(v.id);
+    refreshControls(v.id);
+  }
+}
+
+function refreshControls(id) {
+  renderFavs();
+  if (id === currentId) renderDoor();
 }
 
 function selectLock(id) {
   const changed = id !== currentId;
   currentId = id;
   renderPlates();
+  renderFavs();
   renderDoor();
   if (changed) {
     resetSchedules();
@@ -246,7 +309,12 @@ function renderDoor() {
   $("d-model").textContent = [v.model, v.hub && `hub ${v.hub}`].filter(Boolean).join(", ")
     + (v.route ? `. Reached ${ROUTE_TEXT[v.route]}.` : "");
   const noRoute = v.route === "bluetooth";
-  for (const id of ["btn-lock", "btn-unlock", "btn-check"]) $(id).disabled = noRoute;
+  for (const id of ["btn-lock", "btn-unlock", "btn-check"]) $(id).disabled = noRoute || pending.has(v.id);
+  const fav = $("btn-fav");
+  fav.setAttribute("aria-pressed", String(!!v.favorite));
+  fav.replaceChildren(h("span", { class: "star", "aria-hidden": "true" }, v.favorite ? "★" : "☆"), " Favorite");
+  fav.disabled = noRoute && !v.favorite;     // a door with no hub can't be opened from a favorite
+  fav.title = noRoute && !v.favorite ? "This door has no hub, so it can only be opened over Bluetooth." : "";
 
   const st = $("d-state");
   st.dataset.state = v.state;
@@ -265,31 +333,19 @@ function renderDoor() {
   $("d-facts").replaceChildren(...facts);
 }
 
-$("btn-lock").addEventListener("click", async (ev) => {
-  const v = current();
-  if (!v) return;
-  await busy([ev.currentTarget, $("btn-unlock"), $("btn-check")], async () => {
-    toast(`Locking ${doorLabel(v)}…`);
-    try {
-      const r = await call("lock", v.id);
-      updateLock(r.lock);
-      toast(r.ok ? `${doorLabel(v)} locked.` : `${doorLabel(v)} didn't lock: ${r.detail}`, !r.ok);
-    } catch (e) { toast(e.message, true); }
-  });
-});
+$("btn-lock").addEventListener("click", () => { const v = current(); if (v) runCommand(v, "lock"); });
+$("btn-check").addEventListener("click", () => { const v = current(); if (v) runCommand(v, "check"); });
 
-$("btn-check").addEventListener("click", async (ev) => {
+$("btn-fav").addEventListener("click", async (ev) => {
   const v = current();
   if (!v) return;
-  await busy(ev.currentTarget, async () => {
-    toast(`Waking ${doorLabel(v)}…`);
-    try {
-      const view = await call("check", v.id);
-      updateLock(view);
-      toast(view.state === "asleep" ? `${doorLabel(v)} didn't answer.` : `${doorLabel(v)}: ${STATE_WORD[view.state]}.`,
-        view.state === "asleep");
-    } catch (e) { toast(e.message, true); }
-  });
+  ev.currentTarget.disabled = true;
+  try {
+    const view = await call("set_favorite", v.id, !v.favorite);
+    updateLock(view);
+    toast(view.favorite ? `${doorLabel(v)} is in your favorites.` : `${doorLabel(v)} removed from favorites.`);
+  } catch (e) { toast(e.message, true); }
+  finally { renderDoor(); }
 });
 
 // Hold to unlock: nothing is sent unless the button is held for the full fill.
@@ -317,14 +373,7 @@ $("btn-check").addEventListener("click", async (ev) => {
     btn.classList.remove("holding");
     btn.classList.add("done");
     const v = current();
-    await busy([btn, $("btn-lock"), $("btn-check")], async () => {
-      toast(`Unlocking ${doorLabel(v)}…`);
-      try {
-        const r = await call("unlock", v.id);
-        updateLock(r.lock);
-        toast(r.ok ? `${doorLabel(v)} unlocked.` : `${doorLabel(v)} didn't unlock: ${r.detail}`, !r.ok);
-      } catch (e) { toast(e.message, true); }
-    });
+    if (v) await runCommand(v, "unlock");
     btn.classList.remove("done");
   };
 

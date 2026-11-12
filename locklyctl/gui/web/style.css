@@ -167,6 +167,34 @@ h1, h2, p { margin: 0; }
 .plate[data-state="locked"] .plate-word { color: var(--locked); }
 .plate[data-state="unlocked"] .plate-word { color: var(--unlocked); font-weight: 700; }
 .plate-batt.low { color: var(--unlocked); }
+.plate-star { position: absolute; top: 0.45rem; right: 0.55rem; color: var(--brass); font-size: var(--fs-sm); line-height: 1; }
+
+/* ── favorites: lock and unlock without opening the door ──────────── */
+.favs { display: grid; gap: 0.5rem; margin-bottom: 1.25rem; }
+.favs-title { font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft); }
+.fav-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.fav {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.6rem; align-items: center;
+  background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--rule);
+  border-radius: 3px; padding: 0.45rem 0.5rem 0.45rem 0.75rem;
+}
+.fav[data-state="locked"] { border-left-color: var(--locked); }
+.fav[data-state="unlocked"] { border-left-color: var(--unlocked); }
+.fav-door {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0.15rem 0; cursor: pointer;
+  text-align: left; display: grid; min-width: 0;
+}
+.fav-door[aria-current="true"] .fav-name { text-decoration: underline 2px var(--brass); text-underline-offset: 3px; }
+.fav-name { font-weight: 800; font-stretch: 112%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fav-state { font-size: var(--fs-xs); color: var(--ink-soft); }
+.fav[data-state="locked"] .fav-state { color: var(--locked); }
+.fav[data-state="unlocked"] .fav-state { color: var(--unlocked); font-weight: 700; }
+.fav-actions { display: flex; gap: 0.4rem; }
+.fav-actions .btn { padding: 0.6rem 0.9rem; }
+.btn-open { border-color: var(--unlocked); color: var(--unlocked); }
+.btn-open:hover { background: color-mix(in srgb, var(--unlocked) 10%, transparent); }
+.fav-toggle { margin-left: auto; align-self: center; }
+.fav-toggle .star { color: var(--brass); }
 
 /* ── the selected door ────────────────────────────────────────────── */
 .door { overflow-y: auto; padding: 1.75rem 2.25rem 4rem; background: var(--surface); }
@@ -351,6 +379,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .actions .btn { flex: 1 1 auto; padding: 0.75rem 1rem; }
   .log td { padding-right: 0.5rem; }
   .person-head h1 { font-size: 1.9rem; }
+  .door-title { order: 1; flex-basis: 100%; }               /* Favorite sits beside the number */
+  .cabinet:has(.favs:not([hidden])) { max-height: 50vh; }   /* room for the favorites */
+  .favs { margin-bottom: 1rem; }
+  .fav-actions .btn { padding: 0.7rem 0.85rem; }             /* at least 44px tall to tap */
 }
 
 @media (prefers-reduced-motion: reduce) {
