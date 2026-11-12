@@ -34,7 +34,9 @@ def main(argv: list[str] | None = None) -> int:
         "locklyctl", url=(WEB_DIR / "index.html").as_uri(), js_api=api,
         width=1180, height=780, min_size=(860, 600), background_color="#E4E7E2")
     window.events.closed += api.close
-    webview.start(debug=debug, gui=_linux_backend())
+    # Windows and macOS show the .exe's or .app's own icon (packaging/locklyctl.ico, .icns).
+    icon = str(WEB_DIR / "icon.png") if sys.platform.startswith("linux") else None
+    webview.start(debug=debug, gui=_linux_backend(), icon=icon)
     return 0
 
 

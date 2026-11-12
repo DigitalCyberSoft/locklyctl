@@ -12,8 +12,9 @@ dependencies = ["requests>=2.28", "pycryptodome>=3.17; sys_platform != 'ios'", "
 [project.optional-dependencies]
 keyring = ["keyring>=24"]   # keep the saved login in the OS keyring
 # Desktop GUI. Windows/macOS use the built-in web view; on Linux the Qt
-# backend installs from wheels, so it works in a plain virtualenv.
-gui = ["pywebview>=5; sys_platform != 'linux'", "pywebview[qt]>=5; sys_platform == 'linux'"]
+# backend installs from wheels, so it works in a plain virtualenv. 5.3 is the
+# first pywebview whose start() takes icon=.
+gui = ["pywebview>=5.3; sys_platform != 'linux'", "pywebview[qt]>=5.3; sys_platform == 'linux'"]
 mcp = ["mcp>=1.2"]          # locklyctl-mcp, for AI assistants
 dev = ["pytest>=7", "mcp>=1.2"]
 

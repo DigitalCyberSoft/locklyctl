@@ -29,6 +29,7 @@ exe = EXE(
     exclude_binaries=True,
     name="locklyctl",
     console=False,
+    icon=os.path.join(root, "packaging", "locklyctl.ico") if sys.platform == "win32" else None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="locklyctl")
 
@@ -36,6 +37,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="locklyctl.app",
+        icon=os.path.join(root, "packaging", "locklyctl.icns"),
         bundle_identifier="io.dcs.locklyctl",
         version=__version__,
         info_plist={"NSHighResolutionCapable": True, "CFBundleDisplayName": "locklyctl"},

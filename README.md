@@ -1,5 +1,7 @@
 # locklyctl
 
+<img src="mobile/icons/locklyctl-round-192.png" alt="" width="96" align="right">
+
 **Unofficial** control of Lockly smart locks from your computer, your phone or
 an AI assistant, with no Lockly app needed. It talks to Lockly's cloud the same
 way the official app does.
