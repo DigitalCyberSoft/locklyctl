@@ -1,6 +1,6 @@
 """Pure-Python AES, Triple DES (ECB only) and RSA key parsing.
 
-The phone apps use this: pycryptodome has no current Android or iOS wheels.
+The iOS app uses this: pycryptodome has no iOS build.
 Desktop installs keep using pycryptodome (see _crypto.py). The interface
 mirrors the few pycryptodome calls locklyctl makes:
 

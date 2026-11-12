@@ -31,7 +31,7 @@ jobs:
       - run: pyflakes locklyctl tests mobile packaging
       - name: Test
         run: python -m pytest -q tests
-      - name: Test with the phone apps' pure-Python ciphers
+      - name: Test with the iOS app's pure-Python ciphers
         env:
           LOCKLYCTL_PURE_CRYPTO: "1"
         run: python -m pytest -q tests

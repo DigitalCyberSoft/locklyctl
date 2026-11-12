@@ -12,8 +12,9 @@ When the app starts, it runs locklyctl's localhost bridge
 token, then loads the desktop page from it. Anything else on the phone that
 finds the port is refused without the token.
 
-pycryptodome has no Android or iOS builds, so on phones locklyctl uses its
-pure-Python ciphers (`locklyctl/_purecrypto.py`). CI runs the whole test suite
+On Android, pycryptodome comes from Chaquopy's package index. It has no iOS
+build, so the iOS app uses locklyctl's pure-Python ciphers
+(`locklyctl/_purecrypto.py`). CI runs the whole test suite
 with them as well (`LOCKLYCTL_PURE_CRYPTO=1`), and they're checked byte for
 byte against pycryptodome.
 

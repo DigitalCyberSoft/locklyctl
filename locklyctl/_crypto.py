@@ -1,6 +1,6 @@
 """Cipher backend: pycryptodome when it's installed (desktop), otherwise the
-pure-Python fallback in _purecrypto (phones, where pycryptodome has no
-wheels). LOCKLYCTL_PURE_CRYPTO=1 forces the fallback, for testing."""
+pure-Python fallback in _purecrypto (the iOS app, where pycryptodome has
+no build). LOCKLYCTL_PURE_CRYPTO=1 forces the fallback, for testing."""
 from __future__ import annotations
 
 import os

@@ -147,7 +147,7 @@ status: 0 ok, 1 the lock or cloud failed, 2 usage error.
 ## Building
 
 Every push to `master` runs [`.github/workflows/build.yml`](.github/workflows/build.yml):
-tests (including a run with the phone apps' pure-Python ciphers), then the
+tests (including a run with the iOS app's pure-Python ciphers), then the
 Windows and macOS apps (PyInstaller), the Android APK and the iOS Simulator app
 (Briefcase). Pushing a `v*` tag also attaches them to a release.
 
