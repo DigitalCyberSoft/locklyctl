@@ -2,7 +2,8 @@
 
 Runs the page in gui/web inside the platform's own web view — WebView2 on
 Windows, WKWebView on macOS, WebKitGTK or Qt on Linux — with the Python Api
-behind it. Start with ``locklyctl-gui`` or ``python -m locklyctl.gui``.
+behind it. Start with ``locklyctl-gui`` or ``python -m locklyctl.gui``;
+add ``--browser`` to open it in your web browser instead (see server.py).
 """
 from __future__ import annotations
 
@@ -20,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     debug = "--debug" in args or os.environ.get("LOCKLYCTL_GUI_DEBUG") == "1"
     config._setup_logging(debug=debug)
+    if "--browser" in args:                   # no pywebview needed
+        from .server import main as serve
+        return serve()
     try:
         import webview
     except ImportError:

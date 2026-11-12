@@ -29,11 +29,11 @@
       </label>
       <label class="check">
         <input name="remember" type="checkbox" checked>
-        <span>Stay signed in on this computer</span>
+        <span>Stay signed in on this device</span>
       </label>
       <p class="form-error" id="signin-error" role="alert"></p>
       <button class="btn btn-primary" type="submit">Sign in</button>
-      <p class="fine">Unofficial. Not affiliated with Lockly. Your sign-in stays on this computer.</p>
+      <p class="fine">Unofficial. Not affiliated with Lockly. Your sign-in stays on this device.</p>
     </form>
   </main>
 
@@ -52,7 +52,7 @@
         <button class="btn btn-quiet" id="check-all" type="button"
                 title="Asks every lock for its live status. Each lock wakes and beeps.">Check all doors</button>
         <button class="btn btn-quiet" id="sign-out" type="button"
-                title="Signs out and forgets the saved sign-in on this computer.">Sign out</button>
+                title="Signs out and forgets the saved sign-in on this device.">Sign out</button>
       </div>
     </header>
 
@@ -86,7 +86,7 @@
                     aria-describedby="hold-hint"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label">Hold to unlock</span></button>
             <button class="btn btn-quiet" id="btn-check" type="button">Check now</button>
           </div>
-          <p class="fine" id="hold-hint">Press and hold Unlock (or hold Space) until it fills. Check now wakes the lock, so it beeps.</p>
+          <p class="fine" id="hold-hint">Press and hold Unlock<span class="kbd-only"> (or hold Space)</span> until it fills. Check now wakes the lock, so it beeps.</p>
 
           <div class="tabs" role="tablist" aria-label="Door details">
             <button role="tab" id="tab-activity" aria-controls="panel-activity" aria-selected="true">Activity</button>

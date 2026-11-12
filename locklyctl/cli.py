@@ -780,7 +780,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "gui":
         from .gui.app import main as gui_main
-        return gui_main(["--debug"] if args.debug else [])
+        return gui_main((["--debug"] if args.debug else [])
+                        + (["--browser"] if getattr(args, "browser", False) else []))
     if args.command:
         return commands.run(args)
     banner()

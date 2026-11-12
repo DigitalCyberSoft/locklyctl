@@ -37,8 +37,32 @@ async function connect() {
   if (window.pywebview && window.pywebview.api) return window.pywebview.api;
   const mock = new URLSearchParams(location.search).get("mock");   // browser dev only
   if (mock) { await import(mock); return window.pywebview.api; }
+  // Phone apps and --browser: locklyctl/gui/server.py, authorised by a
+  // per-launch token passed in the URL fragment.
+  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (token) return httpBridge(token);
   return new Promise((resolve) =>
     window.addEventListener("pywebviewready", () => resolve(window.pywebview.api), { once: true }));
+}
+
+function httpBridge(token) {
+  return new Proxy({}, {
+    // "then" must stay undefined, or awaiting the proxy would call the server.
+    get: (_, name) => (name === "then" || typeof name === "symbol") ? undefined : async (...args) => {
+      let res;
+      try {
+        res = await fetch(`/api/${name}`, {
+          method: "POST", body: JSON.stringify(args),
+          headers: { "Content-Type": "application/json", "X-Locklyctl-Token": token },
+        });
+      } catch {
+        throw new Error("locklyctl stopped running. Restart the app.");
+      }
+      const out = await res.json().catch(() => ({ error: `locklyctl answered ${res.status}` }));
+      if ("error" in out) throw new Error(out.error);
+      return out.result;
+    },
+  });
 }
 
 async function call(name, ...args) {

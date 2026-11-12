@@ -1,0 +1,134 @@
+# Tests, then builds the apps:
+#   Windows and macOS (Apple silicon) desktop apps — PyInstaller
+#   Android APK and an iOS Simulator build — BeeWare Briefcase
+# Runs on every push to master and from the Actions tab. Push a tag like
+# v0.2.0 to also attach the builds to a GitHub release. Builds are unsigned.
+name: Build apps
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ".[dev]" pyflakes
+      - run: pyflakes locklyctl tests mobile packaging
+      - name: Test
+        run: python -m pytest -q tests
+      - name: Test with the phone apps' pure-Python ciphers
+        env:
+          LOCKLYCTL_PURE_CRYPTO: "1"
+        run: python -m pytest -q tests
+
+  desktop:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: locklyctl-windows.zip
+          - os: macos-latest
+            asset: locklyctl-macos.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui,keyring]" pyinstaller
+      - name: Build
+        run: pyinstaller --noconfirm packaging/locklyctl-gui.spec
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/locklyctl -DestinationPath ${{ matrix.asset }}
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/locklyctl.app ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  android:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install briefcase==0.4.7
+      - name: Accept the Android SDK licences (on this build machine)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build the APK
+        run: |
+          briefcase create android --no-input
+          briefcase package android --packaging-format debug-apk --no-input
+          cp dist/*.apk locklyctl-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locklyctl-android.apk
+          path: locklyctl-android.apk
+
+  ios:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install briefcase==0.4.7
+      - name: Build for the iOS Simulator
+        run: |
+          briefcase create iOS --no-input
+          briefcase build iOS --no-input
+          app=$(find build -path '*iphonesimulator*' -name '*.app' -maxdepth 8 | head -1)
+          echo "built $app"
+          ditto -c -k --keepParent "$app" locklyctl-ios-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locklyctl-ios-simulator.zip
+          path: locklyctl-ios-simulator.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop, android, ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
+          --notes "Unsigned builds. macOS: right-click locklyctl.app and choose Open the first time.
+          Windows: if SmartScreen warns, choose More info, then Run anyway.
+          Android: open the APK on the phone and allow installing from this source.
+          iOS: the zip runs in the Simulator; installing on an iPhone needs your own Apple signing (see mobile/README.md)."

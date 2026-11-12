@@ -1,4 +1,4 @@
-locklyctl — unofficial Lockly command-line tool.
+locklyctl — unofficial control of Lockly smart locks.
 
 Not affiliated with, authorised by, or endorsed by Lockly Security Inc. /
 PIN GENIE LIMITED. "Lockly" and the lock model names are trademarks of their
@@ -15,7 +15,9 @@ the MIT License (see LICENSE.LocklyHA):
 
 New in this project (MIT, Copyright (c) 2026 DigitalCyberSoft):
  - the synchronous REST/MQTT transport, the interactive menu, the desktop
-   app (locklyctl/gui), and the
+   app (locklyctl/gui), the phone apps (mobile/), the MCP server
+   (locklyctl/mcp_server.py), the pure-Python ciphers
+   (locklyctl/_purecrypto.py), and the
    feature frame builders in locklyctl/features.py (Welcome Mode, Rain Mode,
    and remote enrolment), decoded from the Lockly Android app by static
    analysis and documented at https://digitalcybersoft.github.io/lockly_api_docs/

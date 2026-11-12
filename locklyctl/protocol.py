@@ -19,8 +19,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from Crypto.Cipher import AES, DES3
-from Crypto.PublicKey import RSA
+from ._crypto import AES, DES3, RSA
 
 from .capabilities import (
     _NO_PASSWORDS_ACK,

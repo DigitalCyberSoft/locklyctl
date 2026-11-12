@@ -58,7 +58,9 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND",
                                 help="run one action and exit (omit for the menus)")
 
-    sub.add_parser("gui", help="open the desktop app (needs the 'gui' extra)")
+    g = sub.add_parser("gui", help="open the desktop app (needs the 'gui' extra)")
+    g.add_argument("--browser", action="store_true",
+                   help="open it in your web browser instead (no 'gui' extra needed)")
 
     p = sub.add_parser("list", help="list locks with their silent hub-cached status")
     p.add_argument("--json", action="store_true", help="machine-readable output")

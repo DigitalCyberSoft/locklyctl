@@ -1,67 +1,137 @@
 # locklyctl
 
-An **unofficial**, menu-driven command-line tool for controlling Lockly smart
-locks from a computer — no phone required. It talks to Lockly's cloud with the
-same protocol the official app uses.
+**Unofficial** control of Lockly smart locks from your computer, your phone or
+an AI assistant, with no Lockly app needed. It talks to Lockly's cloud the same
+way the official app does.
+
+- **Desktop app** for Windows, macOS and Linux
+- **Phone app** for Android and iOS
+- **Command line**, with menus or as single commands for scripts and cron
+- **MCP server**, so Claude and other AI assistants can check and run your doors
 
 > Not affiliated with, authorised by, or endorsed by Lockly Security Inc. Use it
-> only with your own account and locks. Your credentials and the derived keys
-> stay on your machine.
+> only with your own account and locks. Your credentials and the keys derived
+> from them stay on your device.
+
+<p>
+  <img src="docs/screenshots/desktop-doors.png" alt="Desktop app: every door as a numbered plate with its state and battery; the selected door shows Lock, Hold to unlock and its access log" width="100%">
+</p>
+<p>
+  <img src="docs/screenshots/phone-doors.png" alt="Phone app: the door plates above the selected door's controls" width="32%">
+  <img src="docs/screenshots/phone-people.png" alt="Phone app, dark mode: one person's access across three doors, with their fingerprints and face" width="32%">
+  <img src="docs/screenshots/phone-door.png" alt="Phone app: a door's status and guest PINs" width="32%">
+</p>
+<p>
+  <img src="docs/screenshots/desktop-people.png" alt="People view: everyone with access, and for the selected person, every door they can open, when, and with what" width="49%">
+  <img src="docs/screenshots/desktop-schedules.png" alt="Dark mode: a door's Welcome Mode schedule" width="49%">
+</p>
+
+<sub>Screenshots use made-up sample data (`tests/gui/mock.js`). Rendered with
+`node tests/gui/screenshots.mjs`.</sub>
 
 ## What it does
 
 | Feature | Status |
 |---|---|
-| Log in, list locks | ✅ works |
-| Unlock / Lock | ✅ verified protocol (LocklyHA, real hardware) |
-| Status (silent cached, or live) | ✅ |
+| Sign in, list doors, status (silent hub cache, or live) | ✅ |
+| Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
 | Access log (last 7 days) | ✅ |
-| People view (desktop app): everyone's access across all doors, merged by person | ✅ reads cloud + lock; merging is local to this computer |
-| Add a person to a door with a PIN (always), change PIN, remove from a door — Visage/Vision | ✅ tested on a Visage (create, verify on lock and cloud, change PIN, delete) |
-| Add a person with set hours or between dates; remove one fingerprint/face/card — Visage/Vision | ⚠️ frames checked against the app and lock replies; not yet run on a lock |
-| Guest PIN codes — add (remote), list, delete | ✅ on Visage/Vision now written to the lock (earlier versions only saved them in the cloud); PGD7Y unverified |
-| Remote enrolment — add permanent PIN user (cloud → hub) | ✅ uses the verified `acu/save` path |
+| People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
+| Visage/Vision: add a person with a PIN (always, set hours, or between dates), change PIN, remove from a door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted |
+| Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |
+| Guest PIN codes: add, list, delete | ✅ on Visage/Vision written to the lock; PGD7Y unverified |
 | Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore) |
-| Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models): read, set, always-on, off | ⚠️ frames checked field by field against the app; not yet tried on a lock |
+| Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
-| User slots direct to lock: PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; these are for slot-based locks (e.g. PGD7Y). A Visage ignores them — it manages users with a different command (`0x73`, not built yet) |
-| Face enrolment `0x7D` + `0x92` + cloud registration (Visage only) | ⚠️ checked against the app; needs someone at the lock, not yet tried |
-| Fingerprint capture `0x7D` (Visage/Vision) | ⚠️ frame checked against the app; the code lookup (`getFpCode`) and cloud registration aren't built yet |
+| Slot locks (e.g. PGD7Y): PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; not yet working on a lock |
+| Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 
-Transport is automatic: locks behind a classic hub use the `senddata` relay;
-Wi-Fi-native (Visage) and Matter-hub locks use Lockly's MQTT device channel.
+Commands reach a lock through its hub (`senddata` relay) or, for Wi-Fi locks
+like the Visage, Lockly's MQTT device channel. Locks with no hub are listed but
+can only be reached over Bluetooth, which locklyctl doesn't do yet.
 
-## Install
+## Desktop app
+
+Every door is a plate showing its state. Select one to lock it, *hold to
+unlock* (press and hold until the button fills, so a stray click can't open a
+door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
+test. The **People** view shows everyone who can get in, across every door,
+and lets you give, change and take away access.
+
+- **Windows / macOS:** download `locklyctl-windows.zip` or `locklyctl-macos.zip`
+  from the latest [*Build apps*](../../actions/workflows/build.yml) run, or from
+  a [release](../../releases). The builds are unsigned: on macOS right-click
+  `locklyctl.app` → *Open* the first time; on Windows choose *More info* → *Run
+  anyway* if SmartScreen warns. The macOS build is for Apple silicon.
+- **From source, any OS:** `./gui.sh` sets everything up on first run and opens
+  the app. By hand: `pip install -e '.[gui,keyring]'`, then `locklyctl-gui`.
+  On Linux this uses pywebview's Qt backend, or WebKitGTK if PyGObject is
+  installed.
+- **In your web browser:** `locklyctl-gui --browser` serves the app on
+  `127.0.0.1` behind a one-time token and opens it, with no pywebview needed.
+
+## Phone app (Android, iOS)
+
+The same app on your phone. It runs locklyctl's Python code inside the app
+(BeeWare Briefcase and Toga) and shows the desktop page in the phone's web
+view.
+
+- **Android:** download `locklyctl-android.apk` from the latest *Build apps*
+  run or a release, open it on the phone and allow installing from that
+  source.
+- **iOS:** Apple only allows apps signed with a developer account on an
+  iPhone, so the build gives you a Simulator app; to put it on your phone,
+  build it on a Mac with your own Apple ID. See [mobile/README.md](mobile/README.md).
+
+Phones have no keyring, so a remembered sign-in is kept in the app's private
+storage, which other apps can't read.
+
+## AI assistants (MCP)
+
+`locklyctl-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server. Sign in once with `locklyctl` (choose to stay signed in), then add it
+to your assistant. For Claude Code:
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[keyring]'
-locklyctl
+pip install -e '.[mcp,keyring]'
+claude mcp add locklyctl -- "$(command -v locklyctl-mcp)"
 ```
 
-or just `./run.sh`, which does the same on first run. Requires Python 3.10+.
-Dependencies: `requests`, `pycryptodome`, `paho-mqtt`; the optional `keyring`
-extra stores the saved login in the OS keyring.
+For Claude Desktop, add this to `claude_desktop_config.json`:
 
-## Use
+```json
+{ "mcpServers": { "locklyctl": { "command": "/full/path/to/locklyctl-mcp" } } }
+```
 
-Run `locklyctl`, enter your Lockly email and password, then pick a lock and an
-action from the menus. If you choose to stay logged in, the login credential is
-kept in the OS keyring (with the `keyring` extra and a working backend), else in
-`~/.locklyctl/config.json` (owner-only); the session renews itself before the
-token expires. The credential is password-equivalent, so `--logout` on shared
-machines. `locklyctl --debug` prints protocol-level logging,
-`--logout` forgets the saved login, `--help` lists the options.
+By default it can only look and lock: `list_doors`, `check_door`,
+`door_activity`, `list_people`, `read_door_modes` and `lock_door`. Two flags add
+more:
 
-The lock list starts with each hub lock's cached status (silent, no wake);
-*Refresh all statuses* queries every lock live, which wakes them.
+| Flag | Adds |
+|---|---|
+| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `set_welcome_mode`, `set_rain_mode` |
+| `--allow-unlock` | `unlock_door` |
 
-### Commands (scripts, cron)
+Tools a flag doesn't allow aren't offered at all, so the assistant never sees
+them. Existing PINs are never returned; a PIN the server creates is returned
+once, in the reply that created it.
 
-Once you've saved a login from the menus, single actions run without them:
+## Command line
 
 ```bash
-locklyctl list [--json]                 # locks + silent hub-cached status
+./run.sh                    # sets up a venv on first run, then opens the menus
+```
+
+or `pip install -e '.[keyring]'` and run `locklyctl`. Requires Python 3.10+.
+Sign in, then pick a door and an action from the menus. If you stay signed in,
+the credential goes to the OS keyring (with the `keyring` extra), otherwise to
+`~/.locklyctl/config.json` (owner-only). It's equivalent to your password, so
+use `--logout` on shared machines. `--debug` prints protocol logging.
+
+Once a login is saved, single actions run without the menus:
+
+```bash
+locklyctl list [--json]                 # doors + silent hub-cached status
 locklyctl status "Office" [--live] [--json]
 locklyctl lock "Office"
 locklyctl unlock "Office" --yes         # --yes required when nothing can ask
@@ -70,68 +140,52 @@ locklyctl welcome "Front" off --send
 locklyctl rain "Office" on --send
 ```
 
-A lock is named by its name (case-insensitive, unique prefix fine) or ID.
-Experimental commands (`welcome`, `rain`) only print the frame unless `--send`
-is given; `welcome` picks the command form by model, or takes `--form 9B|46`.
-Exit status: 0 ok, 1 the lock/cloud failed, 2 usage error. Messages go to
-stderr, results to stdout.
+A door is named by its name (case-insensitive, a unique prefix is fine) or ID.
+`welcome` and `rain` only print the frame unless `--send` is given. Exit
+status: 0 ok, 1 the lock or cloud failed, 2 usage error.
 
-## Desktop app
+## Building
 
-A window version of the same tool: every door as a plate showing its state,
-lock and *hold to unlock* (press and hold until the button fills, so a stray
-click can't open a door), access log, guest PINs, Welcome/Rain Mode (preview by
-default) and a connection test. It uses the same sign-in as the menus.
+Every push to `master` runs [`.github/workflows/build.yml`](.github/workflows/build.yml):
+tests (including a run with the phone apps' pure-Python ciphers), then the
+Windows and macOS apps (PyInstaller), the Android APK and the iOS Simulator app
+(Briefcase). Pushing a `v*` tag also attaches them to a release.
 
-- **Windows / macOS:** download `locklyctl-windows.zip` or `locklyctl-macos.zip`
-  from the *Desktop app* workflow run in the Actions tab (or from a release when a
-  `v*` tag is pushed). The builds are unsigned: on macOS right-click
-  `locklyctl.app` → *Open* the first time; on Windows choose *More info* → *Run
-  anyway* if SmartScreen warns. The macOS build is for Apple silicon.
-- **From source, any OS:** `pip install -e '.[gui,keyring]'`, then
-  `locklyctl gui` (or `locklyctl-gui`). From a checkout, `./gui.sh` does the
-  setup on first run and opens the app. On Linux the extra
-  pulls in pywebview's Qt backend; if your system has WebKitGTK and PyGObject,
-  pywebview uses those instead.
+By hand:
 
-The page lives in `locklyctl/gui/web` (plain HTML/CSS/JS, no build step) and
-calls `locklyctl/gui/api.py`. To work on it in a browser without a lock, serve
-the repo root (`python -m http.server`) and open
+```bash
+pip install '.[gui,keyring]' pyinstaller && pyinstaller --noconfirm packaging/locklyctl-gui.spec
+pip install briefcase && briefcase package android -p debug-apk    # needs the Android SDK
+```
+
+To work on the page (`locklyctl/gui/web`: plain HTML/CSS/JS, no build step)
+without a lock, serve the repo root with `python -m http.server` and open
 `http://localhost:8000/locklyctl/gui/web/index.html?mock=/tests/gui/mock.js`.
-
-To build the bundle yourself: `pip install '.[gui,keyring]' pyinstaller &&
-pyinstaller --noconfirm packaging/locklyctl-gui.spec`.
 
 ## How it works / provenance
 
-The cryptography, BLE frame building and response parsing (`protocol.py`) are
-reused verbatim from [Forcky's LocklyHA](https://github.com/Forcky/LocklyHA)
-(MIT — see `LICENSE.LocklyHA`), where they are validated on real hardware. The
-synchronous REST/MQTT transport and the menu are new. The Welcome Mode / Rain
-Mode frame builders (`features.py`) were decoded from the Lockly Android app and
-are **not** hardware-tested — the tool flags them as experimental and asks
-before sending.
+The cryptography, BLE frame building and response parsing in `protocol.py`
+come from [Forcky's LocklyHA](https://github.com/Forcky/LocklyHA) (MIT, see
+`LICENSE.LocklyHA`), where they were validated on real hardware. The REST/MQTT
+transport, the user-management, Welcome and Rain Mode frames (`features.py`,
+decoded from the Lockly Android app and tested where the table above says so),
+the apps and the MCP server are new.
 
-The remote-enrolment feature matters because recent Lockly apps force Bluetooth
-for adding users, even though the lock accepts these commands over the hub/MQTT
-just like unlock. The cloud `acu/save` path adds a permanent PIN user remotely
-and is the reliable route; the direct `0x4B` PIN push, user list/delete and
-fingerprint capture are traced from the app and offered as experimental (dry-run
-by default — they print the frame and ask before transmitting). The protocol is
-written up in `docs` / the companion docs site under *BLE → enrolment*.
+Recent Lockly apps insist on Bluetooth for adding users, yet a lock accepts
+these commands over its hub or MQTT just like unlock, which is what lets
+locklyctl manage people remotely.
 
-Protocol reference: the companion docs at
-<https://digitalcybersoft.github.io/lockly_api_docs/>.
+Protocol reference: <https://digitalcybersoft.github.io/lockly_api_docs/>.
 
 ## Safety
 
-- A lock's master code + UUID together can forge any command; this tool holds
-  them only in memory during a session.
-- "Experimental" actions build correctly-framed commands with unverified
-  contents. A wrong field is most likely rejected by the lock, but test on one
-  lock you can physically reach before relying on it.
+- A lock's master code and UUID together can forge any command. locklyctl only
+  holds them in memory while it runs.
+- Commands marked ⚠️ are correctly framed but their contents aren't proven on
+  a lock. A wrong field is most likely rejected, but try them on a door you
+  can physically reach first.
 
 ## Licence
 
-MIT (new code). Bundled `protocol.py` and `certs/` derive from LocklyHA (MIT).
-The desktop app bundles the Archivo font (SIL OFL 1.1). See `NOTICE`.
+MIT (new code). `protocol.py` and `certs/` derive from LocklyHA (MIT). The apps
+bundle the Archivo font (SIL OFL 1.1). See `NOTICE`.

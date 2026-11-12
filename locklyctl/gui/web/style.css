@@ -122,7 +122,7 @@ h1, h2, p { margin: 0; }
 .signin-title { font-size: 2rem; }
 
 /* ── layout ───────────────────────────────────────────────────────── */
-.app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
+.app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: 1rem;
   padding: 0.6rem 1.25rem; border-bottom: 1px solid var(--rule);
@@ -333,6 +333,24 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .access-table thead { display: none; }
   .access-table tr { display: grid; grid-template-columns: 1fr 1fr; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
   .access-table td { border: 0; padding: 0.15rem 0.5rem 0.15rem 0; }
+  .access-table td:last-child, .access-table .detail-row td { grid-column: 1 / -1; }
+  .access-table .row-actions { justify-content: flex-start; padding-top: 0.35rem; }
+}
+
+/* Phones. Tracks are minmax(0, …) so one wide child can't widen the page. */
+@media (max-width: 560px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .topbar { flex-wrap: wrap; row-gap: 0.4rem; padding: 0.5rem 1rem; }
+  .topbar-right { margin-left: auto; }
+  .topbar .btn { padding: 0.4rem 0.7rem; }
+  .cabinet, .roster { max-height: 34vh; }
+  .plates { grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr)); gap: 0.5rem; }
+  :root { --plate-num: 1.75rem; --door-num: 3.25rem; }
+  .tabs { gap: 1.1rem; overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
+  .tabs [role="tab"] { flex: none; }
+  .actions .btn { flex: 1 1 auto; padding: 0.75rem 1rem; }
+  .log td { padding-right: 0.5rem; }
+  .person-head h1 { font-size: 1.9rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -340,3 +358,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .btn-hold.holding .hold-fill { transition-duration: 900ms; } /* the fill is the timer; keep it, it's user-driven */
 }
 
+
+/* Touch screens have no Space bar to hold. */
+@media (hover: none) and (pointer: coarse) {
+  .kbd-only { display: none; }
+}
