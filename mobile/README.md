@@ -82,5 +82,9 @@ signing switched off; the exact steps are in `.github/workflows/build.yml`.
 `python3 mobile/icons/make_icons.py` (needs Google Chrome). The same run writes
 the desktop icons: `locklyctl/gui/web/icon.png` (window icon on Linux, and the
 page's favicon), `packaging/locklyctl.ico` (Windows) and
-`packaging/locklyctl.icns` (macOS). The emblem was drawn with OpenAI's image
-API; its shapes live in `make_icons.py`.
+`packaging/locklyctl.icns` (macOS); and the logos: `locklyctl/gui/web/logo.svg`
+(beside the wordmark in the app) and `docs/logo-light.png` / `logo-dark.png`
+(the README's heading). The emblem was drawn with OpenAI's image API; its
+shapes live in `make_icons.py`. The icons inside the app were drawn the same
+way, as one sheet, and live as a sprite at the top of
+`locklyctl/gui/web/index.html`.

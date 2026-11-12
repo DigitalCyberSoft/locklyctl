@@ -20,8 +20,21 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+// An icon from the sprite at the top of index.html; decorative, so screen readers skip it.
+function icon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "i");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
 const STATE_WORD = { locked: "Locked", unlocked: "Unlocked", asleep: "Asleep", unknown: "Not checked", bluetooth: "Bluetooth only" };
 const ROUTE_TEXT = { hub: "through its hub", wifi: "over its own Wi-Fi", bluetooth: "only over Bluetooth" };
+const STATE_ICON = { locked: "locked", unlocked: "unlocked", asleep: "asleep", bluetooth: "bluetooth" };
+const stateIcon = (st) => (STATE_ICON[st] ? icon(STATE_ICON[st]) : null);
 const stateOf = (v) => (v.route === "bluetooth" ? "bluetooth" : v.state);
 const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
 
@@ -220,9 +233,9 @@ function renderPlates() {
         h("span", { class: "plate-num" + (v.unit ? "" : " wordy") }, num),
         h("span", { class: "plate-rest" }, v.unit ? v.rest : ""),
         h("span", { class: "plate-state" },
-          h("span", { class: "plate-word" }, STATE_WORD[stateOf(v)]),
+          h("span", { class: "plate-word" }, stateIcon(stateOf(v)), STATE_WORD[stateOf(v)]),
           batt && h("span", { class: "plate-batt" + (v.lowBattery || (v.battery != null && v.battery <= 20) ? " low" : "") }, batt)),
-        v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, "★")));
+        v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, icon("favorite-on"))));
   });
   $("plates").replaceChildren(...items);
   renderRetry();
@@ -234,7 +247,7 @@ const asleepDoors = () => locks.filter((v) => v.state === "asleep" && v.route !=
 function renderRetry() {
   const n = asleepDoors().length;
   $("retry-asleep").hidden = !n || !$("people-ws").hidden;
-  $("retry-asleep").textContent = `Retry ${n} asleep`;
+  $("retry-asleep").replaceChildren(icon("check"), `Retry ${n} asleep`);
 }
 
 $("retry-asleep").addEventListener("click", async (ev) => {
@@ -271,12 +284,13 @@ function renderFavs() {
         h("span", { class: "fav-name" }, doorLabel(v)),
         h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || STATE_WORD[st])),
       h("span", { class: "fav-actions" },
-        st === "asleep" && h("button", { class: "btn btn-quiet", type: "button", disabled: off,
-          "aria-label": `Check ${doorLabel(v)} again`, title: "Ask it again", onclick: () => runCommand(v, "check") }, "↻"),
+        st === "asleep" && h("button", { class: "btn btn-quiet icon-only", type: "button", disabled: off,
+          "aria-label": `Check ${doorLabel(v)} again`, title: "Ask it again", onclick: () => runCommand(v, "check") },
+          icon("check")),
         h("button", { class: "btn btn-ink", type: "button", disabled: off, "aria-label": `Lock ${doorLabel(v)}`,
-          onclick: () => runCommand(v, "lock") }, "Lock"),
+          onclick: () => runCommand(v, "lock") }, icon("locked"), "Lock"),
         h("button", { class: "btn btn-open", type: "button", disabled: off, "aria-label": `Unlock ${doorLabel(v)}`,
-          onclick: () => runCommand(v, "unlock") }, "Unlock")));
+          onclick: () => runCommand(v, "unlock") }, icon("unlocked"), "Unlock")));
   }));
 }
 
@@ -333,26 +347,26 @@ function renderDoor() {
   if (!v) return;
   $("d-unit").textContent = v.unit;
   $("d-name").textContent = v.unit ? (v.rest || `Door ${v.unit}`) : v.name;
-  $("d-model").textContent = [v.model, v.hub && `hub ${v.hub}`].filter(Boolean).join(", ")
-    + (v.route ? `. Reached ${ROUTE_TEXT[v.route]}.` : "");
+  $("d-model").replaceChildren([v.model, v.hub && `hub ${v.hub}`].filter(Boolean).join(", ") + (v.route ? ". " : ""),
+    v.route ? h("span", { class: "route" }, icon(v.route), `Reached ${ROUTE_TEXT[v.route]}.`) : null);
   const noRoute = v.route === "bluetooth";
   for (const id of ["btn-lock", "btn-unlock", "btn-check"]) $(id).disabled = noRoute || pending.has(v.id);
   const fav = $("btn-fav");
   fav.setAttribute("aria-pressed", String(!!v.favorite));
-  fav.replaceChildren(h("span", { class: "star", "aria-hidden": "true" }, v.favorite ? "★" : "☆"), " Favorite");
+  fav.replaceChildren(h("span", { class: "star" }, icon(v.favorite ? "favorite-on" : "favorite")), "Favorite");
   fav.disabled = noRoute && !v.favorite;     // a door with no hub can't be opened from a favorite
   fav.title = noRoute && !v.favorite ? "This door has no hub, so it can only be opened over Bluetooth." : "";
 
   const st = $("d-state");
   st.dataset.state = v.state;
-  st.textContent = v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
+  st.replaceChildren(stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
     : v.state === "asleep" ? "Didn't answer (asleep or offline)"
-      : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state];
+      : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]);
   st.dataset.state = v.route === "bluetooth" ? "unknown" : v.state;
 
   const facts = [];
-  if (v.battery != null) facts.push(h("li", { class: v.battery <= 20 ? "warn" : "" }, `Battery ${v.battery}%`));
-  else if (v.lowBattery) facts.push(h("li", { class: "warn" }, "Battery low"));
+  if (v.battery != null) facts.push(h("li", { class: v.battery <= 20 ? "warn" : "" }, icon("battery"), `Battery ${v.battery}%`));
+  else if (v.lowBattery) facts.push(h("li", { class: "warn" }, icon("battery"), "Battery low"));
   if (v.doorOpen != null) facts.push(h("li", { class: v.doorOpen ? "warn" : "" }, v.doorOpen ? "Door open" : "Door closed"));
   const since = sinceText(v.checkedAt);
   if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}` : `Checked ${since}`));
@@ -775,7 +789,7 @@ $("btn-firmware").addEventListener("click", async (ev) => {
           ? h("div", { class: "fw-install" },
             h("p", {}, "Over Wi-Fi this sends " + install.parts.map((p) => `${p.name} ${p.version}`).join(", ") + "."),
             h("button", { class: "btn btn-ink", type: "button", onclick: () => installFirmware(v, install) },
-              "Install over Wi-Fi"))
+              icon("firmware"), "Install over Wi-Fi"))
           : (r.kind === "multi" && install.blocked ? h("p", { class: "fine" }, install.blocked) : null),
         byPhone.length ? h("p", { class: "fine" }, `${byPhone.join(", ")}: install with the Lockly app, at the door.`)
           : null);

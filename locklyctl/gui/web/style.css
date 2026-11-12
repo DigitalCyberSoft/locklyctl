@@ -88,6 +88,13 @@ h1, h2, p { margin: 0; }
 .btn-quiet { border-color: var(--rule); }
 .btn-quiet:hover { border-color: var(--ink-soft); }
 
+/* Icons come from the sprite at the top of index.html and take the text colour. */
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.i { width: 1.15em; height: 1.15em; vertical-align: -0.22em; margin-inline-end: 0.4em; }
+.icon-only .i, .plate-star .i { margin-inline-end: 0; }
+.state-word .i { width: 0.9em; height: 0.9em; vertical-align: -0.08em; }
+.logo { height: 1.3em; width: auto; vertical-align: -0.24em; margin-inline-end: 0.3em; }
+
 .field { display: grid; gap: 0.25rem; font-size: var(--fs-sm); min-width: 0; }
 .field > span { color: var(--ink-soft); }
 .field input, .field select {
@@ -163,7 +170,8 @@ h1, h2, p { margin: 0; }
 }
 .plate-num.wordy { font-size: var(--fs-lg); font-stretch: 100%; line-height: 1.2; }
 .plate-rest { font-size: var(--fs-sm); font-stretch: 87%; min-height: calc(var(--fs-sm) * 1.45); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plate-state { font-size: var(--fs-xs); color: var(--ink-soft); display: flex; gap: 0.5rem; }
+.plate-state { font-size: var(--fs-xs); color: var(--ink-soft); display: flex; flex-wrap: wrap; gap: 0 0.5rem; }
+.plate-word { white-space: nowrap; }
 .plate[data-state="locked"] .plate-word { color: var(--locked); }
 .plate[data-state="unlocked"] .plate-word { color: var(--unlocked); font-weight: 700; }
 .plate-batt.low { color: var(--unlocked); }
@@ -386,6 +394,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .topbar { flex-wrap: wrap; row-gap: 0.4rem; padding: 0.5rem 1rem; }
   .topbar-right { margin-left: auto; }
   .topbar .btn { padding: 0.4rem 0.7rem; }
+  .topbar-right .i { display: none; }     /* the words fit a phone; words plus icons don't */
   .cabinet, .roster { max-height: 34vh; }
   .plates { grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr)); gap: 0.5rem; }
   :root { --plate-num: 1.75rem; --door-num: 3.25rem; }
