@@ -130,6 +130,18 @@ function updateLock(view) {
   if (view.id === currentId) renderDoor();
 }
 
+// The lock lets people on a schedule in by its own clock, so a wrong one is
+// worth saying: off by 2 minutes or more (features.CLOCK_WARN_S), or no time.
+const CLOCK_WARN_S = 120;
+function clockText(known, offset) {
+  if (!known) return null;
+  if (offset == null) return "The lock has no valid time";
+  if (Math.abs(offset) < CLOCK_WARN_S) return null;
+  const min = Math.round(Math.abs(offset) / 60);
+  return `The lock's clock is ${min >= 120 ? `${Math.round(min / 60)} hours` : `${min} min`} `
+    + (offset < 0 ? "behind" : "ahead");
+}
+
 function sinceText(ts) {
   if (!ts) return null;
   const mins = Math.round((Date.now() / 1000 - ts) / 60);
@@ -420,6 +432,8 @@ function renderDoor() {
   if (v.doorOpen != null) facts.push(h("li", { class: v.doorOpen ? "warn" : "" }, v.doorOpen ? "Door open" : "Door closed"));
   const since = sinceText(v.checkedAt);
   if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}` : `Checked ${since}`));
+  const clock = clockText(v.clockKnown, v.clockOffset);
+  if (clock) facts.push(h("li", { class: "warn" }, clock));
   if (v.firmware) facts.push(h("li", {}, `Firmware ${v.firmware}`));
   $("d-facts").replaceChildren(...facts);
   renderKeep(v);
@@ -852,6 +866,11 @@ $("btn-firmware").addEventListener("click", async (ev) => {
   });
 });
 
+// Each part's row. The lock's progress messages don't say which part it's on,
+// so every part reads "Sending" until it restarts and reports its versions.
+const FW_PART_STATE = { sending: "Sending", restarting: "Waiting for the lock", done: "Installed",
+  behind: "Not installed", unconfirmed: "Not confirmed" };
+
 async function installFirmware(v, install) {
   const list = install.parts.map((p) => `${p.name} ${p.current || "?"} → ${p.version}`).join(", ");
   const ok = await confirmDialog(`Install new firmware on ${doorLabel(v)}?`,
@@ -862,10 +881,19 @@ async function installFirmware(v, install) {
   refreshControls(v.id);
   const show = (st) => {
     if (v.id !== currentId || activeTab !== "connection") return;
+    const clock = st.clockKnown ? clockText(true, st.clockOffset) : null;
     $("fw-out").replaceChildren(
-      h("p", {}, `${doorLabel(v)}: ${st.parts.map((p) => `${p.name} ${p.version}`).join(", ")}`),
+      h("p", {}, `${doorLabel(v)}:`),
+      h("ul", { class: "fw-parts" }, st.parts.map((p) =>
+        h("li", { "data-state": p.state },
+          h("span", { class: "fw-part-name" }, p.name),
+          h("span", { class: "fw-part-ver" }, `${p.current || "?"} → ${p.version}`),
+          h("span", { class: "fw-part-state" }, FW_PART_STATE[p.state] || p.state,
+            p.state === "behind" && p.now ? ` (still ${p.now})` : null)))),
       h("p", { class: st.ok === false ? "form-error" : (st.ok ? "ok" : "muted") },
-        st.ok === false ? st.error : (st.ok ? "Installed, and the lock reports the new versions." : st.text)));
+        st.ok === false ? st.error : (st.ok ? "Installed, and the lock reports the new versions." : st.text)),
+      st.clockKnown ? h("p", { class: clock ? "form-error" : "ok" },
+        clock ? `${clock}: people on a schedule may not get in until it's set.` : "The lock's clock is right.") : null);
   };
   try {
     let st = await call("firmware_install", v.id, install.parts);

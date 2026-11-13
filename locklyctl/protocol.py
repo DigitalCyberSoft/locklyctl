@@ -196,9 +196,10 @@ def _expand_digits(value: str) -> str:
     """HexUtils.m86803d: prepend "0" to each character ("980798" -> "090800070908")."""
     return "".join("0" + c for c in str(value)) if value else ""
 
-def _timestamp_hex() -> str:
-    """DataUtils.m86660o: current local time as packed yyMMddHHmmss (6 bytes)."""
-    time_str = datetime.now().strftime("%y%m%d%H%M%S")
+def _timestamp_hex(now: datetime | None = None) -> str:
+    """DataUtils.m86660o: a time as packed yyMMddHHmmss (6 bytes), this
+    computer's local time unless ``now`` is given."""
+    time_str = (now or datetime.now()).strftime("%y%m%d%H%M%S")
     return "".join(f"{int(time_str[i:i+2]):02x}" for i in range(0, 12, 2))
 
 def _epoch_ms_hex() -> str:
@@ -212,14 +213,18 @@ def _epoch_ms_hex() -> str:
     """
     return int(datetime.now().timestamp() * 1000).to_bytes(8, "little").hex().upper()
 
-def build_query_status_cmd(master_code: str, uuid: str) -> str:
-    """Build QueryLockStatus BLE command hex string for senddata 'cmd' field."""
+def build_query_status_cmd(master_code: str, uuid: str, now: datetime | None = None) -> str:
+    """Build QueryLockStatus BLE command hex string for senddata 'cmd' field.
+
+    It carries the current time, as the app's does (QueryLockStatusCmd.getData
+    adds it while isAddTime, the default); give ``now`` in the lock's own time
+    zone, since the lock keeps local wall-clock time."""
     enc_mc = encrypt_master_code(master_code, uuid)
     raw = _assemble_fields(
         CMD_QUERY_STATUS,
         f"{len(enc_mc) // 2:d}",
         enc_mc,
-        _timestamp_hex(),
+        _timestamp_hex(now),
         _STR3_HUB,
     )
     return _aes_wrap(raw, derive_aes_key(master_code, uuid))
@@ -650,6 +655,10 @@ def parse_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
                 result["wakeup_voltage"] = int(d[10:12], 16) + int(d[12:14], 16) * 256
             if len(d) >= 18:
                 result["start_voltage"] = int(d[14:16], 16) + int(d[16:18], 16) * 256
+        if len(d) >= 30:
+            # QueryLockStatusCmd: time = data[18:30], the lock's own clock as
+            # packed yyMMddHHmmss in its local time (features.lock_clock reads it).
+            result["lock_clock"] = d[18:30]
         if len(d) >= 36:
             result["auto_unlock_delay_s"] = int(d[32:34], 16) + int(d[34:36], 16) * 256
         if lock_type is not None:
@@ -928,9 +937,10 @@ def build_query_log_cmd(
 def _decode_packed_datetime(hex12: str) -> int | None:
     """Decode a 6-byte packed yyMMddHHmmss timestamp to epoch milliseconds.
 
-    Each byte holds one component as hex digits that read as decimal — 0x25 is
-    the year 25, not 37.  This is the inverse of the encoding used when building
-    a status query, and DataUtils.m86669x in the app.
+    Each byte is one component as a plain number: year 26 is 0x1A.  This is
+    the inverse of _timestamp_hex, and DataUtils.m86669x in the app.  (An
+    earlier version of this note said 0x25 meant 25; the code never did that,
+    and access-log dates decoded this way matched Lockly's cloud on 2026-11-13.)
 
     Returned in the local timezone, since the lock keeps local wall-clock time.
     """

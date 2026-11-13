@@ -9,9 +9,10 @@ primitives as unlock, so the framing is sound; what is unproven is the field
 """
 from __future__ import annotations
 
+import calendar
 import re
 import zlib
-from datetime import timedelta as _td, timezone as _tz
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
 from . import protocol as P
 
@@ -766,6 +767,33 @@ def lock_tz(lock: dict) -> _tz | None:
         return None
     delta = _td(hours=int(m.group(2)), minutes=int(m.group(3) or 0))
     return _tz(-delta if m.group(1) == "-" else delta)
+
+
+def lock_now(lock: dict) -> _dt:
+    """Now as the lock's wall clock should read it (naive), in its own time
+    zone when that's known, otherwise this computer's local time."""
+    tz = lock_tz(lock)
+    return _dt.now(tz).replace(tzinfo=None) if tz else _dt.now()
+
+
+# A status reply's clock this far from now is worth a warning: scheduled
+# users are let in by the lock's clock, so a wrong one can refuse them.
+CLOCK_WARN_S = 120
+
+
+def lock_clock(lock: dict, status: dict) -> tuple[_dt | None, bool]:
+    """The lock's own clock from a status reply (QueryLockStatusCmd reads it
+    from data[18:30]) as an aware datetime, and whether the reply carried one.
+    (None, True) is a date that can't be real, such as all zeros: a lock that
+    has no valid time."""
+    raw = str(status.get("lock_clock") or "")
+    if len(raw) < 12:
+        return None, False
+    y, mo, d, h, mi, s = (int(raw[i:i + 2], 16) for i in range(0, 12, 2))
+    if not (1 <= mo <= 12 and 1 <= d <= calendar.monthrange(2000 + y, mo)[1]
+            and h < 24 and mi < 60 and s < 60):
+        return None, True
+    return _dt(2000 + y, mo, d, h, mi, s, tzinfo=lock_tz(lock) or _dt.now().astimezone().tzinfo), True
 
 
 

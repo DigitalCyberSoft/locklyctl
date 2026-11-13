@@ -297,12 +297,14 @@ def test_firmware_install(api):
     api.firmware_install(B2, r["install"]["parts"])
     st = finished()
     assert st["ok"] and st["versions"] == {"back": "1.00.76"} and st["text"] == "Installing 50 %"
+    assert [(p["part"], p["state"], p["now"]) for p in st["parts"]] == [("back", "done", "1.00.76")]
     assert c.fw_installs == [(B2, [("back", "1.00.76")], "https://files.example.com/fw/")]
 
     c.fw_install_error = LocklyError("The lock reported a failure while installing: crc", "failure")
     api.firmware_install(B2, r["install"]["parts"])
     st = finished()
     assert st["ok"] is False and st["error"].endswith("crc") and len(c.fw_installs) == 1
+    assert [p["state"] for p in st["parts"]] == ["unconfirmed"]          # it never said
 
     c.query_status = lambda lock: {**reported, "battery_percent": 30}           # isBatteryLow
     assert "30 %" in api.firmware(B2)["install"]["blocked"]
@@ -343,6 +345,45 @@ def test_offline_is_what_lockly_said(api):
     views = {v["id"]: v for v in api.locks()}
     assert (views[B2]["state"], views[B2]["offline"]) == ("asleep", True)
     assert (views[UUID]["state"], views[UUID]["offline"]) == ("asleep", False)
+
+
+@_api_in_tmp_home
+def test_view_reports_the_lock_clock(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    c.status_cache[B2] = {"reachable": True, "ts": 1, "is_locked": True, "clock_offset_s": -7300}
+    c.status_cache[UUID] = {"reachable": True, "ts": 1, "is_locked": True}
+    views = {v["id"]: v for v in api.locks()}
+    assert (views[B2]["clockKnown"], views[B2]["clockOffset"]) == (True, -7300)
+    assert (views[UUID]["clockKnown"], views[UUID]["clockOffset"]) == (False, None)
+
+
+@_api_in_tmp_home
+def test_firmware_job_follows_each_part_and_the_clock(api):
+    """Each part's state as the install reports progress, the restart and the
+    versions the lock gives back; the thread's body, run synchronously."""
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    part = lambda key, name, new, old: {"part": key, "name": name, "version": new, "current": old,
+                                        "state": "sending", "now": ""}
+    job = {"running": True, "ok": None, "stage": "start", "progress": None, "away": None, "text": "",
+           "error": "", "versions": {}, "clockKnown": False, "clockOffset": None,
+           "parts": [part("front", "Front board", "1.00.95", "1.00.87"), part("back", "Back board", "1.00.76", "1.00.72")]}
+    seen = []
+
+    def install(lock, send, url, on_event):
+        for ev in ({"stage": "install", "progress": 50, "text": "Installing 50 %"},
+                   {"stage": "verify", "progress": None, "away": 0, "text": "The lock is restarting"},
+                   {"stage": "verify", "progress": None, "versions": {"front": "1.00.95", "back": "1.00.72"},
+                    "clockOffset": -3, "text": "The lock still reports Back board 1.00.72"}):
+            on_event(ev)
+            seen.append([p["state"] for p in job["parts"]])
+        raise LocklyError("After the upgrade the lock still reports Back board 1.00.72.", "verify")
+    c.firmware_install = install
+    api._run_firmware_install(c.locks[1], {"send": [], "downloadUrl": ""}, job)
+    assert seen == [["sending", "sending"], ["restarting", "restarting"], ["done", "behind"]]
+    assert [(p["state"], p["now"]) for p in job["parts"]] == [("done", "1.00.95"), ("behind", "1.00.72")]
+    assert (job["ok"], job["running"], job["clockKnown"], job["clockOffset"]) == (False, False, True, -3)
 
 @_api_in_tmp_home
 def test_favorites(api):

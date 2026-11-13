@@ -10,7 +10,7 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
   route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", eventLog: model === "PGK728WRHK", favorite: false,
-  keepUnlockedUntil: null, keepMaxMinutes: 1439, ...extra,
+  keepUnlockedUntil: null, keepMaxMinutes: 1439, clockKnown: false, clockOffset: null, ...extra,
 });
 
 const locks = [
@@ -22,7 +22,7 @@ const locks = [
   mk("4300", "2C Spare", "2C", "Spare", "PGK728WRHK", "", "unknown", null),
   mk("1e00", "3C Vision", "3C", "Vision", "PGK798HK", "", "locked", 91),
   mk("2d3e", "2A Front", "2A", "Front", "PGK728WRHK", "", "locked", 18, { favorite: true }),
-  mk("1c00", "4C New", "4C", "New", "PGK728WRHK", "", "unknown", null),
+  mk("1c00", "4C New", "4C", "New", "PGK728WRHK", "", "unknown", null, { clockKnown: true, clockOffset: null }),
   mk("3000", "1204", "1204", "", "PGK728WRHK", "", "asleep", null, { favorite: true }),
   mk("2600", "1206", "1206", "", "PGK728WRHK", "", "unknown", null),
   mk("263e", "3C", "3C", "", "PGK728WRHK", "", "unknown", null),
@@ -57,13 +57,26 @@ window.pywebview = {
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
-    async firmware_install(id, parts) { await wait(400); fwPolls = 0; fwParts = parts.map((p) => ({ name: p.name, version: p.version })); return this.firmware_install_status(id); },
-    async firmware_install_status() {
+    async firmware_install(id, parts) {
+      await wait(400); fwPolls = 0;
+      fwParts = parts.map((p) => ({ part: p.part, name: p.name, version: p.version, current: p.current, state: "sending", now: "" }));
+      return this.firmware_install_status(id);
+    },
+    async firmware_install_status() {      // sending, restarting, one part in and one not yet, then done
       await wait(150);
-      const steps = [["download", 40, "Downloading 40 %"], ["install", 70, "Installing 70 %"], ["verify", null, "Waiting for the lock to restart"]];
+      const all = (state, now) => fwParts.map((p) => ({ ...p, state, now: now ? now(p) : "" }));
+      const base = { running: true, ok: null, away: null, error: "", versions: {}, clockKnown: false, clockOffset: null };
+      const steps = [
+        { stage: "download", progress: 40, text: "Downloading 40 %", parts: all("sending") },
+        { stage: "install", progress: 70, text: "Installing 70 %", parts: all("sending") },
+        { stage: "verify", progress: null, away: 20, text: "Waiting for the lock to come back online (0 min so far)", parts: all("restarting") },
+        { stage: "verify", progress: null, text: "The lock still reports Back board 1.00.72", clockKnown: true, clockOffset: -2,
+          parts: fwParts.map((p, i) => ({ ...p, state: i ? "behind" : "done", now: i ? p.current : p.version })) },
+      ];
       const step = steps[fwPolls++];
-      return step ? { running: true, ok: null, stage: step[0], progress: step[1], text: step[2], error: "", parts: fwParts, versions: {} }
-        : { running: false, ok: true, stage: "done", progress: 100, text: "Installed and confirmed on the lock", error: "", parts: fwParts, versions: {} };
+      return step ? { ...base, ...step }
+        : { ...base, running: false, ok: true, stage: "done", progress: 100, text: "Installed and confirmed on the lock",
+          clockKnown: true, clockOffset: -2, parts: all("done", (p) => p.version) };
     },
     async set_favorite(id, on) { await wait(150); Object.assign(find(id), { favorite: !!on }); return { ...find(id) }; },
     async activity() {

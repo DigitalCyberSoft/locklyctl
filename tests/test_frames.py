@@ -729,6 +729,39 @@ def test_status_failure_records_offline_only_for_3005():
         assert c.status_cache[UUID]["reachable"] is False and c.status_cache[UUID]["offline"] is offline
 
 
+def test_status_query_sends_the_lock_time_and_reads_its_clock():
+    """The status query carries a time (QueryLockStatusCmd.getData, isAddTime)
+    and the reply's data[18:30] is the lock's own clock (QueryLockStatusCmd:213).
+    The bytes are a Visage's real answer on 2026-11-13: 2026-11-13 19:52:21."""
+    from datetime import datetime, timedelta, timezone
+    enc = P.encrypt_master_code(MC, UUID)
+    assert _plain(P.build_query_status_cmd(MC, UUID, datetime(2026, 11, 13, 19, 52, 21))).startswith(
+        "1E" + f"{len(enc) // 2:02d}" + enc.upper() + "1A0B0D133415" + "01")
+    lock = {"mc": MC, "ID": UUID, "tz": "+8:00"}
+    st = P.parse_ack(_reply("1E", "01000E0B" + "A0" + "46FF46FF" + "1A0B0D133415" + "00" * 3 + "69" + "00" * 13),
+                     MC, UUID)
+    assert st["lock_clock"] == "1a0b0d133415"
+    assert F.lock_clock(lock, st) == (datetime(2026, 11, 13, 19, 52, 21, tzinfo=timezone(timedelta(hours=8))), True)
+    assert F.lock_clock(lock, {"lock_clock": "000000000000"}) == (None, True)      # no valid time
+    assert F.lock_clock(lock, {}) == (None, False)                               # didn't say
+    assert abs((F.lock_now({"tz": "+0:00"}) - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()) < 2
+
+
+def test_query_status_records_the_clock_offset():
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    lock = {"mc": MC, "ID": UUID, "tz": "+8:00"}
+
+    def answer_with(clock_hex):
+        return lambda lk, frame, directive=None: _reply(
+            "1E", "01000E0B" + "A0" + "46FF46FF" + clock_hex + "00" * 3 + "69" + "00" * 13)
+    c.exchange_frame = answer_with(P._timestamp_hex(F.lock_now(lock)))
+    assert abs(c.query_status(lock)["clock_offset_s"]) <= 2
+    c.exchange_frame = answer_with("000000000000")
+    st = c.query_status(lock)
+    assert "clock_offset_s" in st and st["clock_offset_s"] is None
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

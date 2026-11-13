@@ -480,12 +480,12 @@ class LocklyClient:
         """Live status query (wakes the lock). Returns parsed dict incl. nonce.
         A lock that answers "offline" (asleep) is asked again, up to twice."""
         mc, uuid_ = str(lock["mc"]), lock["ID"]
-        ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_))
+        ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_, F.lock_now(lock)))
         for delay in self.ASLEEP_RETRY_DELAYS:
             if ack or not self._worth_retrying():
                 break
             time.sleep(delay)
-            ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_))
+            ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_, F.lock_now(lock)))
         if not ack:
             # 3005 is Lockly's server saying "device is offline": a Wi-Fi lock
             # not connected to it, rather than one that didn't answer in time.
@@ -494,6 +494,11 @@ class LocklyClient:
             return None
         parsed = P.parse_ack(ack, mc, uuid_) or None
         if parsed:
+            clock, sent = F.lock_clock(lock, parsed)
+            if sent:
+                # Seconds the lock's clock is from ours; None when it reports a
+                # date that can't be real (no valid time).
+                parsed["clock_offset_s"] = round(clock.timestamp() - time.time()) if clock else None
             self.status_cache[uuid_] = {"reachable": True, "ts": time.time(), **parsed}
         return parsed
 
@@ -705,10 +710,11 @@ class LocklyClient:
                          on_event: Callable[[dict], None]) -> dict:
         """Install ``send`` (from firmware_plan) over MQTT, then confirm it: follows
         the lock's progress, then asks the lock for its versions until every part
-        reports the offered one (5 minutes at most). Calls on_event with {"stage",
-        "progress", "text"} along the way and returns {"versions"}. Raises
-        LocklyError when the lock reports a failure, goes quiet, or doesn't come
-        back on the new versions."""
+        reports the offered one (FW_VERIFY_S at most). Calls on_event with
+        {"stage", "progress", "text"} while the lock installs, then with "away"
+        (seconds since it restarted) while it doesn't answer, and with "versions"
+        each time it does. Returns {"versions"}. Raises LocklyError when the lock
+        reports a failure, goes quiet, or doesn't come back on the new versions."""
         if not send:
             raise ValueError("Nothing to install.")
         ch = self._mqtt_channel()
@@ -717,13 +723,18 @@ class LocklyClient:
         payload = F.build_firmware_upgrade(str(uuid.uuid4()), lock["ID"], download_url, send)
 
         def progress(body: dict) -> None:
+            # The messages name no part, only a stage and a percentage
+            # (FirmwareUpgradeProgressResponse, app 3.3.4). Logged whole, to
+            # learn from a real install how the lock moves through its parts.
+            _LOGGER.info("firmware progress: %s", json.dumps(body, sort_keys=True))
             on_event({"stage": body.get("stage"), "progress": body.get("progress"),
                       "text": F.describe_firmware_progress(body)})
 
         ch.follow_firmware_upgrade(payload, progress, idle_timeout=self.FW_IDLE_TIMEOUT_S)
-        on_event({"stage": "verify", "progress": None, "text": "Waiting for the lock to restart"})
+        restarted = time.monotonic()
+        on_event({"stage": "verify", "progress": None, "away": 0, "text": "The lock is restarting"})
         time.sleep(self.FW_SETTLE_S)
-        deadline = time.monotonic() + self.FW_VERIFY_S
+        deadline = restarted + self.FW_VERIFY_S
         seen: dict = {}
         behind = send
         while True:
@@ -731,16 +742,24 @@ class LocklyClient:
             if st:
                 seen = F.firmware_versions_on_lock(st)
                 behind = [p for p in send if not F.version_at_least(seen.get(p["part"]), p["version"])]
+                clock = {"clockOffset": st["clock_offset_s"]} if "clock_offset_s" in st else {}
                 if not behind:
-                    on_event({"stage": "done", "progress": 100, "text": "Installed and confirmed on the lock"})
-                    return {"versions": seen}
-                on_event({"stage": "verify", "progress": None,
+                    on_event({"stage": "done", "progress": 100, "versions": seen, **clock,
+                              "text": "Installed and confirmed on the lock"})
+                    return {"versions": seen, **clock}
+                on_event({"stage": "verify", "progress": None, "versions": seen, **clock,
                           "text": "The lock still reports " + _fw_parts_text(behind, seen)})
+            elif not seen:
+                away = int(time.monotonic() - restarted)
+                on_event({"stage": "verify", "progress": None, "away": away,
+                          "text": f"Waiting for the lock to come back online ({away // 60} min so far)"})
             if time.monotonic() >= deadline:
                 break
             time.sleep(self.FW_VERIFY_EVERY_S)
         if not seen:
-            raise LocklyError("The upgrade finished, but the lock hasn't answered for 5 minutes since.", "verify")
+            raise LocklyError("The lock reported the update finished and restarted, but hasn't come back "
+                              f"online in {int(self.FW_VERIFY_S // 60)} minutes, so its new versions aren't "
+                              "confirmed.", "verify")
         raise LocklyError("After the upgrade the lock still reports " + _fw_parts_text(behind, seen) + ".",
                           "verify")
 

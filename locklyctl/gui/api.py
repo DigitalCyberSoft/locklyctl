@@ -291,6 +291,10 @@ class Api:
             "model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
             "state": state,
             "offline": state == "asleep" and bool(e.get("offline")),   # Lockly's server said so (3005)
+            # The lock's own clock from its last answer: seconds off, None when
+            # it reported no valid time; clockKnown False when it hasn't said.
+            "clockKnown": "clock_offset_s" in e,
+            "clockOffset": e.get("clock_offset_s"),
             "battery": e.get("battery_percent"),
             "lowBattery": bool(e.get("low_battery") or e.get("battery_invalid")),
             "doorOpen": e.get("door_sensor_open"),
@@ -724,9 +728,16 @@ class Api:
         now = [(p["part"], p["version"]) for p in plan["send"]]
         if now != [(e.get("part"), e.get("version")) for e in expected]:
             raise ValueError("What the lock runs or Lockly offers changed since the check. Check again.")
-        job = {"running": True, "ok": None, "stage": "start", "progress": None,
+        # Each part's state: "sending" while the lock installs (its messages
+        # don't say which part it's on), "restarting" until it answers again,
+        # then "done" or "behind" by the version it reports for that part, or
+        # "unconfirmed" if the install ends without it saying.
+        job = {"running": True, "ok": None, "stage": "start", "progress": None, "away": None,
                "text": "Sending the request", "error": "", "versions": {},
-               "parts": [{"name": self._PART_NAMES[p["part"]], "version": p["version"]} for p in plan["send"]]}
+               "clockKnown": False, "clockOffset": None,
+               "parts": [{"part": p["part"], "name": self._PART_NAMES[p["part"]], "version": p["version"],
+                          "current": plan["onLock"].get(p["part"]) or "", "state": "sending", "now": ""}
+                         for p in plan["send"]]}
         with self._fw_lock:
             if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
                 raise ValueError("A firmware install is already running on this door.")
@@ -737,20 +748,37 @@ class Api:
 
     def firmware_install_status(self, lock_id: str) -> dict:
         """Where the firmware install on this door is: {"running", "ok", "stage",
-        "progress", "text", "error", "parts", "versions"}, or running False and
-        ok None when none was started."""
+        "progress", "away", "text", "error", "parts", "versions"}, or running
+        False and ok None when none was started."""
         lock = self._lock(lock_id)
         with self._fw_lock:
             job = self._fw_jobs.get(lock["ID"])
-            return dict(job) if job else {"running": False, "ok": None, "stage": "", "progress": None,
-                                          "text": "", "error": "", "parts": [], "versions": {}}
+            if not job:
+                return {"running": False, "ok": None, "stage": "", "progress": None, "away": None,
+                        "text": "", "error": "", "parts": [], "versions": {},
+                        "clockKnown": False, "clockOffset": None}
+            return {**job, "parts": [dict(p) for p in job["parts"]]}
+
+    @staticmethod
+    def _mark_parts(parts: list[dict], versions: dict) -> None:
+        """Each part done or behind by what the lock reports for it."""
+        for p in parts:
+            p["now"] = versions.get(p["part"]) or ""
+            p["state"] = "done" if F.version_at_least(p["now"], p["version"]) else "behind"
 
     def _run_firmware_install(self, lock: dict, plan: dict, job: dict) -> None:
         """Thread entry point: runs the install and records how it ended."""
         def on_event(event: dict) -> None:
             with self._fw_lock:
                 job.update(stage=event.get("stage"), progress=event.get("progress"),
-                           text=event.get("text") or "")
+                           away=event.get("away"), text=event.get("text") or "")
+                if "clockOffset" in event:
+                    job.update(clockKnown=True, clockOffset=event["clockOffset"])
+                if "versions" in event:
+                    self._mark_parts(job["parts"], event["versions"])
+                elif event.get("stage") == "verify":
+                    for p in job["parts"]:
+                        p["state"] = "restarting" if p["state"] == "sending" else p["state"]
         try:
             result = self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event)
         except (LocklyError, ValueError) as e:
@@ -761,6 +789,11 @@ class Api:
         else:
             outcome = {"ok": True, "versions": result["versions"]}
         with self._fw_lock:
+            if outcome["ok"]:
+                self._mark_parts(job["parts"], result["versions"])
+            for p in job["parts"]:
+                if p["state"] in ("sending", "restarting"):
+                    p["state"] = "unconfirmed"
             job.update(running=False, **outcome)
 
     # ── connection test ──────────────────────────────────────────────────
