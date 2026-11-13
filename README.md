@@ -35,7 +35,7 @@ way the official app does.
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
-| Access log (last 7 days), in the Lockly app's own words | ✅ from Lockly's cloud, which only holds what a phone uploaded: often empty. Reading the lock's own log isn't done yet |
+| Access log (last 7 days), in the Lockly app's own words | ✅ Visages: from Lockly's event log, which the lock fills over its Wi-Fi, as the Lockly app reads it (checked against a lock's own log). Other locks: from Lockly's cloud log, which only has what was uploaded to it, so often empty; reading those locks' own logs isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
 | Visage/Vision: add a person with a PIN (always, set hours, or between dates), change PIN, remove from a door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted |
 | Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |

@@ -1046,7 +1046,7 @@ def _paging_bounds(epoch_ms: int | None) -> tuple[str, str]:
 def build_paging_log_cmd(
     master_code: str,
     uuid: str,
-    index: int = 0,
+    index: int = 1,
     start_ms: int | None = None,
     end_ms: int | None = None,
     nonce: str | None = None,
@@ -1062,6 +1062,11 @@ def build_paging_log_cmd(
 
         cmd | mc_len | enc_mc | start_date | end_date | index | start_time |
         end_time | nonce
+
+    Positions start at 1, as the app's page loop does
+    (PagingLogCmdDataSource.java:119); the next page is current + 1. Read live
+    on 2026-11-13 with an open range: a Visage answered position 0 with its
+    totals and no records, and position 1 with all 50 records in one page.
     """
     caps = caps or DEFAULT_CAPABILITIES
     enc_mc = encrypt_master_code(master_code, uuid)

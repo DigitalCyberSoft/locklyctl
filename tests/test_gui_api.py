@@ -98,6 +98,11 @@ class FakeClient:
                 {"tm": 1794464133000, "co": "999", "na": "", "pid": 65535, "id": 3, "logVer": 0},
                 {"tm": 1794464119000, "co": "117", "na": "", "pid": 65535, "id": 2, "logVer": 0}], since_ms
 
+    def get_event_log(self, lock, since_ms):
+        """get_event_log's shape: Lockly's event log reshaped like getlkhist (2026-11-13)."""
+        return [{"tm": 1794557162000, "co": "92", "na": "Dana", "pid": "7", "id": 1},
+                {"tm": 1794557165000, "co": "42", "na": "", "pid": "", "id": 2}]
+
     def query_status(self, lock):
         return {"is_locked": True, "lock_type": 105, "firmware_version": "1.14.24",
                 "sub_version": "1.00.72", "wifi_version": "2.02.72", "ble_version": "1.14.24"}
@@ -317,6 +322,27 @@ def test_activity_reads_getlkhist_fields(api):
         ("Event 999", ""), ("Door sensor closing", ""), ("Unlocked via Visage ID", "Dana")]
     assert all(len(r["time"]) == 16 and r["time"][4] == "-" for r in rows)   # "YYYY-MM-DD HH:MM"
 
+
+@_api_in_tmp_home
+def test_activity_reads_the_event_log_for_a_wifi_visage(api):
+    """A Visage with a Wi-Fi client id reads Lockly's event log, as the app
+    does; the fake's getlkhist would give different rows."""
+    api.sign_in("a@b", "right", False)
+    api._client.locks[1]["clientId"] = "th_test"
+    assert [v["eventLog"] for v in api.locks()] == [False, True]
+    rows = api.activity(B2)
+    assert [(r["what"], r["who"]) for r in rows] == [("Auto lock", ""), ("Unlocked via Visage ID", "Dana")]
+
+
+
+@_api_in_tmp_home
+def test_offline_is_what_lockly_said(api):
+    api.sign_in("a@b", "right", False)
+    api._client.status_cache[B2] = {"reachable": False, "ts": 1, "offline": True}
+    api._client.status_cache[UUID] = {"reachable": False, "ts": 1}
+    views = {v["id"]: v for v in api.locks()}
+    assert (views[B2]["state"], views[B2]["offline"]) == ("asleep", True)
+    assert (views[UUID]["state"], views[UUID]["offline"]) == ("asleep", False)
 
 @_api_in_tmp_home
 def test_favorites(api):

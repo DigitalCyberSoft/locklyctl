@@ -290,6 +290,7 @@ class Api:
             "id": lock["ID"], "name": name, "unit": unit, "rest": rest,
             "model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
             "state": state,
+            "offline": state == "asleep" and bool(e.get("offline")),   # Lockly's server said so (3005)
             "battery": e.get("battery_percent"),
             "lowBattery": bool(e.get("low_battery") or e.get("battery_invalid")),
             "doorOpen": e.get("door_sensor_open"),
@@ -298,6 +299,7 @@ class Api:
             "checkedAt": e.get("ts"),
             "welcomeForm": F.welcome_form(lock),
             "route": F.remote_route(lock),
+            "eventLog": F.uses_event_log(lock),
             "faceCapable": F.supports_face(lock),
             "favorite": lock["ID"] in _favorite_ids(cfg),
             "keepUnlockedUntil": _keep_until(cfg, lock),
@@ -368,16 +370,22 @@ class Api:
     # ── activity & guests ────────────────────────────────────────────────
 
     def activity(self, lock_id: str) -> list[dict]:
+        """The last 7 days, newest first, from where the app reads them: a
+        Wi-Fi Visage's own event log, otherwise getlkhist. Cloud only."""
         lock = self._lock(lock_id)
         since = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
-        res = self._c().get_history(lock, since)
-        if res is None:
-            raise LocklyError("Lockly didn't return the access log.")
-        # getlkhist events are {tm: epoch ms, co: event code, na: name, pid, id, logVer}
-        # (seen live, and the shape protocol.parse_log_ack builds).
+        if F.uses_event_log(lock):
+            events = self._c().get_event_log(lock, since)
+        else:
+            res = self._c().get_history(lock, since)
+            if res is None:
+                raise LocklyError("Lockly didn't return the access log.")
+            events = res[0]
+        # Both are {tm: epoch ms, co: event code, na: name, pid, id} (getlkhist
+        # as seen live; get_event_log reshapes the event log to match).
         return [{"time": _fmt_ms(ev.get("tm")) or "", "what": P.describe_open_type(ev.get("co")),
                  "who": ev.get("na") or ""}
-                for ev in sorted(res[0], key=lambda e: e.get("tm") or 0, reverse=True)]
+                for ev in sorted(events, key=lambda e: e.get("tm") or 0, reverse=True)]
 
     def guests(self, lock_id: str) -> list[dict]:
         lock = self._lock(lock_id)

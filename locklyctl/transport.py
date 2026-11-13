@@ -28,6 +28,7 @@ from .const import (
     API_BASE,
     API_USER_AGENT,
     COMMON_BODY,
+    EVENT_LOG_BASE,
     HTTP_TIMEOUT,
     MATTER_HUB_PREFIX,
     MQTT_BROKER,
@@ -280,7 +281,7 @@ class LocklyClient:
     # -- low-level REST --------------------------------------------------------
 
     def _post(self, endpoint: str, body: dict, *, auth: bool = True,
-              timeout: int = HTTP_TIMEOUT) -> dict:
+              timeout: int = HTTP_TIMEOUT, base: str = API_BASE) -> dict:
         headers = {
             "Content-Type": "application/json; charset=UTF-8",
             "User-Agent": API_USER_AGENT,
@@ -290,7 +291,7 @@ class LocklyClient:
             self._ensure_session()
         if auth and self.jwt:
             headers["Authorization"] = f"Bearer {self.jwt}"
-        resp = self._session.post(API_BASE + endpoint, json=body, headers=headers, timeout=timeout)
+        resp = self._session.post(base + endpoint, json=body, headers=headers, timeout=timeout)
         try:
             data = resp.json()
         except Exception:
@@ -486,7 +487,10 @@ class LocklyClient:
             time.sleep(delay)
             ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_))
         if not ack:
-            self.status_cache[uuid_] = {"reachable": False, "ts": time.time()}
+            # 3005 is Lockly's server saying "device is offline": a Wi-Fi lock
+            # not connected to it, rather than one that didn't answer in time.
+            self.status_cache[uuid_] = {"reachable": False, "ts": time.time(),
+                                        "offline": getattr(self._tl, "mqtt_code", None) == "3005"}
             return None
         parsed = P.parse_ack(ack, mc, uuid_) or None
         if parsed:
@@ -747,7 +751,51 @@ class LocklyClient:
         body = self._post_para_des3("getlkhist", req)
         if str(body.get("cod")) != "200":
             return None
-        return list(body.get("el") or []), int(body.get("LAST_EVENT_SYNC_TIME") or since_ms)
+        # sul holds secondary users' records; the app shows both lists
+        # (UnlockRecordFragment.C4, app 3.3.4).
+        events = list(body.get("el") or []) + list(body.get("sul") or [])
+        return events, int(body.get("LAST_EVENT_SYNC_TIME") or since_ms)
+
+    # A Wi-Fi Visage uploads its events to Lockly's event log itself, and for
+    # those locks the app's history reads that log, not getlkhist
+    # (UnlockRecordFragment.i4 -> MqttLockLogRepositoryImpl, app 3.3.4).
+    # Read live on 2026-11-13: getlkhist had nothing for most Visages while
+    # this log had their week, and its newest events matched one lock's own
+    # paged log (0x94).
+    EVENT_LOG_PAGE = 100          # the app's page size; offset steps by it
+    EVENT_LOG_MAX_PAGES = 50
+
+    def get_event_log(self, lock: dict, since_ms: int, until_ms: int | None = None) -> list[dict]:
+        """A lock's events since since_ms from Lockly's event log, shaped like
+        getlkhist's (tm in ms, co, na, pid, id). Cloud only: no lock is woken.
+        Raises LocklyError when the log doesn't answer as expected."""
+        until_ms = until_ms or int(time.time() * 1000)
+
+        def utc(ms: int) -> str:       # DateTimesKt: yyyyMMddHHmmss in UTC
+            return time.strftime("%Y%m%d%H%M%S", time.gmtime(ms / 1000))
+
+        events: list[dict] = []
+        for page in range(self.EVENT_LOG_MAX_PAGES):
+            body = self._post("v1/proto/handler", {
+                "header": {"namespace": "com.lockly", "name": "lockEventLogQueryRequest",
+                           "requestId": str(uuid.uuid4()), "timestamp": int(time.time() * 1000)},
+                "payload": {"deviceId": lock["ID"], "startTime": utc(since_ms), "endTime": utc(until_ms),
+                            "offset": page * self.EVENT_LOG_PAGE, "limit": self.EVENT_LOG_PAGE},
+            }, base=EVENT_LOG_BASE)
+            payload = body.get("payload")
+            if (body.get("header") or {}).get("name") != "lockEventLogQueryResponse" \
+                    or not isinstance(payload, dict):
+                status = getattr(body.get("_resp"), "status_code", "?")
+                raise LocklyError(f"Lockly's event log didn't answer (HTTP {status}).", "eventlog")
+            items = payload.get("items") or []
+            for i in items:
+                ts = int(i.get("timestamp") or 0)
+                events.append({"tm": ts if len(str(ts)) == 13 else ts * 1000,   # seconds, as seen
+                               "co": str(i.get("eventType") or ""), "na": i.get("lockUserName") or "",
+                               "pid": i.get("userId"), "id": i.get("eventId")})
+            if not payload.get("havingMore") or not items:
+                return events
+        raise LocklyError(f"Lockly's event log still had more after {len(events)} events.", "eventlog")
 
     # -- high-level: guests (PIN users) ---------------------------------------
 

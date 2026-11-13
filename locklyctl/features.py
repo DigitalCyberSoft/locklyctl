@@ -590,6 +590,18 @@ def remote_route(lock: dict) -> str:
     return "bluetooth"
 
 
+# Locks whose history the app reads from Lockly's event log instead of
+# getlkhist: isSupportQueryLockLogByMQTT = isSupportWiFiLowEnergy() &&
+# isClientIdNotEmpty() (BluetoothBean.java:3561, app 3.3.4). The app's
+# low-energy list (BluetoothBeanManager.java:3629) has more models; only the
+# Visage has been read live (2026-11-13), so only it is listed.
+EVENT_LOG_MODELS = frozenset({"PGK728WRHK"})
+
+
+def uses_event_log(lock: dict) -> bool:
+    return str(lock.get("mod") or "").upper() in EVENT_LOG_MODELS and bool(lock.get("clientId"))
+
+
 # ── firmware: which check the app uses (FirmwareUpgradeCheckerRepositoryImpl.b,
 # app 3.3.4). Multi-part Wi-Fi locks ask fwver/msh/new and update over MQTT;
 # camera locks ask fwver/new; the rest ask lockly/syspara and are updated by

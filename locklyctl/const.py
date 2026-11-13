@@ -7,6 +7,9 @@ from __future__ import annotations
 
 API_BASE = "https://apiserv03c.lockly.com/pgsmtlkv2/api/"
 API_USER_AGENT = "DoorLocker/329 (Pixel 8 Pro; Android 16)"
+# Lockly's event log, which Wi-Fi Visages upload their events to (PgConfig.j()
+# and ApiService "v1/proto/handler", app 3.3.4).
+EVENT_LOG_BASE = "https://apiserv04c.lockly.com/mms/api/"
 
 # Sent on every request except `login` (COMMON_BODY in the app).
 COMMON_BODY = {

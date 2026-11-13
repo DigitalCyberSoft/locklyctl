@@ -649,6 +649,86 @@ def test_follow_firmware_upgrade():
     assert ch._listeners == {}                       # nothing left listening
 
 
+def test_paging_log_starts_at_position_1():
+    """PagingLogCmdDataSource.java:119 starts at 1. Live on 2026-11-13 a Visage
+    answered position 0 with its totals and no records, position 1 with all 50."""
+    from locklyctl.capabilities import resolve_capabilities
+    n = "00112233445566778899AABBCCDDEEFF"
+    enc = P.encrypt_master_code(MC, UUID)
+    caps = resolve_capabilities({"mod": "PGK728WRHK"}, 105)
+    open_range = "FFFFFF" + "FFFFFF"                 # no start or end date
+    assert _plain(P.build_paging_log_cmd(MC, UUID, nonce=n, caps=caps)).startswith(
+        "94" + f"{len(enc) // 2:02d}" + enc.upper() + open_range + "0100" + "FFFFFFFFFF" * 2 + n)
+
+
+def test_event_log_request_and_paging():
+    """lockEventLogQueryRequest as MqttLockLogApiImpl sends it (app 3.3.4),
+    paged by offset += 100 while havingMore. Replies are shaped as Lockly sent
+    them on 2026-11-13 (timestamps in seconds); the values are made up."""
+    from locklyctl.const import EVENT_LOG_BASE
+    from locklyctl.transport import LocklyClient, LocklyError
+    c = LocklyClient("a@b")
+
+    def item(n):
+        return {"eventId": n, "eventType": "92", "lockName": "x", "lockUserName": "Dana",
+                "lockUserFirstName": "", "lockUserLastName": "", "time": "261113080605",
+                "timestamp": 1794557165 + n, "userId": "7"}
+    pages = [{"header": {"name": "lockEventLogQueryResponse"},
+              "payload": {"havingMore": True, "items": [item(n) for n in range(100)]}},
+             {"header": {"name": "lockEventLogQueryResponse"},
+              "payload": {"havingMore": False, "items": [item(100)]}}]
+    sent = []
+    c._post = lambda ep, body, **kw: (sent.append((ep, body, kw)), pages[len(sent) - 1])[1]
+    ev = c.get_event_log({"ID": UUID}, 1794441600000, 1794528000000)
+    assert len(ev) == 101
+    assert ev[0] == {"tm": 1794557165000, "co": "92", "na": "Dana", "pid": "7", "id": 0}
+    ep, body, kw = sent[0]
+    assert ep == "v1/proto/handler" and kw["base"] == EVENT_LOG_BASE
+    assert (body["header"]["namespace"], body["header"]["name"]) == ("com.lockly", "lockEventLogQueryRequest")
+    assert body["payload"] == {"deviceId": UUID, "startTime": "20261112000000", "endTime": "20261113000000",
+                               "offset": 0, "limit": 100}           # UTC, yyyyMMddHHmmss (DateTimesKt)
+    assert [b["payload"]["offset"] for _, b, _ in sent] == [0, 100]
+
+    # Anything but a lockEventLogQueryResponse is an error, not an empty log.
+    c._post = lambda ep, body, **kw: {"header": {"name": "error"}, "payload": None}
+    try:
+        c.get_event_log({"ID": UUID}, 0)
+    except LocklyError as e:
+        assert e.cod == "eventlog"
+    else:
+        raise AssertionError("an error reply read as an empty log")
+
+
+def test_history_includes_secondary_users():
+    """getlkhist's sul list is shown with el, as UnlockRecordFragment.C4 does."""
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c._post_para_des3 = lambda ep, req, **kw: {"cod": "200", "el": [{"co": "92"}], "sul": [{"co": "4"}],
+                                               "LAST_EVENT_SYNC_TIME": 5}
+    assert c.get_history({"ID": UUID}, 1) == ([{"co": "92"}, {"co": "4"}], 5)
+
+
+def test_uses_event_log():
+    assert F.uses_event_log({"mod": "PGK728WRHK", "clientId": "th_x"})
+    assert not F.uses_event_log({"mod": "PGK728WRHK", "clientId": ""})     # no Wi-Fi client id
+    assert not F.uses_event_log({"mod": "PGD7Y", "clientId": "th_x"})
+
+
+def test_status_failure_records_offline_only_for_3005():
+    """3005 is Lockly's server saying the device is offline (seen for two
+    Visages on 2026-11-13); other failures don't claim that."""
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.ASLEEP_RETRY_DELAYS = ()
+    for code, offline in (("3005", True), (None, False)):
+        def no_reply(lock, frame, directive=None, code=code):
+            c._tl.mqtt_code, c._tl.last_cod = code, None
+            return None
+        c.exchange_frame = no_reply
+        assert c.query_status({"ID": UUID, "mc": MC}) is None
+        assert c.status_cache[UUID]["reachable"] is False and c.status_cache[UUID]["offline"] is offline
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

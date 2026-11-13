@@ -36,6 +36,8 @@ const ROUTE_TEXT = { hub: "through its hub", wifi: "over its own Wi-Fi", bluetoo
 const STATE_ICON = { locked: "locked", unlocked: "unlocked", asleep: "asleep", bluetooth: "bluetooth" };
 const stateIcon = (st) => (STATE_ICON[st] ? icon(STATE_ICON[st]) : null);
 const stateOf = (v) => (v.route === "bluetooth" ? "bluetooth" : v.state);
+// "Offline" when Lockly's server said so, rather than the lock not answering.
+const stateWord = (v) => (stateOf(v) === "asleep" && v.offline ? "Offline" : STATE_WORD[stateOf(v)]);
 const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
 
 let api = null;
@@ -224,7 +226,7 @@ function renderPlates() {
     const num = v.unit || v.name;
     const batt = v.battery != null ? `${v.battery}%` : v.lowBattery ? "Low battery" : null;
     const doing = pending.get(v.id);
-    const word = doing ? DOING_SHORT[doing] : STATE_WORD[stateOf(v)];
+    const word = doing ? DOING_SHORT[doing] : stateWord(v);
     return h("li", {},
       h("button", {
         class: "plate", type: "button", "data-state": stateOf(v), "aria-busy": doing ? "true" : null,
@@ -316,7 +318,7 @@ function renderFavs() {
         onclick: () => selectLock(v.id, true),
       },
         h("span", { class: "fav-name" }, doorLabel(v)),
-        h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || STATE_WORD[st])),
+        h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || stateWord(v))),
       h("span", { class: "fav-actions" },
         st === "asleep" && h("button", { class: "btn btn-quiet icon-only", type: "button", disabled: off,
           "aria-label": `Check ${doorLabel(v)} again`, title: "Ask it again", onclick: () => runCommand(v, "check") },
@@ -340,7 +342,8 @@ async function runCommand(v, kind) {
       toast(`Connecting to ${label}…`);
       const view = await call("check", v.id);
       updateLock(view);
-      toast(view.state === "asleep" ? `${label} didn't answer.` : `${label}: ${STATE_WORD[view.state]}.`,
+      toast(view.state !== "asleep" ? `${label}: ${STATE_WORD[view.state]}.`
+        : view.offline ? `Lockly's server says ${label} is offline.` : `${label} didn't answer.`,
         view.state === "asleep");
     } else {
       toast(`${kind === "lock" ? "Locking" : "Unlocking"} ${label}…`);
@@ -407,7 +410,8 @@ function renderDoor() {
   st.dataset.state = doing ? "busy" : v.route === "bluetooth" ? "unknown" : v.state;
   st.replaceChildren(...(doing ? [icon(v.route), DOING[doing]]
     : [stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
-      : v.state === "asleep" ? "Didn't answer (asleep or offline)"
+      : v.state === "asleep" ? (v.offline ? "Offline: Lockly's server says its Wi-Fi isn't connected"
+        : "Didn't answer (asleep or offline)")
         : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]]));
 
   const facts = [];
@@ -585,8 +589,12 @@ async function loadActivity() {
     const events = await call("activity", id);
     if (id !== currentId) return;
     if (!events.length) {
-      panel.replaceChildren(h("p", { class: "muted" }, "Lockly's cloud has no record of this door in the last 7 days. "
-        + "That doesn't mean nobody used it: the cloud only has what was uploaded to it."));
+      const v = current();
+      panel.replaceChildren(h("p", { class: "muted" }, v && v.eventLog
+        ? "No events in the last 7 days. This lock sends its events to Lockly over its Wi-Fi, so none arrive "
+          + "while it's offline."
+        : "Lockly's cloud has no record of this door in the last 7 days. That doesn't mean nobody used it: "
+          + "for this lock the cloud only has what was uploaded to it."));
       return;
     }
     panel.replaceChildren(h("table", { class: "log" },

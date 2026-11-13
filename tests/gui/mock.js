@@ -9,7 +9,7 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   id, name, unit, rest, model, hub, state, battery, lowBattery: battery != null && battery < 20,
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
-  route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", favorite: false,
+  route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", eventLog: model === "PGK728WRHK", favorite: false,
   keepUnlockedUntil: null, keepMaxMinutes: 1439, ...extra,
 });
 
@@ -42,6 +42,7 @@ window.pywebview = {
       const l = find(id), n = parseInt(id, 16);
       await wait(500 + (n % 7) * 350);
       if (l.state === "unknown" || l.state === "asleep") l.state = n % 3 ? "locked" : "asleep";
+      l.offline = l.state === "asleep" && l.route === "wifi";   // what Lockly's server says (3005)
       return { ...l, cached: false, checkedAt: Date.now() / 1000 };
     },
     async lock(id) { await wait(700); Object.assign(find(id), { state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
