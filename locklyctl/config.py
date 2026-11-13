@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from .const import CONFIG_DIR_NAME, CONFIG_FILE_NAME
+from .const import CONFIG_DIR_NAME, CONFIG_FILE_NAME, CONNECTIONS
 
 _LOG = logging.getLogger("locklyctl")
 
@@ -69,6 +69,12 @@ def load_config() -> dict:
         except Exception:
             return {}
     return {}
+
+
+def connection_mode(cfg: dict) -> str:
+    """The saved connection setting (const.CONNECTIONS); "auto" when unset."""
+    mode = cfg.get("connection")
+    return mode if mode in CONNECTIONS else "auto"
 
 
 def save_config(cfg: dict) -> None:

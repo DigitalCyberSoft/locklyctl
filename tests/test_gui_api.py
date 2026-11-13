@@ -389,6 +389,56 @@ def test_firmware_job_follows_each_part_and_the_clock(api):
 
 
 @_api_in_tmp_home
+def test_connection_setting(api):
+    api.sign_in("a@b", "right", False)
+    assert api.connection()["mode"] == "auto" and api._client.connection == "auto"     # the default
+    assert api.set_connection("bluetooth")["mode"] == "bluetooth" and api._client.connection == "bluetooth"
+    try:
+        api.set_connection("wifi")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown setting was saved")
+    assert config.load_config()["connection"] == "bluetooth"
+    api.sign_in("a@b", "right", False)                      # a new session takes the saved setting
+    assert api._client.connection == "bluetooth"
+
+
+@_api_in_tmp_home
+def test_view_reports_the_route_and_the_clock_fix(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    c.status_cache[B2] = {"reachable": True, "ts": 1, "is_locked": True, "via": "bluetooth", "offline": True,
+                          "clock_offset_s": 0, "clock_fix": {"was": -10800, "fixed": True, "detail": ""}}
+    c.status_cache[UUID] = {"reachable": False, "ts": 1, "offline": False,
+                            "bluetooth": "The lock isn't in Bluetooth range of this computer."}
+    views = {v["id"]: v for v in api.locks()}
+    b2, other = views[B2], views[UUID]
+    assert (b2["state"], b2["via"], b2["wifiOffline"], b2["offline"]) == ("locked", "bluetooth", True, False)
+    assert b2["clockFix"] == {"was": -10800, "fixed": True, "detail": ""}
+    assert (other["state"], other["wifiOffline"], other["clockFix"]) == ("asleep", False, None)
+    assert other["bluetoothNote"] == "The lock isn't in Bluetooth range of this computer."
+
+
+@_api_in_tmp_home
+def test_remote_only_install_never_uses_bluetooth(api):
+    import time
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    reported = FakeClient.query_status(c, None)
+    c.query_status = lambda lock: {**reported, "battery_percent": 80}
+    parts = api.firmware(B2)["install"]["parts"]
+    for mode, used in (("remote", False), ("auto", True)):
+        api.set_connection(mode)
+        api.firmware_install(B2, parts, True)               # this computer can reach it over Bluetooth
+        for _ in range(200):
+            if not api.firmware_install_status(B2)["running"]:
+                break
+            time.sleep(0.01)
+        assert c.fw_bluetooth is used, mode
+
+
+@_api_in_tmp_home
 def test_bluetooth_check_and_set_time(api):
     from locklyctl import ble as BLE
     api.sign_in("a@b", "right", False)

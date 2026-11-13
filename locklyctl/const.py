@@ -39,3 +39,10 @@ MATTER_HUB_PREFIX = "PGH260"
 
 CONFIG_DIR_NAME = ".locklyctl"
 CONFIG_FILE_NAME = "config.json"
+
+# How commands reach a lock (LocklyClient.connection, saved as "connection").
+# "auto": the hub or Lockly's server, then Bluetooth from this computer for a
+# status check that got no answer; "remote": never Bluetooth; "bluetooth":
+# status checks only over Bluetooth, and nothing else is sent. Only status
+# checks go over Bluetooth so far: the one frame proven on a lock that way.
+CONNECTIONS = ("auto", "remote", "bluetooth")

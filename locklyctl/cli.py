@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from . import features as F
 from . import protocol as P
 from . import config
+from .const import CONNECTIONS
 from .transport import LocklyClient, LocklyError
 
 _LOG = logging.getLogger("locklyctl")
@@ -223,6 +224,9 @@ def do_status(client: LocklyClient, lock: dict) -> None:
     print_status(st)
 
 
+VIA_TEXT = {"hub": "its hub", "server": "Lockly's server", "bluetooth": "Bluetooth from this computer"}
+
+
 def print_status(st: dict) -> None:
     locked = st.get("is_locked")
     print(f"  state: {green('LOCKED') if locked else red('UNLOCKED') if locked is not None else '?'}")
@@ -234,6 +238,17 @@ def print_status(st: dict) -> None:
         print(f"  batt:  {st['battery_percent']}%")
     if st.get("low_battery") or st.get("battery_invalid"):
         print(yellow("  battery low"))
+    fix = st.get("clock_fix")
+    if fix:
+        print(green(f"  clock: was {F.clock_offset_text(fix['was'])}; set it") if fix["fixed"] else
+              red(f"  clock: {F.clock_offset_text(st.get('clock_offset_s'))}; {fix['detail']}"))
+    elif "clock_offset_s" in st:
+        off = st["clock_offset_s"]
+        print(yellow(f"  clock: {F.clock_offset_text(off)}") if off is None or abs(off) >= F.CLOCK_WARN_S
+              else "  clock: right")
+    if st.get("via"):
+        print(dim(f"  via:   {VIA_TEXT.get(st['via'], st['via'])}"
+                  + ("; Lockly's server says its Wi-Fi is offline" if st.get("offline") else "")))
 
 
 def do_unlock(client: LocklyClient, lock: dict) -> None:
@@ -719,6 +734,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False) -> LocklyClient | No
         try:
             client.login_with_hash(pw_hash)
             client.load_devices()
+            client.connection = config.connection_mode(cfg)
             say(green(f"  signed in as {email} — {len(client.locks)} lock(s)"))
             if not cfg.get("pw_in_keyring") and config._keyring():
                 config._save_credential(cfg, email, pw_hash)   # migrate file → keyring
@@ -750,6 +766,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False) -> LocklyClient | No
                 + "; clear it any time with --logout)"))
     else:
         config._save_credential(cfg, email, None)
+    client.connection = config.connection_mode(cfg)
     say(green(f"  logged in — {len(client.locks)} lock(s) found"))
     return client
 
@@ -767,6 +784,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="print protocol-level logging to the console")
     parser.add_argument("--logout", action="store_true",
                         help="forget the saved login credential and exit")
+    parser.add_argument("--connection", choices=CONNECTIONS,
+                        help="how to reach locks: auto (hub or Lockly's server, then Bluetooth from "
+                             "this computer for a status check that got no answer), remote, or "
+                             "bluetooth (status checks only); default: the saved setting, else auto")
     parser.add_argument("--version", action="version", version=f"locklyctl {__version__}")
     commands.add_subcommands(parser)
     args = parser.parse_args(argv)
@@ -788,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
         client = login_flow()
         if client is None:
             return 1
+        if args.connection:
+            client.connection = args.connection
         if client.prime_cached_status(client.locks):
             print(dim("  statuses from the hub cache (silent); ↻ Refresh for live"))
         try:

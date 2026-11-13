@@ -209,6 +209,14 @@
 
           <div role="tabpanel" id="panel-connection" aria-labelledby="tab-connection" class="panel" hidden>
             <h2>Connection</h2>
+            <p class="muted">How this computer reaches every door. Auto uses the hub or Lockly's server, and when a door doesn't answer a status check that way, tries it over Bluetooth from this computer. Only status checks go over Bluetooth so far.</p>
+            <fieldset class="seg" id="conn-mode">
+              <legend>Reach doors by</legend>
+              <label><input type="radio" name="conn" value="auto" checked><span>Auto</span></label>
+              <label><input type="radio" name="conn" value="remote"><span>Hub or Lockly's server</span></label>
+              <label><input type="radio" name="conn" value="bluetooth"><span>Bluetooth only</span></label>
+            </fieldset>
+            <p class="fine" id="conn-note"></p>
             <p class="muted">Finds out which route reaches this lock: the hub relay, or Lockly's device channel. It wakes the lock.</p>
             <div><button class="btn btn-ink" id="btn-diagnose" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Test connection</button></div>
             <div id="diag-out"></div>

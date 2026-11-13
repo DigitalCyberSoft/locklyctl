@@ -781,6 +781,15 @@ def lock_now(lock: dict) -> _dt:
 CLOCK_WARN_S = 120
 
 
+def clock_offset_text(offset_s: int | None) -> str:
+    """A clock offset in words: "no valid time", "3 min behind", "5 hours ahead"."""
+    if offset_s is None:
+        return "no valid time"
+    mins = round(abs(offset_s) / 60)
+    size = f"{round(mins / 60)} hours" if mins >= 120 else f"{mins} min" if mins else f"{abs(offset_s)} s"
+    return f"{size} {'behind' if offset_s < 0 else 'ahead'}"
+
+
 def lock_clock(lock: dict, status: dict) -> tuple[_dt | None, bool]:
     """The lock's own clock from a status reply (QueryLockStatusCmd reads it
     from data[18:30]) as an aware datetime, and whether the reply carried one.

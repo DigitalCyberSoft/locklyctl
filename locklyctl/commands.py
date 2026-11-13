@@ -113,6 +113,8 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_FAIL
     if client is None:
         return EXIT_FAIL
+    if getattr(args, "connection", None):
+        client.connection = args.connection
     try:
         return _HANDLERS[args.command](client, args)
     except UsageError as e:
@@ -144,7 +146,8 @@ def _status(client: LocklyClient, args) -> int:
     lock = find_lock(client.locks, args.lock)
     st = client.query_status(lock) if args.live else client.cached_status(lock)
     if not st:
-        print(C.red("  no response from the lock") if args.live else
+        ble = (client.status_cache.get(lock["ID"]) or {}).get("bluetooth") if args.live else ""
+        print(C.red("  no response from the lock" + (f" (Bluetooth: {ble})" if ble else "")) if args.live else
               C.yellow("  no cached status for this lock (no hub, or hub too old) — try --live"),
               file=sys.stderr)
         return EXIT_FAIL

@@ -17,6 +17,7 @@ from .. import ble as BLE
 from .. import config
 from .. import features as F
 from .. import protocol as P
+from ..const import CONNECTIONS
 from ..features import lock_tz  # noqa: F401  (re-exported for callers)
 from ..transport import LocklyClient, LocklyError
 
@@ -259,7 +260,26 @@ class Api:
 
     def _set_client(self, client: LocklyClient) -> None:
         self.close()
+        client.connection = config.connection_mode(config.load_config())
         self._client = client
+
+    # ── how commands reach a lock ────────────────────────────────────────
+
+    def connection(self) -> dict:
+        """The connection setting (const.CONNECTIONS) and why Bluetooth can't
+        be used on this computer ("" when it can be tried)."""
+        return {"mode": config.connection_mode(config.load_config()), "bluetooth": BLE.available()}
+
+    def set_connection(self, mode: str) -> dict:
+        """Save how commands reach a lock: "auto", "remote" or "bluetooth"."""
+        if mode not in CONNECTIONS:
+            raise ValueError(f"Unknown connection setting {mode!r}.")
+        cfg = config.load_config()
+        cfg["connection"] = mode
+        config.save_config(cfg)
+        if self._client is not None:
+            self._client.connection = mode
+        return self.connection()
 
     # ── locks & status ───────────────────────────────────────────────────
 
@@ -292,6 +312,14 @@ class Api:
             "model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
             "state": state,
             "offline": state == "asleep" and bool(e.get("offline")),   # Lockly's server said so (3005)
+            # Which route answered the last check ("hub", "server", "bluetooth"),
+            # and whether that was Bluetooth because Lockly's server said 3005.
+            "via": e.get("via"),
+            "wifiOffline": e.get("via") == "bluetooth" and bool(e.get("offline")),
+            # Why a Bluetooth try didn't answer, when one was made.
+            "bluetoothNote": e.get("bluetooth") or "",
+            # A wrong clock the check tried to fix: {"was", "fixed", "detail"}.
+            "clockFix": e.get("clock_fix"),
             # The lock's own clock from its last answer: seconds off, None when
             # it reported no valid time; clockKnown False when it hasn't said.
             "clockKnown": "clock_offset_s" in e,
@@ -743,6 +771,8 @@ class Api:
             if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
                 raise ValueError("A firmware install is already running on this door.")
             self._fw_jobs[lock["ID"]] = job
+        # "Remote only" means no Bluetooth, even for the clock after a restart.
+        bluetooth = bluetooth and getattr(self._c(), "connection", "auto") != "remote"
         threading.Thread(target=self._run_firmware_install, args=(lock, plan, job, bluetooth),
                          name="locklyctl-firmware", daemon=True).start()
         return self.firmware_install_status(lock_id)

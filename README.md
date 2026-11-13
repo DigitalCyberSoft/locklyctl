@@ -34,8 +34,9 @@ way the official app does.
 | Feature | Status |
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
-| The lock's own clock, from every live status check (each check also sends it the time, as the app's does) | ✅ warns when it's 2 minutes or more off, or not set: people on a schedule are let in by it |
-| Bluetooth straight from this computer to a lock next to it: set its clock, and reach it after a firmware install if its Wi-Fi doesn't come back | ⚠️ built from the app's code (service fff0, 20-byte writes to fff1, replies on fff4, no pairing); not yet run against a lock. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
+| The lock's own clock, from every live status check (each check also sends it the time, as the app's does) | ✅ warns when it's 2 minutes or more off, or not set: people on a schedule are let in by it. On a Visage (2026-11-13), a check carrying a time 5 minutes ahead moved its clock there before it replied, and the next ordinary check moved it back: every check that reaches it sets its clock. A reply that still shows a wrong clock gets a second check on the same route, and the result is shown, including "still wrong" |
+| Bluetooth straight from this computer to a lock next to it: status checks, which also set its clock, and reaching it after a firmware install if its Wi-Fi doesn't come back | ⚠️ run on a Visage (2026-11-13): found by name, connected in 6.4 s, answered status checks; with the Auto setting it reached a Visage whose Wi-Fi was offline in 21 s. Such a door is then asked over Bluetooth first for 5 minutes, and clicking it within a minute of a Bluetooth answer doesn't connect again (the lock drops an idle Bluetooth connection after 6-8 s, so every check is a new connection). Only status checks go over Bluetooth: commands that change the lock don't yet. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
+| Connection setting: Auto (hub or Lockly's server, then Bluetooth from this computer for a status check that got no answer), Remote only, or Bluetooth only (status checks only) | ✅ desktop app's Device tab, `--connection` on the command line; Auto is the default |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
 | Access log (last 7 days), in the Lockly app's own words | ✅ Visages: from Lockly's event log, which the lock fills over its Wi-Fi, as the Lockly app reads it (checked against a lock's own log). Other locks: from Lockly's cloud log, which only has what was uploaded to it, so often empty; reading those locks' own logs isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
@@ -52,8 +53,10 @@ way the official app does.
 | Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 
 Commands reach a lock through its hub (`senddata` relay) or, for Wi-Fi locks
-like the Visage, Lockly's MQTT device channel. Locks with no hub are listed but
-can only be reached over Bluetooth, which locklyctl doesn't do yet.
+like the Visage, Lockly's MQTT device channel. With the Auto connection
+setting, a status check that gets no answer that way is tried over Bluetooth
+from this computer when the lock is in range. Locks with no hub are listed,
+but the desktop app doesn't check or control them yet.
 
 ## Desktop app
 
@@ -142,6 +145,8 @@ Sign in, then pick a door and an action from the menus. If you stay signed in,
 the credential goes to the OS keyring (with the `keyring` extra), otherwise to
 `~/.locklyctl/config.json` (owner-only). It's equivalent to your password, so
 use `--logout` on shared machines. `--debug` prints protocol logging.
+`--connection auto|remote|bluetooth` overrides the saved connection setting
+for one run.
 
 Once a login is saved, single actions run without the menus:
 

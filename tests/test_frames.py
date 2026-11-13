@@ -872,6 +872,269 @@ def test_firmware_install_falls_back_to_bluetooth():
         raise AssertionError("a lock that never answered was reported installed")
 
 
+
+# -- connection setting: Bluetooth fallback, Bluetooth only, clock fix --------
+
+VISAGE = {"mc": MC, "ID": UUID, "hc": HC, "tz": "+8:00", "mod": "PGK728WRHK", "blename": "PGK728WRHK0000"}
+
+
+def _status_reply_clock(clock_hex):
+    return _reply("1E", "01000E0B" + "A0" + "46FF46FF" + clock_hex + "00" * 3 + "69" + "00" * 13)
+
+
+def _status_now(lock=VISAGE, shift_s=0):
+    from datetime import timedelta
+    return _status_reply_clock(P._timestamp_hex(F.lock_now(lock) + timedelta(seconds=shift_s)))
+
+
+class _OfflineChannel:
+    """Lockly's server answering 3005 (device offline) to everything."""
+    last_code = "3005"
+
+    def __init__(self):
+        self.sent = []
+
+    def exchange_frame(self, device_id, frame_hex):
+        self.sent.append(frame_hex)
+        return None
+
+
+def _with_fake_bluetooth(answers, connect_error=None):
+    """Swap ble.BleLink for a fake lock next to this computer; returns
+    (links, restore). ``answers`` is a list of replies handed out in turn."""
+    from locklyctl import ble as BLE
+    links = []
+
+    class FakeLink:
+        def __init__(self, name):
+            self.name, self.frames, self.connect_kw, self.closed = name, [], None, False
+            links.append(self)
+
+        def connect(self, **kw):
+            self.connect_kw = kw
+            if connect_error:
+                raise connect_error
+
+        def exchange(self, frame_hex):
+            self.frames.append(frame_hex)
+            return answers.pop(0) if answers else None
+
+        def close(self):
+            self.closed = True
+    real = (BLE.BleLink, BLE.available)
+    BLE.BleLink, BLE.available = FakeLink, (lambda: "")
+
+    def restore():
+        BLE.BleLink, BLE.available = real
+    return links, restore
+
+
+def _client(connection):
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.ASLEEP_RETRY_DELAYS = ()
+    c.connection = connection
+    ch = _OfflineChannel()
+    c._mqtt_channel = lambda: ch
+    return c, ch
+
+
+def test_auto_tries_bluetooth_when_lockly_says_offline():
+    c, ch = _client("auto")
+    links, restore = _with_fake_bluetooth([_status_now()])
+    try:
+        st = c.query_status(VISAGE)
+    finally:
+        restore()
+    assert len(ch.sent) == 1 and len(links) == 1 and links[0].closed
+    assert links[0].connect_kw == {"skip_if_missed": True}       # a scan that just missed it isn't repeated
+    assert st["via"] == "bluetooth" and st["offline"] is True and abs(st["clock_offset_s"]) <= 2
+    assert "clock_fix" not in st
+    e = c.status_cache[UUID]
+    assert e["reachable"] and e["via"] == "bluetooth" and e["offline"] is True
+    assert c.last_transport_trail().endswith("3005, device offline / asleep) ; Bluetooth → ACK")
+    assert getattr(c._tl, "ble", None) is None
+
+
+def test_auto_records_why_bluetooth_did_not_answer():
+    from locklyctl import ble as BLE
+    c, _ = _client("auto")
+    links, restore = _with_fake_bluetooth([], connect_error=BLE.NotInRange("The lock isn't in Bluetooth range."))
+    try:
+        assert c.query_status(VISAGE) is None
+    finally:
+        restore()
+    e = c.status_cache[UUID]
+    assert (e["reachable"], e["offline"], e["bluetooth"]) == (False, True, "The lock isn't in Bluetooth range.")
+    assert links[0].closed and c.last_transport_trail().endswith("Bluetooth → The lock isn't in Bluetooth range.")
+
+
+def test_auto_asks_a_door_off_wifi_over_bluetooth_first_for_a_while():
+    """After a door answered only over Bluetooth, its next checks skip the
+    remote tries (~10 s of 3005s) until BLUETOOTH_FIRST_S is up."""
+    c, ch = _client("auto")
+    links, restore = _with_fake_bluetooth([_status_now(), _status_now(), _status_now()])
+    try:
+        assert c.query_status(VISAGE)["via"] == "bluetooth" and len(ch.sent) == 1
+        st = c.query_status(VISAGE)                                  # straight to Bluetooth
+        assert st["via"] == "bluetooth" and st["offline"] is True and len(ch.sent) == 1
+        assert c.last_transport_trail() == "Bluetooth → ACK" and len(links) == 2
+        c._bluetooth_first[UUID] = 0.0                               # the while is up: remote first again
+        assert c.query_status(VISAGE)["via"] == "bluetooth" and len(ch.sent) == 2
+    finally:
+        restore()
+
+
+def test_bluetooth_first_falls_back_to_remote_when_bluetooth_is_quiet():
+    c, ch = _client("auto")
+    links, restore = _with_fake_bluetooth([])                       # connects, never answers
+    try:
+        c._bluetooth_first[UUID] = float("inf")
+        assert c.query_status(VISAGE) is None
+    finally:
+        restore()
+    assert len(links) == 1 and len(ch.sent) == 1                    # Bluetooth once, then the remote route
+    assert UUID not in c._bluetooth_first
+    e = c.status_cache[UUID]
+    assert (e["offline"], e["bluetooth"]) == (True, "It didn't answer over Bluetooth.")
+    assert c.last_transport_trail().startswith("Bluetooth → no reply ; ")
+
+
+def test_remote_and_bare_clients_never_use_bluetooth():
+    from locklyctl.transport import LocklyClient
+    assert LocklyClient("a@b").connection == "remote"                   # only front ends turn it on
+    c, ch = _client("remote")
+    links, restore = _with_fake_bluetooth([_status_now()])
+    try:
+        assert c.query_status(VISAGE) is None
+    finally:
+        restore()
+    assert links == [] and len(ch.sent) == 1 and "bluetooth" not in c.status_cache[UUID]
+
+
+def test_bluetooth_only_sends_status_checks_and_nothing_else():
+    from locklyctl.transport import BLUETOOTH_ONLY_REFUSAL, LocklyError
+    c, ch = _client("bluetooth")
+    links, restore = _with_fake_bluetooth([_status_now(), _status_now()])
+    try:
+        assert c.query_status(VISAGE)["via"] == "bluetooth"
+        try:
+            c.unlock(VISAGE)
+        except LocklyError as e:
+            assert str(e) == BLUETOOTH_ONLY_REFUSAL
+        else:
+            raise AssertionError("an unlock was sent while the connection is Bluetooth only")
+    finally:
+        restore()
+    assert ch.sent == [] and links[0].connect_kw == {"skip_if_missed": False}
+    assert all(_plain(f).startswith("1E") for lk in links for f in lk.frames)   # status queries only
+
+
+def test_auto_never_sends_a_command_that_changes_the_lock_over_bluetooth():
+    """Only status checks fall back to Bluetooth: an unlock to a door whose
+    Wi-Fi is offline goes the remote way and fails there, and so does the
+    status check for its nonce (the nonce must come over the command's route)."""
+    c, ch = _client("auto")
+    links, restore = _with_fake_bluetooth([_status_now()])
+    try:
+        ok, _ = c.unlock(VISAGE)
+    finally:
+        restore()
+    assert ok is False and links == []
+    assert len(ch.sent) == 2 and _plain(ch.sent[0]).startswith("1E")         # nonce check, then
+    assert not _plain(ch.sent[1]).startswith("1E")                            # the unlock, both to Lockly's server
+
+
+def test_a_wrong_clock_gets_a_second_check():
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    replies = []
+    c.exchange_frame = lambda lk, frame, directive=None: replies.pop(0) if replies else None
+
+    replies[:] = [_status_now()]                                        # right: one check, nothing to fix
+    st = c.query_status(VISAGE)
+    assert "clock_fix" not in st and replies == []
+
+    replies[:] = [_status_now(shift_s=-3 * 3600), _status_now()]       # 3 h behind, then right
+    st = c.query_status(VISAGE)
+    assert st["clock_fix"]["fixed"] is True and abs(st["clock_fix"]["was"] + 3 * 3600) <= 2
+    assert abs(st["clock_offset_s"]) <= 2 and c.status_cache[UUID]["clock_fix"]["fixed"] is True
+
+    replies[:] = [_status_reply_clock("000000000000")] * 2             # no valid time, and it doesn't take one
+    st = c.query_status(VISAGE)
+    assert st["clock_fix"] == {"was": None, "fixed": False, "detail": "the second check still showed it wrong"}
+
+    replies[:] = [_status_now(shift_s=600)]                             # 10 min ahead, then no answer
+    st = c.query_status(VISAGE)
+    assert st["clock_fix"]["fixed"] is False and st["clock_fix"]["detail"] == "the lock didn't answer the second check"
+    assert abs(st["clock_offset_s"] - 600) <= 2                         # the first reply is kept
+
+
+def test_ble_skips_a_scan_that_just_missed_the_lock():
+    import time
+    from locklyctl import ble as BLE
+    saved = (dict(BLE._heard), BLE._whole_scan_at)
+    try:
+        BLE._heard.clear()
+        BLE._whole_scan_at = None
+        assert not BLE.recently_missed("A")                           # no scan yet
+        BLE._whole_scan_at = time.monotonic()
+        BLE._heard["B"] = time.monotonic()
+        assert BLE.recently_missed("A") and not BLE.recently_missed("B")
+        link = BLE.BleLink("A")
+        try:
+            link.connect(skip_if_missed=True)                         # raises before any scan
+        except BLE.NotInRange as e:
+            assert "not heard in a scan" in str(e)
+        else:
+            raise AssertionError("a lock just missed was scanned for again")
+        finally:
+            link.close()
+        BLE._whole_scan_at = time.monotonic() - BLE.MISS_TTL_S - 1
+        assert not BLE.recently_missed("A")                           # too old to trust
+    finally:
+        BLE._heard.clear()
+        BLE._heard.update(saved[0])
+        BLE._whole_scan_at = saved[1]
+
+
+def test_firmware_needs_wifi():
+    """A lock that answered only over Bluetooth can't take a Wi-Fi install, and
+    Bluetooth only refuses installs; while an install is confirmed, status
+    checks don't fall back to Bluetooth (FW_BLE_AFTER_S decides that)."""
+    from locklyctl.transport import LocklyClient, LocklyError
+    c = LocklyClient("a@b")
+    c.query_status = lambda lk: {"lock_type": 105, "via": "bluetooth", "battery_percent": 90,
+                                 "firmware_version": "1.00.87", "sub_version": "1.00.72",
+                                 "wifi_version": "1.02.70", "ble_version": "1.14.21"}
+    c._firmware_reply = lambda lk, lock_type=None: FW_REPLY
+    assert c.firmware_plan(VISAGE)["blocked"].startswith("Its Wi-Fi is offline")
+
+    parts, _ = F.firmware_reply_parts(FW_REPLY)
+    send = F.firmware_parts_to_install(parts, {"front": "1.00.87"}, phone_does_ble=True)
+    c.connection = "bluetooth"
+    try:
+        c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
+    except LocklyError as e:
+        assert "firmware installs over Wi-Fi" in str(e)
+    else:
+        raise AssertionError("an install started while the connection is Bluetooth only")
+
+    class Channel:
+        def follow_firmware_upgrade(self, payload, progress, idle_timeout):
+            return {"stage": "final"}
+    c.connection = "auto"
+    c.FW_SETTLE_S = c.FW_VERIFY_S = c.FW_VERIFY_EVERY_S = 0
+    c._mqtt_channel = lambda: Channel()
+    remote_only = []
+    c.query_status = lambda lk: remote_only.append(getattr(c._tl, "remote_only", False))
+    try:
+        c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
+    except LocklyError:
+        pass                                                          # never answered: expected
+    assert remote_only == [True] and getattr(c._tl, "remote_only", False) is False
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

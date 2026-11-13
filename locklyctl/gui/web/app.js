@@ -133,13 +133,21 @@ function updateLock(view) {
 // The lock lets people on a schedule in by its own clock, so a wrong one is
 // worth saying: off by 2 minutes or more (features.CLOCK_WARN_S), or no time.
 const CLOCK_WARN_S = 120;
+function offsetWords(offset) {
+  const min = Math.round(Math.abs(offset) / 60);
+  return `${min >= 120 ? `${Math.round(min / 60)} hours` : `${min} min`} ${offset < 0 ? "behind" : "ahead"}`;
+}
 function clockText(known, offset) {
   if (!known) return null;
   if (offset == null) return "The lock has no valid time";
   if (Math.abs(offset) < CLOCK_WARN_S) return null;
-  const min = Math.round(Math.abs(offset) / 60);
-  return `The lock's clock is ${min >= 120 ? `${Math.round(min / 60)} hours` : `${min} min`} `
-    + (offset < 0 ? "behind" : "ahead");
+  return `The lock's clock is ${offsetWords(offset)}`;
+}
+// A wrong clock the last check tried to fix with a second check (clock_fix).
+function clockFixText(fix) {
+  if (!fix) return null;
+  const was = fix.was == null ? "had no valid time" : `was ${offsetWords(fix.was)}`;
+  return fix.fixed ? `Its clock ${was}; the check set it.` : `Its clock ${was}, and ${fix.detail}.`;
 }
 
 function sinceText(ts) {
@@ -187,9 +195,26 @@ $("signin-form").addEventListener("submit", async (ev) => {
   });
 });
 
+// How doors are reached: one setting for this computer (Api.connection).
+function showConnection(c) {
+  for (const r of $("conn-mode").querySelectorAll("input")) r.checked = r.value === c.mode;
+  $("conn-note").textContent = c.bluetooth && c.mode !== "remote"
+    ? `Bluetooth can't be used on this computer: ${c.bluetooth}` : "";
+}
+
+$("conn-mode").addEventListener("change", async (ev) => {
+  try {
+    showConnection(await call("set_connection", ev.target.value));
+  } catch (e) {
+    toast(e.message, true);
+    call("connection").then(showConnection, (err) => toast(err.message, true));
+  }
+});
+
 async function enterApp(email) {
   $("who").textContent = email;
   show("app");
+  call("connection").then(showConnection, (e) => { $("conn-note").textContent = e.message; });
   $("plates").replaceChildren(h("li", { class: "muted" }, "Loading doors…"));
   try {
     locks = await call("locks");
@@ -354,9 +379,13 @@ async function runCommand(v, kind) {
       toast(`Connecting to ${label}…`);
       const view = await call("check", v.id);
       updateLock(view);
-      toast(view.state !== "asleep" ? `${label}: ${STATE_WORD[view.state]}.`
-        : view.offline ? `Lockly's server says ${label} is offline.` : `${label} didn't answer.`,
-        view.state === "asleep");
+      const fix = clockFixText(view.clockFix);
+      toast((view.state !== "asleep"
+        ? `${label}: ${STATE_WORD[view.state]}${view.via === "bluetooth" ? " (over Bluetooth)" : ""}.`
+        : (view.offline ? `Lockly's server says ${label} is offline.` : `${label} didn't answer.`)
+          + (view.bluetoothNote ? ` Bluetooth: ${view.bluetoothNote}` : ""))
+        + (fix ? ` ${fix}` : ""),
+        view.state === "asleep" || (view.clockFix && !view.clockFix.fixed));
     } else {
       toast(`${kind === "lock" ? "Locking" : "Unlocking"} ${label}…`);
       const r = await call(kind, v.id);
@@ -395,7 +424,18 @@ function selectLock(id, connect = false) {
     loadTab(activeTab);
   }
   const v = current();
-  if (connect && v) checkDoors([v]).then((r) => { if (r.failed.length) toast(r.failed[0], true); });
+  if (connect && v && !recentlyOverBluetooth(v)) {
+    checkDoors([v]).then((r) => { if (r.failed.length) toast(r.failed[0], true); });
+  }
+}
+
+// A door that answered over Bluetooth a moment ago isn't asked again just
+// because it was clicked: each ask is a new Bluetooth connection (the lock
+// drops an idle one after 6-8 s) and a beep. "Check now" still asks.
+const BLUETOOTH_FRESH_S = 60;
+function recentlyOverBluetooth(v) {
+  return v.via === "bluetooth" && !v.cached && v.checkedAt != null
+    && Date.now() / 1000 - v.checkedAt < BLUETOOTH_FRESH_S;
 }
 
 // ── the door panel ─────────────────────────────────────────────────────
@@ -431,9 +471,14 @@ function renderDoor() {
   else if (v.lowBattery) facts.push(h("li", { class: "warn" }, icon("battery"), "Battery low"));
   if (v.doorOpen != null) facts.push(h("li", { class: v.doorOpen ? "warn" : "" }, v.doorOpen ? "Door open" : "Door closed"));
   const since = sinceText(v.checkedAt);
-  if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}` : `Checked ${since}`));
+  if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}`
+    : `Checked ${since}${v.via === "bluetooth" ? " over Bluetooth" : ""}`));
+  if (v.wifiOffline) facts.push(h("li", { class: "warn" }, "Wi-Fi offline: Lockly's server says so, and this computer reached it over Bluetooth"));
+  if (v.state === "asleep" && v.bluetoothNote) facts.push(h("li", {}, `Bluetooth: ${v.bluetoothNote}`));
   const clock = clockText(v.clockKnown, v.clockOffset);
-  if (clock) facts.push(h("li", { class: "warn" }, clock));
+  const fix = clockFixText(v.clockFix);
+  if (fix) facts.push(h("li", { class: v.clockFix.fixed ? "" : "warn" }, fix));
+  else if (clock) facts.push(h("li", { class: "warn" }, clock));
   if (v.firmware) facts.push(h("li", {}, `Firmware ${v.firmware}`));
   $("d-facts").replaceChildren(...facts);
   renderKeep(v);
@@ -835,9 +880,11 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
       const view = await call("bluetooth_set_time", v.id);
       updateLock(view);
       const clock = clockText(view.clockKnown, view.clockOffset);
+      const fix = clockFixText(view.clockFix);
       out.replaceChildren(h("p", { class: clock ? "form-error" : "ok" },
         clock ? `Reached it over Bluetooth, but ${clock.charAt(0).toLowerCase()}${clock.slice(1)}.`
-          : "Reached it over Bluetooth and gave it the time. Its clock is right."));
+          : "Reached it over Bluetooth and gave it the time. Its clock is right."),
+        fix ? h("p", { class: "fine" }, fix) : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });

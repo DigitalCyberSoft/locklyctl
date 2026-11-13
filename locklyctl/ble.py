@@ -6,14 +6,16 @@ chunks, and read the reply from fff4 notifications. The frames are the same
 ones locklyctl relays through a hub or Lockly's MQTT channel; there's no
 pairing or key exchange. Needs the optional ``bleak`` package and an adapter.
 
-Built from the app's code on 2026-11-13; not yet run against a lock (none was
-in range of the machine it was written on).
+Built from the app's code on 2026-11-13. First run against a lock the same
+evening: a Visage found by name at -74 dBm, connected in 6.4 s, and answered
+two status checks.
 """
 from __future__ import annotations
 
 import asyncio
 import importlib.util
 import threading
+import time
 
 from . import protocol as P
 
@@ -24,10 +26,49 @@ CHUNK = 20                       # FastBle's split size (BleManager.f24464j), ne
 HEAD = bytes.fromhex("A1B2C3D4")
 SCAN_S = 10.0                    # the app scans for 10-15 s
 REPLY_S = 8.0                    # BLELoader gives a command 8 s before "No Response"
+MISS_TTL_S = 60.0                # how long a whole scan that didn't hear a lock is trusted
 
 
 class BluetoothError(Exception):
     """Bluetooth isn't usable here, or the lock couldn't be reached over it."""
+
+
+class NotInRange(BluetoothError):
+    """No device with the lock's name was heard."""
+
+
+# One adapter: scans and connects take turns. Every name heard in any scan is
+# remembered, and so is when the last whole scan (one that ran its full time
+# without finding what it looked for) started: a lock it didn't hear isn't
+# scanned for again for MISS_TTL_S when the caller allows that shortcut, so
+# checking several offline doors costs one scan, not one each.
+_SCAN_LOCK = threading.Lock()
+_heard: dict[str, float] = {}
+_whole_scan_at: float | None = None
+
+
+def recently_missed(name: str) -> bool:
+    """Whether a whole scan in the last MISS_TTL_S ran without hearing ``name``."""
+    at = _whole_scan_at
+    return (at is not None and time.monotonic() - at < MISS_TTL_S
+            and _heard.get(name, float("-inf")) < at)
+
+
+async def _find(name: str, timeout: float):
+    """The device advertising ``name``, or None; records every name heard."""
+    global _whole_scan_at
+    from bleak import BleakScanner
+    started = time.monotonic()
+
+    def match(d, adv) -> bool:
+        seen = _name_of(d, adv)
+        if seen:
+            _heard[seen] = time.monotonic()
+        return seen == name
+    device = await BleakScanner.find_device_by_filter(match, timeout=timeout)
+    if device is None:
+        _whole_scan_at = started
+    return device
 
 
 def available() -> str:
@@ -82,13 +123,10 @@ def in_range(name: str, timeout: float = SCAN_S) -> bool:
     """Whether a device advertising this name is heard within ``timeout``.
     Listens only; nothing is sent to the lock. Raises BluetoothError when
     Bluetooth can't be used (no adapter, adapter off)."""
-    from bleak import BleakScanner
     from bleak.exc import BleakError
-
-    async def scan():
-        return await BleakScanner.find_device_by_filter(lambda d, adv: _name_of(d, adv) == name, timeout=timeout)
     try:
-        return asyncio.run(scan()) is not None
+        with _SCAN_LOCK:
+            return asyncio.run(_find(name, timeout)) is not None
     except BleakError as e:
         raise BluetoothError(f"Bluetooth: {e}") from e
 
@@ -115,18 +153,23 @@ class BleLink:
 
     # -- connect / disconnect ------------------------------------------------
 
-    def connect(self, timeout: float = SCAN_S) -> None:
-        """Find the lock by name and connect. Raises BluetoothError."""
-        self._run(self._connect(timeout), timeout + 20)
+    def connect(self, timeout: float = SCAN_S, *, skip_if_missed: bool = False) -> None:
+        """Find the lock by name and connect. With ``skip_if_missed``, a lock a
+        whole scan didn't hear in the last MISS_TTL_S isn't scanned for again.
+        Raises NotInRange when it isn't heard, BluetoothError otherwise."""
+        with _SCAN_LOCK:
+            if skip_if_missed and recently_missed(self.name):
+                raise NotInRange("The lock isn't in Bluetooth range of this computer "
+                                 f"(not heard in a scan {time.monotonic() - _whole_scan_at:.0f} s ago).")
+            self._run(self._connect(timeout), timeout + 20)
 
     async def _connect(self, timeout: float) -> None:
-        from bleak import BleakClient, BleakScanner
+        from bleak import BleakClient
         from bleak.exc import BleakError
         try:
-            device = await BleakScanner.find_device_by_filter(
-                lambda d, adv: _name_of(d, adv) == self.name, timeout=timeout)
+            device = await _find(self.name, timeout)
             if device is None:
-                raise BluetoothError(f"The lock isn't in Bluetooth range of this computer ({timeout:.0f} s scan).")
+                raise NotInRange(f"The lock isn't in Bluetooth range of this computer ({timeout:.0f} s scan).")
             self._client = BleakClient(device, timeout=10.0)
             await self._client.connect()
             self._frames = asyncio.Queue()

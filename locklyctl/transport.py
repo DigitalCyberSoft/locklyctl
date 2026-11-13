@@ -16,6 +16,7 @@ import ssl
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -41,6 +42,9 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+BLUETOOTH_ONLY_REFUSAL = ("The connection is set to Bluetooth only, and only status checks go over "
+                          "Bluetooth so far. Set it to Auto or Remote only for this.")
 _CERT_DIR = Path(__file__).parent / "certs"
 # MQTT message names for a firmware upgrade (RequestType / ResponseType, app 3.3.4)
 FW_REQUEST, FW_PROGRESS, FW_FAILURE = ("firmwareUpgradeRequest", "firmwareUpgradeProgress",
@@ -272,6 +276,10 @@ class LocklyClient:
         self.des3_key: bytes | None = None
         self.locks: list[dict] = []
         self.status_cache: dict[str, dict] = {}
+        # Front ends set this from the saved setting; a bare client never
+        # touches Bluetooth by itself.
+        self.connection = "remote"
+        self._bluetooth_first: dict[str, float] = {}     # lock id → monotonic time to stop
         self._session = requests.Session()
         self._mqtt: MqttChannel | None = None
         self._mqtt_lock = threading.Lock()
@@ -436,13 +444,17 @@ class LocklyClient:
         """
         self._tl.last_cod = None
         self._tl.mqtt_code = None
+        self._tl.via = None
         trail: list[str] = []
         self._tl.trail = trail
         link = getattr(self._tl, "ble", None)
         if link is not None:
             ack = link.exchange(frame_hex)
             trail.append("Bluetooth → ACK" if ack else "Bluetooth → no reply")
+            self._tl.via = "bluetooth" if ack else None
             return ack
+        if self.connection == "bluetooth":
+            raise LocklyError(BLUETOOTH_ONLY_REFUSAL, "bluetooth")
         has_hub = bool(lock.get("hubid")) and not self._is_matter(lock)
         if has_hub:
             ack = self._senddata(lock, frame_hex, directive)
@@ -450,6 +462,7 @@ class LocklyClient:
             trail.append(
                 f"senddata → {'ACK' if ack else f'cod={cod} ({P.describe_cod(cod)})'}")
             if ack:
+                self._tl.via = "hub"
                 return ack
             # 930 / no-ACK → try MQTT as a second transport
         else:
@@ -461,6 +474,7 @@ class LocklyClient:
             return None
         ack = ch.exchange_frame(lock["ID"], frame_hex)
         self._tl.mqtt_code = ch.last_code
+        self._tl.via = "server" if ack else None
         trail.append("MQTT → ACK" if ack else
                      f"MQTT → no usable reply ({ch.last_code or 'empty'}"
                      f"{', device offline / asleep' if ch.last_code == '3005' else ''})")
@@ -477,6 +491,11 @@ class LocklyClient:
         return (getattr(self._tl, "mqtt_code", None) == "3005"
                 or P.is_transient_cod(getattr(self._tl, "last_cod", None)))
 
+    # With connection "auto", a door that answered only over Bluetooth is asked
+    # over Bluetooth first for this long: its Wi-Fi was offline moments ago, and
+    # the remote tries (three, ~10 s) would only delay the same connection.
+    BLUETOOTH_FIRST_S = 300.0
+
     # Pauses before the extra status attempts for a lock that seemed asleep.
     # Not tuned on hardware: chosen so a door that stays asleep costs ~10 s more.
     ASLEEP_RETRY_DELAYS = (3.0, 6.0)
@@ -484,30 +503,154 @@ class LocklyClient:
     # -- high-level: status, nonce, caps --------------------------------------
 
     def query_status(self, lock: dict) -> dict | None:
-        """Live status query (wakes the lock). Returns parsed dict incl. nonce.
-        A lock that answers "offline" (asleep) is asked again, up to twice."""
+        """Live status query (wakes the lock). Returns the parsed reply incl.
+        nonce, or None when the lock didn't answer, and records the outcome in
+        status_cache: "via" is the route that answered ("hub", "server",
+        "bluetooth"), "offline" that Lockly's server said 3005, "bluetooth" why
+        a Bluetooth try didn't answer.
+
+        Over the hub or Lockly's server, a lock that answers "offline" is asked
+        again, up to twice. With connection "auto", a lock that still hasn't
+        answered is tried over Bluetooth from this computer when it's in range,
+        and if that answers, its checks go to Bluetooth first for
+        BLUETOOTH_FIRST_S; "bluetooth" goes straight there. On any route, a reply whose clock is
+        wrong gets one more check on that route (_fix_clock)."""
         mc, uuid_ = str(lock["mc"]), lock["ID"]
-        ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_, F.lock_now(lock)))
+        frame = lambda: P.build_query_status_cmd(mc, uuid_, F.lock_now(lock))   # noqa: E731
+        send = lambda: self.exchange_frame(lock, frame())                       # noqa: E731
+        offline, ble_note = False, ""
+        if getattr(self._tl, "ble", None) is not None:          # this thread's own link (bluetooth_status)
+            answered, parsed = self._status_on(lock, send)
+        elif self.connection == "bluetooth" and not getattr(self._tl, "remote_only", False):
+            answered, parsed, ble_note = self._status_over_bluetooth(lock, send, quick=False)
+        else:
+            may_ble = (self.connection == "auto" and bool(lock.get("blename"))
+                       and not getattr(self._tl, "remote_only", False) and not BLE.available())
+            answered, parsed = False, None
+            if may_ble and time.monotonic() < self._bluetooth_first.get(uuid_, 0.0):
+                answered, parsed, ble_note = self._status_over_bluetooth(lock, send, quick=True)
+                # Still offline as far as we know: the remote route wasn't tried.
+                offline = answered and bool((self.status_cache.get(uuid_) or {}).get("offline"))
+                if not answered:
+                    self._bluetooth_first.pop(uuid_, None)
+            if not answered:
+                ble_trail = list(getattr(self._tl, "trail", None) or []) if ble_note else []
+                answered, parsed = self._status_on(lock, lambda: self._remote_with_retries(send))
+                offline = not answered and getattr(self._tl, "mqtt_code", None) == "3005"
+                self._tl.trail = ble_trail + (getattr(self._tl, "trail", None) or [])
+                if not answered and may_ble and not ble_note:
+                    remote_trail = list(getattr(self._tl, "trail", None) or [])
+                    answered, parsed, ble_note = self._status_over_bluetooth(lock, send, quick=True)
+                    self._tl.trail = remote_trail + (getattr(self._tl, "trail", None) or [])
+                    if answered:
+                        self._bluetooth_first[uuid_] = time.monotonic() + self.BLUETOOTH_FIRST_S
+        if not answered:
+            entry = {"reachable": False, "ts": time.time(), "offline": offline}
+            if ble_note:
+                entry["bluetooth"] = ble_note
+            self.status_cache[uuid_] = entry
+            return None
+        if parsed:
+            parsed["via"], parsed["offline"] = getattr(self._tl, "via", None), offline
+            self.status_cache[uuid_] = {"reachable": True, "ts": time.time(), **parsed}
+        return parsed
+
+    def _remote_with_retries(self, send: Callable[[], str | None]) -> str | None:
+        ack = send()
         for delay in self.ASLEEP_RETRY_DELAYS:
             if ack or not self._worth_retrying():
                 break
             time.sleep(delay)
-            ack = self.exchange_frame(lock, P.build_query_status_cmd(mc, uuid_, F.lock_now(lock)))
+            ack = send()
+        return ack
+
+    def _status_on(self, lock: dict, send: Callable[[], str | None]) -> tuple[bool, dict | None]:
+        """Ask for status with ``send`` (one route), parse the reply, and fix the
+        lock's clock over that same route when the reply shows it's wrong.
+        Returns (answered, parsed); parsed is None for a reply that didn't parse."""
+        ack = send()
         if not ack:
-            # 3005 is Lockly's server saying "device is offline": a Wi-Fi lock
-            # not connected to it, rather than one that didn't answer in time.
-            self.status_cache[uuid_] = {"reachable": False, "ts": time.time(),
-                                        "offline": getattr(self._tl, "mqtt_code", None) == "3005"}
-            return None
-        parsed = P.parse_ack(ack, mc, uuid_) or None
+            return False, None
+        parsed = self._parse_status(lock, ack)
+        return True, (self._fix_clock(lock, parsed, send) if parsed else None)
+
+    def _parse_status(self, lock: dict, ack: str) -> dict | None:
+        parsed = P.parse_ack(ack, str(lock["mc"]), lock["ID"]) or None
         if parsed:
             clock, sent = F.lock_clock(lock, parsed)
             if sent:
                 # Seconds the lock's clock is from ours; None when it reports a
                 # date that can't be real (no valid time).
                 parsed["clock_offset_s"] = round(clock.timestamp() - time.time()) if clock else None
-            self.status_cache[uuid_] = {"reachable": True, "ts": time.time(), **parsed}
         return parsed
+
+    @staticmethod
+    def _clock_wrong(parsed: dict) -> bool:
+        if "clock_offset_s" not in parsed:
+            return False                                         # the reply didn't say
+        off = parsed["clock_offset_s"]
+        return off is None or abs(off) >= F.CLOCK_WARN_S
+
+    def _fix_clock(self, lock: dict, parsed: dict, send: Callable[[], str | None]) -> dict:
+        """When a status reply shows a wrong clock, send one more status check
+        on the same route: like every status check it carries the time (as
+        the app's does), and its reply shows whether the lock took it. Adds
+        "clock_fix" {"was": the first offset (None: no valid time), "fixed",
+        "detail"} to the reply returned."""
+        if not self._clock_wrong(parsed):
+            return parsed
+        was = parsed["clock_offset_s"]
+        ack = send()
+        again = self._parse_status(lock, ack) if ack else None
+        if again is None:
+            parsed["clock_fix"] = {"was": was, "fixed": False,
+                                   "detail": "the lock didn't answer the second check"}
+            return parsed
+        fixed = not self._clock_wrong(again)
+        again["clock_fix"] = {"was": was, "fixed": fixed,
+                              "detail": "" if fixed else "the second check still showed it wrong"}
+        if not fixed:
+            _LOGGER.warning("clock still wrong after a second status check: was %s s, now %s s",
+                            was, again.get("clock_offset_s"))
+        return again
+
+    def _status_over_bluetooth(self, lock: dict, send: Callable[[], str | None], *,
+                               quick: bool) -> tuple[bool, dict | None, str]:
+        """A status check over Bluetooth from this computer: (answered, parsed,
+        why it didn't answer). ``quick`` skips the scan when a scan in the
+        last minute didn't hear the lock (ble.MISS_TTL_S). A Bluetooth failure
+        is returned as the reason rather than raised: the caller records the
+        door as not answering, with that reason."""
+        self._tl.trail = []
+        why = BLE.available()
+        if why:
+            self._tl.trail = [f"Bluetooth → {why}"]
+            return False, None, why
+        try:
+            link = BLE.BleLink(str(lock.get("blename") or ""))
+        except BLE.BluetoothError as e:                          # no Bluetooth name on record
+            self._tl.trail = [f"Bluetooth → {e}"]
+            return False, None, str(e)
+        try:
+            link.connect(skip_if_missed=quick)
+            self._tl.ble = link
+            answered, parsed = self._status_on(lock, send)
+            return answered, parsed, "" if answered else "It didn't answer over Bluetooth."
+        except BLE.BluetoothError as e:
+            self._tl.trail = (getattr(self._tl, "trail", None) or []) + [f"Bluetooth → {e}"]
+            return False, None, str(e)
+        finally:
+            self._tl.ble = None
+            link.close()
+
+    @contextmanager
+    def _remote_only(self):
+        """Status checks on this thread don't fall back to Bluetooth meanwhile."""
+        self._tl.remote_only = True
+        try:
+            yield
+        finally:
+            self._tl.remote_only = False
 
     # -- Bluetooth, straight from this computer to a lock next to it -------------
 
@@ -521,9 +664,10 @@ class LocklyClient:
 
     def bluetooth_status(self, lock: dict) -> dict | None:
         """A live status check sent to the lock over Bluetooth from this
-        computer. Like every status check it carries the current time, which is
-        how the app keeps a lock's clock (QueryLockStatusCmd, isAddTime). Raises
-        BLE.BluetoothError when the lock can't be reached that way."""
+        computer, whatever the connection setting. Like every status check it
+        carries the current time, which is how the app keeps a lock's clock
+        (QueryLockStatusCmd, isAddTime), and a wrong clock gets a second check.
+        Raises BLE.BluetoothError when the lock can't be reached that way."""
         why = BLE.available()
         if why:
             raise BLE.BluetoothError(why)
@@ -591,9 +735,11 @@ class LocklyClient:
         """Fetch a fresh nonce + resolve caps from the lock's reported type.
 
         Must use the same transport the command will. ``exchange_frame`` already
-        guarantees that, so a status query here primes the nonce correctly.
+        guarantees that, so a status query here primes the nonce correctly. It
+        never falls back to Bluetooth: the command it's for doesn't either.
         """
-        status = self.query_status(lock)
+        with self._remote_only():
+            status = self.query_status(lock)
         if not status:
             return None, self.capabilities_for(lock)
         nonce = status.get("ble_nonce")
@@ -724,6 +870,10 @@ class LocklyClient:
         if not st:
             plan["blocked"] = "The lock didn't answer, so what it runs isn't known."
             return plan
+        if st.get("via") == "bluetooth":
+            plan["blocked"] = ("Its Wi-Fi is offline: it answered only over Bluetooth, and firmware "
+                               "installs over Wi-Fi.")
+            return plan
         parts, problems = F.firmware_reply_parts(body) if offer["release"] else ([], [])
         if problems:
             plan["blocked"] = "Lockly's offer looks wrong: " + "; ".join(problems) + "."
@@ -755,6 +905,9 @@ class LocklyClient:
         back on the new versions."""
         if not send:
             raise ValueError("Nothing to install.")
+        if self.connection == "bluetooth":
+            raise LocklyError("The connection is set to Bluetooth only, and firmware installs over Wi-Fi.",
+                              "bluetooth")
         ch = self._mqtt_channel()
         if ch is None:
             raise LocklyError("Couldn't connect to Lockly's device channel.")
@@ -776,7 +929,9 @@ class LocklyClient:
         seen: dict = {}
         behind = send
         while True:
-            st = self.query_status(lock)
+            # Bluetooth only after FW_BLE_AFTER_S, below, not as each check's fallback.
+            with self._remote_only():
+                st = self.query_status(lock)
             ble_note = ""
             if not st and bluetooth and time.monotonic() - restarted >= self.FW_BLE_AFTER_S:
                 # Its Wi-Fi isn't back: ask it over Bluetooth from here. That

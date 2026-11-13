@@ -31,6 +31,7 @@ const locks = [
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = (id) => locks.find((l) => l.id === id);
 let fwPolls = 0, fwParts = [];             // the mock firmware install's progress
+let connection = "auto";                   // Api.connection's saved setting
 
 window.pywebview = {
   api: {
@@ -43,6 +44,12 @@ window.pywebview = {
       await wait(500 + (n % 7) * 350);
       if (l.state === "unknown" || l.state === "asleep") l.state = n % 3 ? "locked" : "asleep";
       l.offline = l.state === "asleep" && l.route === "wifi";   // what Lockly's server says (3005)
+      if (l.offline && connection === "auto" && n % 2 === 0) {  // next to this computer: Bluetooth answers
+        Object.assign(l, { state: "locked", via: "bluetooth", wifiOffline: true, clockKnown: true, clockOffset: -1,
+          clockFix: { was: -11040, fixed: true, detail: "" } });
+      } else if (l.offline && connection === "auto") {
+        l.bluetoothNote = "The lock isn't in Bluetooth range of this computer (10 s scan).";
+      }
       return { ...l, cached: false, checkedAt: Date.now() / 1000 };
     },
     async lock(id) { await wait(700); Object.assign(find(id), { state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
@@ -57,6 +64,8 @@ window.pywebview = {
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
+    async connection() { return { mode: connection, bluetooth: "" }; },
+    async set_connection(mode) { await wait(100); connection = mode; return { mode, bluetooth: "" }; },
     async bluetooth_check() { await wait(600); return { available: true, inRange: false, detail: "The lock isn't in Bluetooth range of this computer." }; },
     async bluetooth_set_time(id) { await wait(900); Object.assign(find(id), { clockKnown: true, clockOffset: -1 }); return { ...find(id) }; },
     async firmware_install(id, parts) {
