@@ -762,6 +762,116 @@ def test_query_status_records_the_clock_offset():
     assert "clock_offset_s" in st and st["clock_offset_s"] is None
 
 
+def _status_reply():
+    """A status reply in the shape a Visage sends (41 bytes), clock 2026-11-13 19:52:21."""
+    return _reply("1E", "01000E0B" + "A0" + "46FF46FF" + "1A0B0D133415" + "00" * 3 + "69" + "00" * 13)
+
+
+def test_ble_frame_assembler():
+    """Notification chunks joined as BLELoader.E/w do (app 3.3.4)."""
+    from locklyctl.ble import FrameAssembler
+    reply = bytes.fromhex(_status_reply())
+    a = FrameAssembler()
+    assert [a.feed(reply[i:i + 20]) for i in range(0, len(reply), 20)] == [None, None, reply]   # 20+20+1
+    assert FrameAssembler().feed(b"\x01\x02" + reply) == reply          # junk before the header is cut
+    bad = reply[:-1] + bytes([reply[-1] ^ 0xFF])
+    assert FrameAssembler().feed(bad) is None                            # CRC fails
+    noise = bytearray(reply)
+    noise[6:8] = bytes.fromhex("0AFF")
+    noise[-1] = P.crc8_lockly(bytes(noise[:-1]))
+    a = FrameAssembler()
+    assert a.feed(bytes(noise)) is None and a.feed(reply) == reply       # 0AFF skipped, next one taken
+
+
+def test_ble_link_exchange_with_a_fake_lock():
+    import asyncio
+    from locklyctl import ble as BLE
+    reply = bytes.fromhex(_status_reply())
+    frame = bytes.fromhex(P.build_query_status_cmd(MC, UUID))
+    link = BLE.BleLink("PGK728WRHK0000")
+    written = []
+
+    class FakeClient:
+        async def write_gatt_char(self, uuid, data, response):
+            written.append((uuid, bytes(data), response))
+            if sum(len(d) for _, d, _ in written) == len(frame):      # whole command in: answer in chunks
+                for i in range(0, len(reply), 20):
+                    link._on_notify(None, bytearray(reply[i:i + 20]))
+
+    async def setup():
+        link._frames = asyncio.Queue()
+    link._run(setup(), 5)
+    link._client = FakeClient()
+    try:
+        assert link.exchange(frame.hex()) == reply.hex().upper()
+        assert all(u == BLE.WRITE and len(d) <= BLE.CHUNK for u, d, _ in written)
+        assert b"".join(d for _, d, _ in written) == frame
+    finally:
+        link._client = None
+        link.close()
+
+
+def test_bluetooth_status_goes_over_the_link():
+    from locklyctl import ble as BLE
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    lock = {"mc": MC, "ID": UUID, "tz": "+8:00", "blename": "PGK728WRHK0000"}
+    opened = []
+
+    class FakeLink:
+        def __init__(self, name):
+            opened.append(name)
+        def connect(self):
+            pass
+        def exchange(self, frame_hex):
+            return _status_reply()
+        def close(self):
+            opened.append("closed")
+    real = (BLE.BleLink, BLE.available)
+    BLE.BleLink, BLE.available = FakeLink, (lambda: "")
+    try:
+        st = c.bluetooth_status(lock)
+    finally:
+        BLE.BleLink, BLE.available = real
+    assert opened == ["PGK728WRHK0000", "closed"]
+    assert st["lock_clock"] == "1a0b0d133415" and "clock_offset_s" in st
+    assert c.last_transport_trail() == "Bluetooth → ACK"
+    assert getattr(c._tl, "ble", None) is None                    # the link is only for that one check
+
+
+def test_firmware_install_falls_back_to_bluetooth():
+    from locklyctl.transport import LocklyClient, LocklyError
+    parts, _ = F.firmware_reply_parts(FW_REPLY)
+    old = {"front": "1.00.87", "back": "1.00.72", "wifi": "1.02.70", "ble": "1.14.21"}
+    send = F.firmware_parts_to_install(parts, old, phone_does_ble=True)
+    lock = {"mc": MC, "ID": UUID, "tz": "+8:00", "blename": "PGK728WRHK0000"}
+    after = {"firmware_version": "1.00.95", "sub_version": "1.00.76", "wifi_version": "2.02.72",
+             "ble_version": "1.14.21", "clock_offset_s": -1}
+
+    class Channel:
+        def follow_firmware_upgrade(self, payload, progress, idle_timeout):
+            progress({"stage": "final", "progress": 100})
+            return {"stage": "final"}
+    c = LocklyClient("a@b")
+    c.FW_SETTLE_S = c.FW_BLE_AFTER_S = c.FW_VERIFY_EVERY_S = 0
+    c._mqtt_channel = lambda: Channel()
+    c.query_status = lambda lk: None                             # its Wi-Fi isn't back
+    asked = []
+    c.bluetooth_status = lambda lk: asked.append(lk["ID"]) or after
+    events = []
+    out = c.firmware_install(lock, send, FW_REPLY["downloadUrl"], events.append, bluetooth=True)
+    assert asked == [UUID] and out["versions"]["wifi"] == "2.02.72" and out["clockOffset"] == -1
+    assert events[-1]["stage"] == "done" and events[-1]["clockOffset"] == -1
+
+    c.FW_VERIFY_S = 0                                            # without Bluetooth it can only wait
+    try:
+        c.firmware_install(lock, send, FW_REPLY["downloadUrl"], events.append)
+    except LocklyError as e:
+        assert "hasn't come back online" in str(e) and asked == [UUID]
+    else:
+        raise AssertionError("a lock that never answered was reported installed")
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -35,6 +35,7 @@ way the official app does.
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
 | The lock's own clock, from every live status check (each check also sends it the time, as the app's does) | ✅ warns when it's 2 minutes or more off, or not set: people on a schedule are let in by it |
+| Bluetooth straight from this computer to a lock next to it: set its clock, and reach it after a firmware install if its Wi-Fi doesn't come back | ⚠️ built from the app's code (service fff0, 20-byte writes to fff1, replies on fff4, no pairing); not yet run against a lock. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
 | Access log (last 7 days), in the Lockly app's own words | ✅ Visages: from Lockly's event log, which the lock fills over its Wi-Fi, as the Lockly app reads it (checked against a lock's own log). Other locks: from Lockly's cloud log, which only has what was uploaded to it, so often empty; reading those locks' own logs isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
@@ -46,7 +47,7 @@ way the official app does.
 | Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
 | Firmware: what Lockly offers, part by part, next to what the lock runs | ✅ checked against Lockly for a Visage, a PGD7Y, a Vision and PGH200 hubs |
-| Firmware install over Wi-Fi (Visage and other multi-part Wi-Fi locks): front, back and Wi-Fi boards, as the app sends them over MQTT | ⚠️ run once, on a Visage (2026-11-13): it took the update and restarted, then didn't come back online, so its new versions were never confirmed and its clock (which schedules use) couldn't be set. The Lockly app does this with a phone next to the lock; do the same. Shows each part's progress. The Bluetooth chip, and locks the app updates over Bluetooth (PGD7Y and others), still need the Lockly app |
+| Firmware install over Wi-Fi (Visage and other multi-part Wi-Fi locks): front, back and Wi-Fi boards, as the app sends them over MQTT | ⚠️ run once, on a Visage (2026-11-13): it took the update and restarted, then didn't come back online, so its new versions were never confirmed and its clock (which schedules use) couldn't be set. The Lockly app does this with a phone next to the lock; do the same. Before it starts, it checks whether this computer can reach the lock over Bluetooth and warns if not. Shows each part's progress. The Bluetooth chip, and locks the app updates over Bluetooth (PGD7Y and others), still need the Lockly app |
 | Slot locks (e.g. PGD7Y): PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; not yet working on a lock |
 | Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 

@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from .. import ble as BLE
 from .. import config
 from .. import features as F
 from .. import protocol as P
@@ -714,7 +715,7 @@ class Api:
                 "answered": bool(st), "install": {"parts": send, "blocked": plan["blocked"]},
                 "lock": self._view(lock)}
 
-    def firmware_install(self, lock_id: str, expected: list[dict]) -> dict:
+    def firmware_install(self, lock_id: str, expected: list[dict], bluetooth: bool = False) -> dict:
         """Start installing over Wi-Fi what the last check showed (``expected``:
         its install parts). Checks the lock and Lockly again first and refuses
         if anything changed. Runs in the background: poll firmware_install_status."""
@@ -742,7 +743,7 @@ class Api:
             if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
                 raise ValueError("A firmware install is already running on this door.")
             self._fw_jobs[lock["ID"]] = job
-        threading.Thread(target=self._run_firmware_install, args=(lock, plan, job),
+        threading.Thread(target=self._run_firmware_install, args=(lock, plan, job, bluetooth),
                          name="locklyctl-firmware", daemon=True).start()
         return self.firmware_install_status(lock_id)
 
@@ -766,7 +767,7 @@ class Api:
             p["now"] = versions.get(p["part"]) or ""
             p["state"] = "done" if F.version_at_least(p["now"], p["version"]) else "behind"
 
-    def _run_firmware_install(self, lock: dict, plan: dict, job: dict) -> None:
+    def _run_firmware_install(self, lock: dict, plan: dict, job: dict, bluetooth: bool = False) -> None:
         """Thread entry point: runs the install and records how it ended."""
         def on_event(event: dict) -> None:
             with self._fw_lock:
@@ -780,7 +781,8 @@ class Api:
                     for p in job["parts"]:
                         p["state"] = "restarting" if p["state"] == "sending" else p["state"]
         try:
-            result = self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event)
+            result = self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event,
+                                                bluetooth=bluetooth)
         except (LocklyError, ValueError) as e:
             outcome = {"ok": False, "error": str(e)}
         except Exception as e:          # thread boundary: record it, or the page would wait forever
@@ -795,6 +797,34 @@ class Api:
                 if p["state"] in ("sending", "restarting"):
                     p["state"] = "unconfirmed"
             job.update(running=False, **outcome)
+
+    # ── Bluetooth, from this computer to a lock next to it ──────────────
+
+    def bluetooth_check(self, lock_id: str) -> dict:
+        """Whether this computer hears the lock over Bluetooth (listens for its
+        advertisement; nothing is sent to it): {"available", "inRange", "detail"}."""
+        lock = self._lock(lock_id)
+        why = BLE.available()
+        if why:
+            return {"available": False, "inRange": False, "detail": why}
+        try:
+            near = self._c().bluetooth_in_range(lock)
+        except BLE.BluetoothError as e:          # no adapter, adapter off: say so
+            return {"available": False, "inRange": False, "detail": str(e)}
+        return {"available": True, "inRange": near,
+                "detail": "" if near else "The lock isn't in Bluetooth range of this computer."}
+
+    def bluetooth_set_time(self, lock_id: str) -> dict:
+        """A status check over Bluetooth from this computer; like every status
+        check it gives the lock the time. Returns the door view with its clock."""
+        lock = self._lock(lock_id)
+        try:
+            st = self._c().bluetooth_status(lock)
+        except BLE.BluetoothError as e:
+            raise LocklyError(str(e), "bluetooth") from e
+        if st is None:
+            raise LocklyError("The lock didn't answer over Bluetooth.", "bluetooth")
+        return self._view(lock)
 
     # ── connection test ──────────────────────────────────────────────────
 

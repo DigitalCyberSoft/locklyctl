@@ -16,6 +16,7 @@ keyring = ["keyring>=24"]   # keep the saved login in the OS keyring
 # first pywebview whose start() takes icon=.
 gui = ["pywebview>=5.3; sys_platform != 'linux'", "pywebview[qt]>=5.3; sys_platform == 'linux'"]
 mcp = ["mcp>=1.2"]          # locklyctl-mcp, for AI assistants
+bluetooth = ["bleak>=1.0"]  # talk to a lock next to this computer directly (locklyctl/ble.py)
 dev = ["pytest>=7", "mcp>=1.2"]
 
 [project.scripts]

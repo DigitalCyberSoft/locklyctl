@@ -125,7 +125,8 @@ class FakeClient:
     _FW_PARTS = LocklyClient._FW_PARTS
     fw_install_error = None
 
-    def firmware_install(self, lock, send, download_url, on_event):
+    def firmware_install(self, lock, send, download_url, on_event, bluetooth=False):
+        self.fw_bluetooth = bluetooth
         on_event({"stage": "install", "progress": 50, "text": "Installing 50 %"})
         if self.fw_install_error:
             raise self.fw_install_error
@@ -299,6 +300,7 @@ def test_firmware_install(api):
     assert st["ok"] and st["versions"] == {"back": "1.00.76"} and st["text"] == "Installing 50 %"
     assert [(p["part"], p["state"], p["now"]) for p in st["parts"]] == [("back", "done", "1.00.76")]
     assert c.fw_installs == [(B2, [("back", "1.00.76")], "https://files.example.com/fw/")]
+    assert c.fw_bluetooth is False                          # not asked to use Bluetooth
 
     c.fw_install_error = LocklyError("The lock reported a failure while installing: crc", "failure")
     api.firmware_install(B2, r["install"]["parts"])
@@ -371,7 +373,7 @@ def test_firmware_job_follows_each_part_and_the_clock(api):
            "parts": [part("front", "Front board", "1.00.95", "1.00.87"), part("back", "Back board", "1.00.76", "1.00.72")]}
     seen = []
 
-    def install(lock, send, url, on_event):
+    def install(lock, send, url, on_event, bluetooth=False):
         for ev in ({"stage": "install", "progress": 50, "text": "Installing 50 %"},
                    {"stage": "verify", "progress": None, "away": 0, "text": "The lock is restarting"},
                    {"stage": "verify", "progress": None, "versions": {"front": "1.00.95", "back": "1.00.72"},
@@ -384,6 +386,33 @@ def test_firmware_job_follows_each_part_and_the_clock(api):
     assert seen == [["sending", "sending"], ["restarting", "restarting"], ["done", "behind"]]
     assert [(p["state"], p["now"]) for p in job["parts"]] == [("done", "1.00.95"), ("behind", "1.00.72")]
     assert (job["ok"], job["running"], job["clockKnown"], job["clockOffset"]) == (False, False, True, -3)
+
+
+@_api_in_tmp_home
+def test_bluetooth_check_and_set_time(api):
+    from locklyctl import ble as BLE
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    real = BLE.available
+    BLE.available = lambda: "Bluetooth needs the optional 'bleak' package."
+    try:
+        assert api.bluetooth_check(B2) == {"available": False, "inRange": False,
+                                           "detail": "Bluetooth needs the optional 'bleak' package."}
+    finally:
+        BLE.available = real
+    c.bluetooth_in_range = lambda lock: True
+    assert api.bluetooth_check(B2)["inRange"] is True
+    c.bluetooth_status = lambda lock: c.status_cache.update(
+        {lock["ID"]: {"reachable": True, "ts": 1, "is_locked": True, "clock_offset_s": 0}}) or {"is_locked": True}
+    v = api.bluetooth_set_time(B2)
+    assert (v["clockKnown"], v["clockOffset"], v["state"]) == (True, 0, "locked")
+    c.bluetooth_status = lambda lock: None
+    try:
+        api.bluetooth_set_time(B2)
+    except LocklyError as e:
+        assert "didn't answer over Bluetooth" in str(e)
+    else:
+        raise AssertionError("no answer was reported as set")
 
 @_api_in_tmp_home
 def test_favorites(api):

@@ -21,6 +21,7 @@ from typing import Callable
 
 import requests
 
+from . import ble as BLE
 from . import features as F
 from . import protocol as P
 from .capabilities import LockCapabilities, resolve_capabilities
@@ -430,12 +431,18 @@ class LocklyClient:
 
         Hub-relay (senddata) is tried first when the lock has a classic hub; a
         Wi-Fi-native/Matter lock, or a hub account that answers 930, falls back
-        to the MQTT device channel.
+        to the MQTT device channel. While this thread holds a Bluetooth link
+        (bluetooth_status), the frame goes straight to the lock over it instead.
         """
         self._tl.last_cod = None
         self._tl.mqtt_code = None
         trail: list[str] = []
         self._tl.trail = trail
+        link = getattr(self._tl, "ble", None)
+        if link is not None:
+            ack = link.exchange(frame_hex)
+            trail.append("Bluetooth → ACK" if ack else "Bluetooth → no reply")
+            return ack
         has_hub = bool(lock.get("hubid")) and not self._is_matter(lock)
         if has_hub:
             ack = self._senddata(lock, frame_hex, directive)
@@ -501,6 +508,33 @@ class LocklyClient:
                 parsed["clock_offset_s"] = round(clock.timestamp() - time.time()) if clock else None
             self.status_cache[uuid_] = {"reachable": True, "ts": time.time(), **parsed}
         return parsed
+
+    # -- Bluetooth, straight from this computer to a lock next to it -------------
+
+    def bluetooth_in_range(self, lock: dict, timeout: float = BLE.SCAN_S) -> bool:
+        """Whether this computer hears the lock over Bluetooth (listening only).
+        Raises BLE.BluetoothError when Bluetooth can't be used here."""
+        why = BLE.available()
+        if why:
+            raise BLE.BluetoothError(why)
+        return BLE.in_range(str(lock.get("blename") or ""), timeout)
+
+    def bluetooth_status(self, lock: dict) -> dict | None:
+        """A live status check sent to the lock over Bluetooth from this
+        computer. Like every status check it carries the current time, which is
+        how the app keeps a lock's clock (QueryLockStatusCmd, isAddTime). Raises
+        BLE.BluetoothError when the lock can't be reached that way."""
+        why = BLE.available()
+        if why:
+            raise BLE.BluetoothError(why)
+        link = BLE.BleLink(str(lock.get("blename") or ""))
+        try:
+            link.connect()
+            self._tl.ble = link
+            return self.query_status(lock)
+        finally:
+            self._tl.ble = None
+            link.close()
 
     def refresh_all_status(self, locks: list[dict], max_workers: int = 6) -> dict:
         """Query every lock's live status in parallel, caching results. This
@@ -672,6 +706,7 @@ class LocklyClient:
     FW_SETTLE_S = 10.0            # MultipleUpgradeViewModel waits this long before checking
     FW_VERIFY_S = 300.0           # MultipleFirmwareRebootRepository gives the check 5 minutes
     FW_VERIFY_EVERY_S = 15.0
+    FW_BLE_AFTER_S = 60.0         # the app tells the user a restart takes "About 1 minute"
 
     def firmware_plan(self, lock: dict) -> dict:
         """What installing over Wi-Fi would do now. Asks the lock for its
@@ -707,14 +742,17 @@ class LocklyClient:
         return plan
 
     def firmware_install(self, lock: dict, send: list[dict], download_url: str,
-                         on_event: Callable[[dict], None]) -> dict:
+                         on_event: Callable[[dict], None], bluetooth: bool = False) -> dict:
         """Install ``send`` (from firmware_plan) over MQTT, then confirm it: follows
         the lock's progress, then asks the lock for its versions until every part
         reports the offered one (FW_VERIFY_S at most). Calls on_event with
         {"stage", "progress", "text"} while the lock installs, then with "away"
         (seconds since it restarted) while it doesn't answer, and with "versions"
-        each time it does. Returns {"versions"}. Raises LocklyError when the lock
-        reports a failure, goes quiet, or doesn't come back on the new versions."""
+        each time it does. With ``bluetooth`` (this computer can reach the lock
+        that way), a lock whose Wi-Fi isn't back after FW_BLE_AFTER_S is asked
+        over Bluetooth, which also sets its clock. Returns {"versions"}. Raises
+        LocklyError when the lock reports a failure, goes quiet, or doesn't come
+        back on the new versions."""
         if not send:
             raise ValueError("Nothing to install.")
         ch = self._mqtt_channel()
@@ -739,6 +777,15 @@ class LocklyClient:
         behind = send
         while True:
             st = self.query_status(lock)
+            ble_note = ""
+            if not st and bluetooth and time.monotonic() - restarted >= self.FW_BLE_AFTER_S:
+                # Its Wi-Fi isn't back: ask it over Bluetooth from here. That
+                # check carries the time too, so it also sets the lock's clock.
+                try:
+                    st = self.bluetooth_status(lock)
+                    ble_note = "" if st else "; it didn't answer over Bluetooth either"
+                except BLE.BluetoothError as e:
+                    ble_note = f"; {e}"
             if st:
                 seen = F.firmware_versions_on_lock(st)
                 behind = [p for p in send if not F.version_at_least(seen.get(p["part"]), p["version"])]
@@ -752,7 +799,7 @@ class LocklyClient:
             elif not seen:
                 away = int(time.monotonic() - restarted)
                 on_event({"stage": "verify", "progress": None, "away": away,
-                          "text": f"Waiting for the lock to come back online ({away // 60} min so far)"})
+                          "text": f"Waiting for the lock to come back online ({away // 60} min so far){ble_note}"})
             if time.monotonic() >= deadline:
                 break
             time.sleep(self.FW_VERIFY_EVERY_S)

@@ -57,6 +57,8 @@ window.pywebview = {
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
+    async bluetooth_check() { await wait(600); return { available: true, inRange: false, detail: "The lock isn't in Bluetooth range of this computer." }; },
+    async bluetooth_set_time(id) { await wait(900); Object.assign(find(id), { clockKnown: true, clockOffset: -1 }); return { ...find(id) }; },
     async firmware_install(id, parts) {
       await wait(400); fwPolls = 0;
       fwParts = parts.map((p) => ({ part: p.part, name: p.name, version: p.version, current: p.current, state: "sending", now: "" }));

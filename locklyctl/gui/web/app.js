@@ -592,7 +592,7 @@ function loadTab(name) {
   if (name === "activity") loadActivity();
   else if (name === "guests") loadGuests();
   else if (name === "schedules") setupSchedules();
-  else if (name === "connection") { $("diag-out").replaceChildren(); $("fw-out").replaceChildren(); }
+  else if (name === "connection") { $("diag-out").replaceChildren(); $("ble-out").replaceChildren(); $("fw-out").replaceChildren(); }
 }
 
 async function loadActivity() {
@@ -824,6 +824,24 @@ $("btn-diagnose").addEventListener("click", async (ev) => {
   });
 });
 
+// ── Bluetooth, from this computer to a lock next to it ────────────────
+
+$("btn-ble-time").addEventListener("click", async (ev) => {
+  const v = current();
+  const out = $("ble-out");
+  out.replaceChildren(h("p", { class: "muted" }, "Looking for the lock over Bluetooth…"));
+  await busy(ev.currentTarget, async () => {
+    try {
+      const view = await call("bluetooth_set_time", v.id);
+      updateLock(view);
+      const clock = clockText(view.clockKnown, view.clockOffset);
+      out.replaceChildren(h("p", { class: clock ? "form-error" : "ok" },
+        clock ? `Reached it over Bluetooth, but ${clock.charAt(0).toLowerCase()}${clock.slice(1)}.`
+          : "Reached it over Bluetooth and gave it the time. Its clock is right."));
+    } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  });
+});
+
 // ── firmware ───────────────────────────────────────────────────────────
 
 $("btn-firmware").addEventListener("click", async (ev) => {
@@ -857,7 +875,7 @@ $("btn-firmware").addEventListener("click", async (ev) => {
         install.parts.length && !install.blocked
           ? h("div", { class: "fw-install" },
             h("p", {}, "Over Wi-Fi this sends " + install.parts.map((p) => `${p.name} ${p.version}`).join(", ") + "."),
-            h("button", { class: "btn btn-ink", type: "button", onclick: () => installFirmware(v, install) },
+            h("button", { class: "btn btn-ink", type: "button", onclick: (ev) => installFirmware(v, install, ev.currentTarget) },
               icon("firmware"), "Install over Wi-Fi"))
           : (r.kind === "multi" && install.blocked ? h("p", { class: "fine" }, install.blocked) : null),
         byPhone.length ? h("p", { class: "fine" }, `${byPhone.join(", ")}: install with the Lockly app, at the door.`)
@@ -871,11 +889,26 @@ $("btn-firmware").addEventListener("click", async (ev) => {
 const FW_PART_STATE = { sending: "Sending", restarting: "Waiting for the lock", done: "Installed",
   behind: "Not installed", unconfirmed: "Not confirmed" };
 
-async function installFirmware(v, install) {
+async function installFirmware(v, install, btn) {
   const list = install.parts.map((p) => `${p.name} ${p.current || "?"} → ${p.version}`).join(", ");
+  // The restart can leave the lock without its clock if its Wi-Fi doesn't come
+  // back, and then only Bluetooth can give it the time: say which applies here.
+  const looking = h("p", { class: "muted" }, "Checking whether this computer can reach it over Bluetooth…");
+  $("fw-out").append(looking);
+  let ble = { inRange: false, detail: "" };
+  await busy(btn, async () => {
+    try { ble = await call("bluetooth_check", v.id); } catch (e) { ble.detail = e.message; }
+  });
+  looking.remove();
+  const bleNote = ble.inRange
+    ? " This computer can reach it over Bluetooth: if its Wi-Fi doesn't come back after the restart, "
+      + "it gives the lock the time over Bluetooth."
+    : ` Warning: this computer can't reach it over Bluetooth (${(ble.detail || "not in range").replace(/\.$/, "")}). If its Wi-Fi `
+      + "doesn't come back after the restart, its clock can't be set from here, and people on a schedule may "
+      + "not get in until someone gives it the time over Bluetooth at the door, for example with the Lockly app.";
   const ok = await confirmDialog(`Install new firmware on ${doorLabel(v)}?`,
     `${list}. The lock downloads the files and installs them itself, then restarts. Leave the door alone `
-    + "until this says it's done; it can take several minutes.", "Install");
+    + "until this says it's done; it can take several minutes." + bleNote, "Install");
   if (!ok || busyNow(v)) return;
   pending.set(v.id, "firmware");
   refreshControls(v.id);
@@ -896,7 +929,7 @@ async function installFirmware(v, install) {
         clock ? `${clock}: people on a schedule may not get in until it's set.` : "The lock's clock is right.") : null);
   };
   try {
-    let st = await call("firmware_install", v.id, install.parts);
+    let st = await call("firmware_install", v.id, install.parts, !!ble.inRange);
     while (st.running) {
       show(st);
       await new Promise((resolve) => setTimeout(resolve, 2000));
