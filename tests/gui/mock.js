@@ -60,14 +60,21 @@ window.pywebview = {
       { name: "Front board", current: "1.00.87", offered: "1.00.95", newer: true, sizeKb: 87, byPhone: false },
       { name: "Back board", current: "1.00.72", offered: "1.00.76", newer: true, sizeKb: 35, byPhone: false },
       { name: "Wi-Fi module", current: "2.02.72", offered: "2.02.72", newer: false, sizeKb: 1180, byPhone: false },
-      { name: "Bluetooth chip", current: "1.14.24", offered: "1.14.28", newer: true, sizeKb: 280, byPhone: true }],
+      { name: "Bluetooth chip", current: "1.14.24", offered: "1.14.28", newer: true, sizeKb: 280, byPhone: true, byBluetooth: true }],
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
+    async bluetooth_wifi_scan() { await wait(800); return [{ ssid: "Building Wi-Fi", rssi: -51, routerType: 3 }, { ssid: "Guest", rssi: -62, routerType: 3 }]; },
+    async bluetooth_wifi_setup(id, ssid) { await wait(1500); return { ok: true, text: "connected", lock: { ...find(id) } }; },
     async connection() { return { mode: connection, bluetooth: "" }; },
     async set_connection(mode) { await wait(100); connection = mode; return { mode, bluetooth: "" }; },
     async bluetooth_check() { await wait(600); return { available: true, inRange: false, detail: "The lock isn't in Bluetooth range of this computer." }; },
     async bluetooth_set_time(id) { await wait(900); Object.assign(find(id), { clockKnown: true, clockOffset: -1 }); return { ...find(id) }; },
+    async bluetooth_chip_install(id) {
+      await wait(400); fwPolls = 0;
+      fwParts = [{ part: "ble", name: "Bluetooth chip", version: "1.14.28", current: "1.14.24", state: "sending", now: "" }];
+      return this.firmware_install_status(id);
+    },
     async firmware_install(id, parts) {
       await wait(400); fwPolls = 0;
       fwParts = parts.map((p) => ({ part: p.part, name: p.name, version: p.version, current: p.current, state: "sending", now: "" }));

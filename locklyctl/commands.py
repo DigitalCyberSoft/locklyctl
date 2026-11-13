@@ -9,7 +9,7 @@
     locklyctl welcome LOCK off|always [--send]
     locklyctl welcome LOCK query
     locklyctl rain LOCK query|on|off [--send]
-    locklyctl firmware LOCK [--install [--yes]]
+    locklyctl firmware LOCK [--install [--yes]] [--bluetooth-chip [--yes]]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -24,6 +24,7 @@ import argparse
 import json
 import sys
 
+from . import ble as BLE
 from . import cli as C
 from . import features as F
 from .transport import LocklyClient, LocklyError
@@ -98,9 +99,19 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--send", action="store_true",
                    help="actually transmit (default: print the frame only)")
 
+    p = sub.add_parser("wifi", help="the lock's Wi-Fi over Bluetooth from this computer: see the networks "
+                                     "it sees, or give it one (as the app's Wi-Fi setup does)")
+    p.add_argument("lock")
+    p.add_argument("--ssid", help="the network to give the lock; without it, list what the lock sees")
+    p.add_argument("--password-file", help="read the Wi-Fi password from this file (else it's asked for)")
+    p.add_argument("--country", help="two-letter country code for Wi-Fi rules (default: this computer's)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
                                         "runs (wakes it)")
     p.add_argument("lock")
+    p.add_argument("--bluetooth-chip", action="store_true",
+                   help="install the Bluetooth chip's firmware over Bluetooth from this computer "
+                        "(the lock must be in range)")
     p.add_argument("--install", action="store_true",
                    help="install it over Wi-Fi (multi-part locks such as the Visage), then confirm it")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
@@ -216,6 +227,8 @@ def _rain(client: LocklyClient, args) -> int:
 
 def _firmware(client: LocklyClient, args) -> int:
     lock = find_lock(client.locks, args.lock)
+    if args.bluetooth_chip:
+        return _bluetooth_chip(client, lock, args)
     plan = client.firmware_plan(lock)
     offer = plan["offer"]
     if not offer["release"]:
@@ -259,5 +272,73 @@ def _firmware(client: LocklyClient, args) -> int:
     return EXIT_OK
 
 
+def _bluetooth_chip(client: LocklyClient, lock: dict, args) -> int:
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("firmware --bluetooth-chip needs --yes when it can't ask for confirmation")
+        print(C.yellow("  This rewrites the lock's Bluetooth chip over Bluetooth; keep this computer "
+                       "next to the door until it finishes."))
+        if not C.confirm(f"  update the Bluetooth chip of {C.bold(_name(lock))}?", default=False):
+            return EXIT_OK
+    shown = {"text": "", "pct": -10}
+
+    def progress(event: dict) -> None:
+        pct = event.get("progress")
+        if event["stage"] == "install" and pct is not None:
+            if pct < shown["pct"] + 10 and pct != 100:
+                return                                   # every 10 %, not every block
+            shown["pct"] = pct
+        if event["text"] != shown["text"]:
+            shown["text"] = event["text"]
+            print(C.dim(f"    {event['text']}"), flush=True)
+    try:
+        r = client.bluetooth_chip_update(lock, progress)
+    except BLE.BluetoothError as e:
+        print(C.red(f"  {e}"))
+        return EXIT_FAIL
+    print(C.green(f"  {_name(lock)}: Bluetooth chip {r['before']} → {r['after']} ✓"))
+    return EXIT_OK
+
+
+def _country() -> str:
+    """This computer's country, as the app sends the phone's (LocalesKt.a; US
+    when unknown)."""
+    import locale
+    tag = (locale.getlocale()[0] or "")
+    return tag.split("_")[1][:2].upper() if "_" in tag else "US"
+
+
+def _wifi(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    if not args.ssid:
+        for n in sorted(client.bluetooth_wifi_scan(lock), key=lambda n: n["rssi"]):
+            print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}")
+        return EXIT_OK
+    if args.password_file:
+        with open(args.password_file, encoding="utf-8") as f:
+            password = f.read().rstrip("\r\n")
+    elif sys.stdin.isatty():
+        import getpass
+        password = getpass.getpass(f"  Wi-Fi password for {args.ssid}: ")
+    else:
+        raise UsageError("wifi --ssid needs --password-file when it can't ask")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("wifi --ssid needs --yes when it can't ask for confirmation")
+        if not C.confirm(f"  give {C.bold(_name(lock))} the Wi-Fi network {args.ssid}?", default=False):
+            return EXIT_OK
+    last = [""]
+
+    def progress(event: dict) -> None:
+        if event["text"] != last[0]:
+            last[0] = event["text"]
+            print(C.dim(f"    {event['text']}"), flush=True)
+    r = client.bluetooth_wifi_setup(lock, args.ssid, password, country=(args.country or _country()).upper(),
+                                    on_event=progress)
+    ok = r["code"] == 3
+    print((C.green if ok else C.red)(f"  {_name(lock)}: {r['text']}"))
+    return EXIT_OK if ok else EXIT_FAIL
+
+
 _HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
-             "welcome": _welcome, "rain": _rain, "firmware": _firmware}
+             "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi}

@@ -965,6 +965,174 @@ class LocklyClient:
         raise LocklyError("After the upgrade the lock still reports " + _fw_parts_text(behind, seen) + ".",
                           "verify")
 
+    # -- firmware: the Bluetooth chip, over Bluetooth from this computer --------
+
+    BLE_CHIP_BACK_S = 300.0       # the app gives the lock 5 minutes (SuotaUpgradeViewModel, 300000 ms)
+    BLE_CHIP_EVERY_S = 10.0
+
+    def bluetooth_chip_update(self, lock: dict, on_event: Callable[[dict], None]) -> dict:
+        """Install Lockly's newest Bluetooth-chip firmware over Bluetooth from
+        this computer, by the Dialog SUOTA protocol app 3.3.4 uses for it
+        (ble.suota_update). Checks first: Lockly offers a newer Bluetooth part,
+        the lock answers over Bluetooth with a lower version and enough battery,
+        and the image matches its own header. Then asks the lock over Bluetooth
+        until it reports the new version, which also sets its clock. Returns
+        {"before", "after"}. Raises LocklyError (refused or not confirmed) or
+        BLE.BluetoothError (not reachable, or the lock stopped the update)."""
+        name = str(lock.get("blename") or "")
+        st = self.bluetooth_status(lock)
+        if not st:
+            raise LocklyError("The lock didn't answer over Bluetooth.", "bluetooth")
+        body = self._firmware_reply(lock, st.get("lock_type"))
+        offered, url = body.get("bleVer"), body.get("bleUrl")
+        if F.firmware_check_kind(lock) != F.FW_MULTI_PART or not (offered and url):
+            raise LocklyError("Lockly offers no Bluetooth-chip firmware for this lock.", "firmware")
+        # The app updates the chip only once every other part is current
+        # (FirmwareUpgradeGuideActivity.N3: isNeedUpgradeOtherFirmware first,
+        # then isNeedUpgradeBle). The chip is also the link this update and any
+        # later Bluetooth work depend on, so it goes last.
+        parts, _ = F.firmware_reply_parts(body)
+        others = [p for p in F.firmware_parts_to_install(parts, F.firmware_versions_on_lock(st), True)]
+        if others:
+            raise LocklyError("Update the other parts first, as the Lockly app does: "
+                              + _fw_parts_text(others, F.firmware_versions_on_lock(st)) + " behind. "
+                              "The Bluetooth chip goes last.", "firmware")
+        before = st.get("ble_version")
+        if not F.version_lower(before, offered):
+            raise LocklyError(f"The Bluetooth chip already runs {before} (Lockly offers {offered}).", "firmware")
+        battery = st.get("battery_percent")
+        if battery is None or st.get("battery_invalid") or battery < F.FW_MIN_BATTERY:
+            raise LocklyError(f"The battery is at {battery} %: change it before updating.", "firmware")
+        on_event({"stage": "download", "text": f"Downloading Bluetooth chip {offered}"})
+        resp = self._session.get(url, timeout=60)
+        resp.raise_for_status()
+        image = resp.content
+        try:
+            info = BLE.image_info(image)
+        except ValueError as e:
+            raise LocklyError(f"Lockly's Bluetooth-chip file is unusable: {e}", "firmware") from e
+        if not info["version"].startswith(str(offered)):
+            raise LocklyError(f"The file is version {info['version']}, not the offered {offered}.", "firmware")
+        on_event({"stage": "install", "progress": 0, "text": f"Sending Bluetooth chip {before} → {offered}"})
+        BLE.suota_update(name, image, lambda done, total: on_event(
+            {"stage": "install", "progress": done * 100 // total, "text": f"Sent {done} of {total} blocks"}))
+        on_event({"stage": "verify", "text": "Sent; waiting for the lock to answer on the new version"})
+        deadline, after, last_error = time.monotonic() + self.BLE_CHIP_BACK_S, None, ""
+        while time.monotonic() < deadline:
+            time.sleep(self.BLE_CHIP_EVERY_S)
+            try:
+                st = self.bluetooth_status(lock)
+            except BLE.BluetoothError as e:                      # restarting: may not advertise yet
+                last_error = str(e)
+                on_event({"stage": "verify", "text": f"Waiting for the lock over Bluetooth: {e}"})
+                continue
+            after = (st or {}).get("ble_version") or after
+            if F.version_at_least(after, offered):
+                on_event({"stage": "done", "progress": 100, "versions": {"ble": after},
+                          "clockOffset": st.get("clock_offset_s"), "text": f"Bluetooth chip now {after}"})
+                return {"before": before, "after": after}
+        raise LocklyError(f"The update was sent, but the lock still reports Bluetooth chip {after or 'nothing'} "
+                          f"after {int(self.BLE_CHIP_BACK_S)} s"
+                          + (f"; last Bluetooth error: {last_error}" if last_error else "") + ".", "verify")
+
+    # -- Wi-Fi over Bluetooth: the app's Wi-Fi setup screen ---------------------
+
+    WIFI_JOIN_S = 90.0            # how long to keep asking how joining the network went
+    WIFI_QUERY_EVERY_S = 3.0
+    WIFI_SCAN_S = 25.0            # the lock answers "scanning" first, the list later
+
+    @contextmanager
+    def _bluetooth_session(self, lock: dict):
+        """One Bluetooth connection for several commands on this thread; yields
+        (link, status) with the status check's nonce. Raises BLE.BluetoothError."""
+        link = BLE.BleLink(str(lock.get("blename") or ""))
+        try:
+            link.connect()
+            self._tl.ble = link
+            st = self.query_status(lock)
+            if not st or not st.get("ble_nonce"):
+                raise BLE.BluetoothError("The lock didn't answer the status check over Bluetooth.")
+            yield link, st
+        finally:
+            self._tl.ble = None
+            link.close()
+
+    def _read_until_done(self, lock: dict, link, ack: str | None, parse, timeout: float) -> dict | None:
+        """Parse replies, reading further frames while the lock says "02"."""
+        deadline = time.monotonic() + timeout
+        while ack:
+            d = F.decrypt_ack(ack, lock)
+            if d is None:
+                return {"result": ack[16:18], "code": None, "text": f"the lock refused it ({ack[16:18]})"}
+            r = parse(d)
+            if r["result"] != "02" or time.monotonic() >= deadline:
+                return r
+            ack = link.next_frame(max(1.0, deadline - time.monotonic()))
+        return None
+
+    def bluetooth_wifi_scan(self, lock: dict) -> list[dict]:
+        """The Wi-Fi networks the lock sees, asked over Bluetooth from this
+        computer (0xAE): [{"ssid", "rssi", "router_type"}]. Raises
+        BLE.BluetoothError or LocklyError."""
+        with self._bluetooth_session(lock) as (link, st):
+            return self._wifi_scan(lock, link, st["ble_nonce"])
+
+    def _wifi_scan(self, lock: dict, link, nonce: str) -> list[dict]:
+        networks, position = [], 0xFF
+        for _ in range(16):                                     # pages; the app loops while scanning
+            ack = self.exchange_frame(lock, F.build_wifi_scan(lock, nonce, position))
+            r = self._read_until_done(lock, link, ack, F.parse_wifi_scan, self.WIFI_SCAN_S)
+            if r is None or r["result"] != "00":
+                raise LocklyError("The lock didn't give its Wi-Fi scan" + (f" ({r['result']})" if r else "") + ".",
+                                  "wifi")
+            networks += r["networks"]
+            if not r["total"] > r["position"]:
+                break
+            position = r["position"]
+        return networks
+
+    def bluetooth_wifi_setup(self, lock: dict, ssid: str, password: str, *, country: str,
+                             on_event: Callable[[dict], None]) -> dict:
+        """Give the lock a Wi-Fi network over Bluetooth, as the app's Wi-Fi setup
+        does: Lockly's server, port and heartbeat for this lock
+        (getHeartbeatTime), a scan for the network's router type, the 0x99 save,
+        then 0x99 queries until the lock says it connected, couldn't, or the
+        password is wrong. Returns {"code", "text"}; code 3 is connected. Raises
+        LocklyError or BLE.BluetoothError. The password is never logged."""
+        body = self._post_para_des3("getHeartbeatTime", {"deviceId": lock["ID"], "model": lock.get("mod") or ""})
+        if str(body.get("cod")) != "200":
+            raise LocklyError(f"Lockly didn't give the server settings: {P.describe_cod(body.get('cod'))}",
+                              str(body.get("cod")))
+        mq = body.get("mqttConfigs") or {}                       # the app falls back to its defaults
+        host = str(mq.get("host") or MQTT_BROKER)
+        port = int(mq.get("port") or MQTT_PORT)
+        heartbeat = int(body.get("heartbeat") or 0) // 60          # DateTimeUtils.w: seconds → minutes
+        with self._bluetooth_session(lock) as (link, st):
+            nonce = st["ble_nonce"]
+            on_event({"stage": "scan", "text": "Asking the lock which networks it sees"})
+            seen = [n for n in self._wifi_scan(lock, link, nonce) if n["ssid"] == ssid]
+            if not seen:
+                raise LocklyError(f"The lock doesn't see a network called {ssid!r}.", "wifi")
+            best = max(seen, key=lambda n: -n["rssi"])
+            frame = lambda query: F.build_wifi_setup(                      # noqa: E731
+                lock, nonce, ssid=ssid, password=password, host=host, port=port, heartbeat_min=heartbeat,
+                country=country, router_type=best["router_type"], query=query,
+                password_bytes=F.wifi_password_bytes(lock, st))
+            on_event({"stage": "save", "text": f"Saving {ssid} on the lock"})
+            r = self._read_until_done(lock, link, self.exchange_frame(lock, frame(False)),
+                                      F.parse_wifi_setup, self.WIFI_JOIN_S)
+            if r is None or r["code"] != 0:
+                return {"code": r["code"] if r else None, "text": r["text"] if r else "no answer to the save"}
+            deadline = time.monotonic() + self.WIFI_JOIN_S
+            while time.monotonic() < deadline:
+                time.sleep(self.WIFI_QUERY_EVERY_S)
+                on_event({"stage": "join", "text": f"Waiting for the lock to join {ssid}"})
+                r = self._read_until_done(lock, link, self.exchange_frame(lock, frame(True)),
+                                          F.parse_wifi_setup, max(self.WIFI_QUERY_EVERY_S * 3, BLE.REPLY_S))
+                if r and r["code"] in (1, 2, 3, 4):
+                    return {"code": r["code"], "text": r["text"]}
+            return {"code": None, "text": f"no answer from the lock about joining within {int(self.WIFI_JOIN_S)} s"}
+
     # -- high-level: access log ------------------------------------------------
 
     def get_history(self, lock: dict, since_ms: int) -> tuple[list[dict], int] | None:

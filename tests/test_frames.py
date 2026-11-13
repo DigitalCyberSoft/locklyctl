@@ -919,6 +919,9 @@ def _with_fake_bluetooth(answers, connect_error=None):
             self.frames.append(frame_hex)
             return answers.pop(0) if answers else None
 
+        def next_frame(self, timeout=None):
+            return answers.pop(0) if answers else None
+
         def close(self):
             self.closed = True
     real = (BLE.BleLink, BLE.available)
@@ -1133,6 +1136,231 @@ def test_firmware_needs_wifi():
     except LocklyError:
         pass                                                          # never answered: expected
     assert remote_only == [True] and getattr(c._tl, "remote_only", False) is False
+
+
+
+# -- the Bluetooth chip's firmware over Bluetooth (Dialog SUOTA) -----------------
+
+def _image(code: bytes, version=b"1.14.28.30"):
+    import zlib
+    head = b"pa\xff\xff" + len(code).to_bytes(4, "little") + zlib.crc32(code).to_bytes(4, "little")
+    return head + version.ljust(16, b"\0") + b"\0" * 8 + code
+
+
+class _SuotaLock:
+    """A fake lock's SUOTA service that acts like the protocol says: 0x10 after
+    the memory device, 0x02 after each whole block and after the end signal."""
+
+    def __init__(self, refuse_end_with=None):
+        from locklyctl import ble as BLE
+        self.B, self.refuse = BLE, refuse_end_with
+        self.writes, self.got, self.announced, self.block = [], b"", 0, b""
+        self.notify = None
+
+        class Services:
+            def get_service(_, u):
+                return object() if u == BLE.SUOTA_SERVICE else None
+
+            def get_characteristic(_, u):
+                return type("Ch", (), {"properties": ["read", "write-without-response", "write"]})()
+        self.services = Services()
+        self.mtu_size = 23
+
+    def __call__(self, device, timeout):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def read_gatt_char(self, u):
+        return (244).to_bytes(2, "little")
+
+    async def start_notify(self, u, cb):
+        assert u == self.B.SUOTA_STATUS
+        self.notify = cb
+
+    async def write_gatt_char(self, u, data, response):
+        B = self.B
+        self.writes.append((u, bytes(data), response))
+        if u == B.SUOTA_MEM_DEV and bytes(data) == B.SUOTA_MEM_DEV_VALUE.to_bytes(4, "little"):
+            self.notify(None, bytearray([B.SUOTA_IMG_STARTED]))
+        elif u == B.SUOTA_PATCH_LEN:
+            self.announced = int.from_bytes(data, "little")
+        elif u == B.SUOTA_PATCH_DATA:
+            self.block += bytes(data)
+            if len(self.block) == self.announced:
+                self.got += self.block
+                self.block = b""
+                self.notify(None, bytearray([B.SUOTA_CMP_OK]))
+        elif u == B.SUOTA_MEM_DEV and bytes(data) == B.SUOTA_END_VALUE.to_bytes(4, "little"):
+            self.notify(None, bytearray([self.refuse or B.SUOTA_CMP_OK]))
+
+
+def test_suota_sends_the_image_as_the_app_does():
+    import asyncio
+    from locklyctl import ble as BLE
+    image = _image(bytes(range(256)) * 3)                  # 804 bytes + XOR byte: 3 blocks of 240, one of 85
+    assert BLE.image_info(image) == {"version": "1.14.28.30", "code_size": 768}
+    lock, seen = _SuotaLock(), []
+    asyncio.run(BLE._suota("dev", BLE.suota_payload(image), lambda d, n: seen.append((d, n)), client_factory=lock))
+    payload = BLE.suota_payload(image)
+    assert lock.got == payload and payload[-1] == __import__("functools").reduce(lambda a, b: a ^ b, image)
+    order = [u for u, _, _ in lock.writes]
+    assert order[0] == BLE.SUOTA_MEM_DEV and order[1] == BLE.SUOTA_GPIO_MAP and order[-1] == BLE.SUOTA_MEM_DEV
+    assert lock.writes[1][1] == bytes.fromhex("00030605")                    # 0x05060300, little-endian
+    assert lock.writes[-1][1] == bytes.fromhex("000000fe")                   # end signal
+    lens = [int.from_bytes(d, "little") for u, d, _ in lock.writes if u == BLE.SUOTA_PATCH_LEN]
+    assert lens == [240, 85]                                                  # first block, short last block
+    chunks = [d for u, d, r in lock.writes if u == BLE.SUOTA_PATCH_DATA]
+    assert max(map(len, chunks)) == 20 and not any(r for u, _, r in lock.writes if u == BLE.SUOTA_PATCH_DATA)
+    assert seen[-1] == (4, 4)
+
+
+def test_suota_stops_when_the_lock_refuses():
+    import asyncio
+    from locklyctl import ble as BLE
+    image = _image(b"\x01" * 300)
+    try:
+        asyncio.run(BLE._suota("dev", BLE.suota_payload(image), None, client_factory=_SuotaLock(refuse_end_with=4)))
+    except BLE.SuotaError as e:
+        assert e.status == 4 and "patch data CRC mismatch" in str(e) and "end signal" in str(e)
+    else:
+        raise AssertionError("a refused update was reported done")
+    damaged = bytearray(image)
+    damaged[-1] ^= 1
+    for bad, why in ((bytes(damaged), "damaged"), (image[:-1], "header says"), (b"PK" + image[2:], "no 'pa'")):
+        try:
+            BLE.image_info(bad)
+        except ValueError as e:
+            assert why in str(e)
+        else:
+            raise AssertionError(f"a bad image passed: {why}")
+
+
+def test_bluetooth_chip_update_checks_then_confirms():
+    from locklyctl import ble as BLE
+    from locklyctl.transport import LocklyClient, LocklyError
+    c = LocklyClient("a@b")
+    c.BLE_CHIP_EVERY_S = 0
+    image = _image(b"\x02" * 500)
+    answers = [{"lock_type": 105, "ble_version": "1.14.21", "battery_percent": 90, "clock_offset_s": 0},
+               {"lock_type": 105, "ble_version": "1.14.28", "battery_percent": 90, "clock_offset_s": -1}]
+    c.bluetooth_status = lambda lk: answers[0] if len(answers) == 2 else answers[-1]
+    c._firmware_reply = lambda lk, lt=None: {"cod": "200", "bleVer": "1.14.28", "bleUrl": "https://x/b.img"}
+    c._session.get = lambda url, timeout: type("R", (), {"content": image, "raise_for_status": lambda s: None})()
+    sent = []
+    real = BLE.suota_update
+
+    def fake_update(name, img, on_progress):
+        sent.append((name, img))
+        on_progress(1, 1)
+        answers.pop(0)                                   # the lock now answers on the new version
+    BLE.suota_update = fake_update
+    events = []
+    try:
+        lock = {**VISAGE}
+        assert c.bluetooth_chip_update(lock, events.append) == {"before": "1.14.21", "after": "1.14.28"}
+        assert sent == [("PGK728WRHK0000", image)] and events[-1]["stage"] == "done"
+        behind = dict(FW_REPLY, bleVer="1.14.28", bleUrl="https://x/b.img")
+        c._firmware_reply = lambda lk, lt=None: behind
+        answers[:] = [{"lock_type": 105, "ble_version": "1.14.21", "battery_percent": 90,
+                       "firmware_version": "1.00.87", "sub_version": "1.00.76", "wifi_version": "2.02.72"}] * 2
+        try:
+            c.bluetooth_chip_update(lock, events.append)
+        except LocklyError as e:                         # the front board is behind: the chip goes last
+            assert str(e).startswith("Update the other parts first") and "front 1.00.87" in str(e)
+            assert len(sent) == 1
+        else:
+            raise AssertionError("the chip was flashed before the other parts")
+        c._firmware_reply = lambda lk, lt=None: {"cod": "200", "bleVer": "1.14.28", "bleUrl": "https://x/b.img"}
+        answers[:] = [{"lock_type": 105, "ble_version": "1.14.28", "battery_percent": 90}] * 2
+        try:
+            c.bluetooth_chip_update(lock, events.append)
+        except LocklyError as e:
+            assert "already runs 1.14.28" in str(e) and len(sent) == 1
+        else:
+            raise AssertionError("an up-to-date chip was flashed again")
+    finally:
+        BLE.suota_update = real
+
+
+
+# -- Wi-Fi over Bluetooth (the app's Wi-Fi setup screen) -------------------------
+
+def test_wifi_setup_frame_fields():
+    n = "00112233445566778899AABBCCDDEEFF"
+    enc = P.encrypt_master_code(MC, UUID).upper()
+    kw = dict(ssid="Net A", password="pw-1", host="mqtt.example.com", port=8884, heartbeat_min=5,
+              country="PH", router_type=3)
+    d = _plain(F.build_wifi_setup(LOCK, n, **kw))
+    head = "99" + f"{len(enc) // 2:02d}" + enc
+    assert d.startswith(head)
+    rest = d[len(head):]
+    fields, at = [], 0
+    for size in (64, 64, 256, 4, 8, 2, 2, 2, 2, 32):                  # ssid 32, pw 32, host 128, cc 2, port 4 bytes
+        fields.append(rest[at:at + size]); at += size
+    ssid, pw, host, cc, port, mode, hb, rt, hidden, nonce = fields
+    assert bytes.fromhex(ssid).rstrip(b"\0") == b"Net A" and bytes.fromhex(pw).rstrip(b"\0") == b"pw-1"
+    assert bytes.fromhex(host).rstrip(b"\0") == b"mqtt.example.com" and bytes.fromhex(cc) == b"PH"
+    assert bytes.fromhex(port) == b"8884" and (mode, hb, rt, hidden) == ("00", "85", "03", "00")
+    assert nonce == n
+    q = _plain(F.build_wifi_setup(LOCK, n, query=True, **kw))
+    assert q[len(head) + 64 + 64 + 256 + 4 + 8:][:2] == "01"                  # query mode, same fields
+    wide = _plain(F.build_wifi_setup(LOCK, n, password_bytes=64, **kw))
+    assert len(wide) - len(d) in (64, 64 + 32)                                 # 32 more bytes (AES padding aside)
+    try:
+        F.build_wifi_setup(LOCK, n, **{**kw, "password": "x" * 33})
+    except ValueError as e:
+        assert "up to 32" in str(e)
+    else:
+        raise AssertionError("a password longer than the field was accepted")
+    assert F.wifi_password_bytes({"mod": "PGK728WRHK"}, {"sub_version": "1.00.72"}) == 32
+    assert F.wifi_password_bytes({"mod": "PGK728WRHK"}, {"sub_version": "1.00.76"}) == 64
+
+
+def test_wifi_replies():
+    assert F.parse_wifi_setup("02" + "00" * 15)["result"] == "02"
+    r = F.parse_wifi_setup("0003" + "05" + b"th_ab".hex() + "00" * 8)
+    assert (r["code"], r["text"], r["client_id"]) == (3, "connected", "th_ab")
+    assert F.parse_wifi_setup("0004" + "00" * 14)["text"] == "wrong Wi-Fi password"
+    scan = F.parse_wifi_scan("00" + "02" + "02" + "33" + "03" + b"Net A".hex() + "0A" + "50" + "00" + b"X".hex() + "000000")
+    assert (scan["total"], scan["position"]) == (2, 2)
+    assert scan["networks"] == [{"rssi": 0x33, "router_type": 3, "ssid": "Net A"},
+                                {"rssi": 0x50, "router_type": 0, "ssid": "X"}]
+    assert F.parse_wifi_scan("02" + "00" * 15)["result"] == "02"
+
+
+
+def test_bluetooth_wifi_setup_runs_the_apps_sequence():
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.WIFI_QUERY_EVERY_S = 0
+    asked = []
+    c._post_para_des3 = lambda ep, req, **kw: asked.append((ep, req)) or {
+        "cod": "200", "heartbeat": 300, "mqttConfigs": {"host": "mqtt.example.com", "port": 8884}}
+    answers = [_status_now(),                                                  # nonce
+               _reply("AE", "02"),                                               # scanning…
+               _reply("AE", "00" + "01" + "01" + "33" + "03" + b"Net A".hex()),  # …one network
+               _reply("99", "0000"),                                             # saved
+               _reply("99", "02"),                                               # working on it
+               _reply("99", "0003" + "05" + b"th_ab".hex())]                     # connected
+    links, restore = _with_fake_bluetooth(answers)
+    events = []
+    try:
+        r = c.bluetooth_wifi_setup(VISAGE, "Net A", "pw-1", country="PH", on_event=events.append)
+    finally:
+        restore()
+    assert r == {"code": 3, "text": "connected"} and links[0].closed
+    assert asked == [("getHeartbeatTime", {"deviceId": UUID, "model": "PGK728WRHK"})]
+    sent = [_plain(f) for f in links[0].frames]
+    assert [s[:2] for s in sent] == ["1E", "AE", "99", "99"]
+    enc_len = len(P.encrypt_master_code(MC, UUID))
+    mode_at = 2 + 2 + enc_len + 64 + 64 + 256 + 4 + 8
+    assert (sent[2][mode_at:mode_at + 4], sent[3][mode_at:mode_at + 4]) == ("0085", "0185")    # save, then query
+    assert b"mqtt.example.com" in bytes.fromhex(sent[2]) and [e["stage"] for e in events][-1] == "join"
 
 
 if __name__ == "__main__":

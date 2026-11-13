@@ -215,6 +215,21 @@ class BleLink:
             reply = self._run(self._exchange(bytes.fromhex(frame_hex), timeout), timeout + 10)
         return reply.hex().upper() if reply else None
 
+    def next_frame(self, timeout: float = REPLY_S) -> str | None:
+        """The lock's next frame after the last exchange (some commands answer
+        "working on it" first and the result later), or None within ``timeout``."""
+        if self._client is None:
+            raise BluetoothError("Not connected over Bluetooth.")
+
+        async def get():
+            try:
+                return await asyncio.wait_for(self._frames.get(), timeout)
+            except TimeoutError:
+                return None
+        with self._busy:
+            frame = self._run(get(), timeout + 10)
+        return frame.hex().upper() if frame else None
+
     async def _exchange(self, frame: bytes, timeout: float) -> bytes | None:
         while not self._frames.empty():            # anything left from before isn't the answer
             self._frames.get_nowait()
@@ -229,3 +244,134 @@ class BleLink:
             task.cancel()
             return None
         return task.result()
+
+
+# -- the Bluetooth chip's own firmware update: Dialog SUOTA -------------------
+#
+# What app 3.3.4 does for a Visage's Bluetooth chip (com.nuckly.suota, started by
+# common/suota/SuotaUpgradeManager with E(240, 5, 6, 3, 0, 0)): a standard GATT
+# protocol on service 0xFEF5, with no Lockly framing, keys or nonce. Enable
+# status notifications; write the memory device and wait for 0x10; write the
+# GPIO map; then per block write the patch length (first block, and a shorter
+# last one), its chunks, and wait for 0x02; end with 0xFE000000 to the memory
+# device and wait for 0x02. Any other status is the lock refusing
+# (SuotaProtocol.t/w). The app sends nothing after that.
+
+SUOTA_SERVICE = "0000fef5-0000-1000-8000-00805f9b34fb"          # SuotaProfile.Uuid
+SUOTA_MEM_DEV = "8082caa8-41a6-4021-91c6-56f9b954cc34"
+SUOTA_GPIO_MAP = "724249f0-5ec3-4b5f-8804-42345af08651"
+SUOTA_PATCH_LEN = "9d84b9a3-000c-49d8-9183-855b673fda31"
+SUOTA_PATCH_DATA = "457871e8-d516-4ca1-9116-57d0b17b9cb2"
+SUOTA_STATUS = "5f78df94-798c-46f5-990a-b3eb6a065c88"
+SUOTA_CHAR_SIZE = "42c3dfdd-77be-4d9c-8454-8f875267fb3b"        # largest chunk the lock takes
+SUOTA_BLOCK = 240                       # E(240, ...)
+SUOTA_MEM_DEV_VALUE = 0x13 << 24        # memory type 19, image bank 0 (SuotaManager.q)
+SUOTA_GPIO_VALUE = 0x05060300           # 5, 6, 3, 0 (SuotaManager.w)
+SUOTA_END_VALUE = 0xFE000000            # SendEndSignalOperation, -33554432
+SUOTA_IMG_STARTED, SUOTA_CMP_OK = 0x10, 0x02
+SUOTA_STEP_S = 30.0                     # the app's timeout for each answer
+SUOTA_ERRORS = {                        # SuotaProfile.Errors
+    1: "SPOTA service started instead of SUOTA", 3: "forced exit of the update service",
+    4: "patch data CRC mismatch", 5: "patch length differs from what was announced",
+    6: "writing to external memory failed", 7: "not enough internal memory for the image",
+    8: "invalid memory device", 9: "application error", 17: "invalid image bank",
+    18: "invalid image header", 19: "invalid image size", 20: "invalid product header",
+    21: "same image already installed", 22: "reading external memory failed",
+}
+IMAGE_HEADER = 36                       # "pa", flags, code size, CRC32 of the rest, version
+
+
+class SuotaError(BluetoothError):
+    """The Bluetooth chip's update stopped: the lock refused a step, or didn't answer."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def image_info(image: bytes) -> dict:
+    """The header of a Lockly Bluetooth-chip image (seen on the Visage's
+    PGK728WRHK_V1.14.28.img): {"version", "code_size"}. Raises ValueError unless
+    the size and the header's CRC32 over the rest of the file both check out."""
+    if len(image) < IMAGE_HEADER or image[:2] != b"pa":
+        raise ValueError("Not a Bluetooth-chip image (no 'pa' header).")
+    code_size = int.from_bytes(image[4:8], "little")
+    crc = int.from_bytes(image[8:12], "little")
+    if len(image) != IMAGE_HEADER + code_size:
+        raise ValueError(f"Image is {len(image)} bytes; its header says {IMAGE_HEADER + code_size}.")
+    import zlib
+    if zlib.crc32(image[IMAGE_HEADER:]) != crc:
+        raise ValueError("Image CRC doesn't match its header: the download is damaged.")
+    version = image[12:28].split(b"\0")[0].split(b"\xff")[0].decode("ascii", "replace")
+    return {"version": version, "code_size": code_size}
+
+
+def suota_payload(image: bytes) -> bytes:
+    """The bytes SUOTA sends: the file plus one byte, the XOR of all of it
+    (SuotaFile.v and .a), which the lock checks at the end."""
+    x = 0
+    for b in image:
+        x ^= b
+    return image + bytes([x])
+
+
+def suota_blocks(payload: bytes, block: int, chunk: int) -> list[list[bytes]]:
+    """Blocks of ``block`` bytes, each cut into chunks of ``chunk`` (SuotaFile.o)."""
+    return [[payload[i + j:min(i + j + chunk, i + block, len(payload))]
+             for j in range(0, min(block, len(payload) - i), chunk)]
+            for i in range(0, len(payload), block)]
+
+
+def suota_update(name: str, image: bytes, on_progress=None, timeout: float = SCAN_S) -> None:
+    """Install ``image`` on the Bluetooth chip of the lock advertising ``name``.
+    on_progress(blocks_done, blocks_total) after each block. Raises NotInRange,
+    SuotaError (the lock refused a step or went quiet) or BluetoothError."""
+    payload = suota_payload(image)
+    from bleak.exc import BleakError
+    try:
+        with _SCAN_LOCK:
+            device = asyncio.run(_find(name, timeout))
+        if device is None:
+            raise NotInRange(f"The lock isn't in Bluetooth range of this computer ({timeout:.0f} s scan).")
+        asyncio.run(_suota(device, payload, on_progress))
+    except BleakError as e:
+        raise BluetoothError(f"Bluetooth: {e}") from e
+
+
+async def _suota(device, payload: bytes, on_progress, client_factory=None) -> None:
+    if client_factory is None:
+        from bleak import BleakClient as client_factory
+    statuses: asyncio.Queue = asyncio.Queue()
+    async with client_factory(device, timeout=15.0) as c:
+        if c.services.get_service(SUOTA_SERVICE) is None:
+            raise SuotaError("This lock has no Bluetooth update service.")
+        size = int.from_bytes(await c.read_gatt_char(SUOTA_CHAR_SIZE), "little") or 20
+        chunk = max(20, min(size, (getattr(c, "mtu_size", 23) or 23) - 3))     # SuotaManager.g0
+        blocks = suota_blocks(payload, SUOTA_BLOCK, chunk)
+        props = c.services.get_characteristic(SUOTA_PATCH_DATA).properties
+        respond = "write-without-response" not in props        # Android's default for it
+
+        async def expect(want: int, after: str) -> None:
+            try:
+                st = await asyncio.wait_for(statuses.get(), SUOTA_STEP_S)
+            except TimeoutError:
+                raise SuotaError(f"The lock didn't answer after {after} ({SUOTA_STEP_S:.0f} s).") from None
+            if st != want:
+                raise SuotaError(f"The lock refused the update after {after}: "
+                                 f"{SUOTA_ERRORS.get(st, f'status {st}')}.", st)
+
+        await c.start_notify(SUOTA_STATUS, lambda _s, data: statuses.put_nowait(data[0]))
+        await c.write_gatt_char(SUOTA_MEM_DEV, SUOTA_MEM_DEV_VALUE.to_bytes(4, "little"), response=True)
+        await expect(SUOTA_IMG_STARTED, "the memory device")
+        await c.write_gatt_char(SUOTA_GPIO_MAP, SUOTA_GPIO_VALUE.to_bytes(4, "little"), response=True)
+        for i, blk in enumerate(blocks):
+            n = sum(len(ch) for ch in blk)
+            if i == 0 or (i == len(blocks) - 1 and n != SUOTA_BLOCK):
+                await c.write_gatt_char(SUOTA_PATCH_LEN, n.to_bytes(2, "little"), response=True)
+            for ch in blk:
+                await c.write_gatt_char(SUOTA_PATCH_DATA, ch, response=respond)
+            await expect(SUOTA_CMP_OK, f"block {i + 1} of {len(blocks)}")
+            if on_progress:
+                on_progress(i + 1, len(blocks))
+        await c.write_gatt_char(SUOTA_MEM_DEV, SUOTA_END_VALUE.to_bytes(4, "little"), response=True)
+        await expect(SUOTA_CMP_OK, "the end signal")

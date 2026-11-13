@@ -224,6 +224,15 @@
             <p class="muted">From this computer, when it's next to the door. A check over Bluetooth gives the lock the time, which it lets people on a schedule in by; it wakes the lock.</p>
             <div><button class="btn btn-ink" id="btn-ble-time" type="button"><svg class="i" aria-hidden="true"><use href="#i-bluetooth"/></svg>Set its clock over Bluetooth</button></div>
             <div id="ble-out"></div>
+            <h2>Wi-Fi</h2>
+            <p class="muted">Give the lock a Wi-Fi network over Bluetooth from this computer, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
+            <div><button class="btn btn-quiet" id="btn-wifi-scan" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Networks it sees</button></div>
+            <form id="wifi-form" hidden>
+              <label class="field"><span>Network</span><select name="ssid" required></select></label>
+              <label class="field"><span>Password</span><input name="password" type="password" autocomplete="off"></label>
+              <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button></div>
+            </form>
+            <div id="wifi-out"></div>
             <h2>Firmware</h2>
             <p class="muted">Asks Lockly for newer firmware and the lock for what it runs. It wakes the lock.</p>
             <div><button class="btn btn-ink" id="btn-firmware" type="button"><svg class="i" aria-hidden="true"><use href="#i-firmware"/></svg>Check for updates</button></div>

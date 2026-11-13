@@ -439,6 +439,72 @@ def test_remote_only_install_never_uses_bluetooth(api):
 
 
 @_api_in_tmp_home
+def test_bluetooth_chip_install_runs_in_the_background(api):
+    import time
+    from locklyctl import ble as BLE
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    calls = []
+
+    def update(lock, on_event):
+        calls.append(lock["ID"])
+        on_event({"stage": "install", "progress": 50, "text": "Sent 1 of 2 blocks"})
+        return {"before": "1.14.24", "after": "1.14.28"}
+    c.bluetooth_chip_update = update
+    real = BLE.available
+    BLE.available = lambda: ""
+    try:
+        reported = FakeClient.query_status(c, None)
+        c.query_status = lambda lock: {**reported, "battery_percent": 80}         # back board 1.00.72: behind
+        chip = [p for p in api.firmware(B2)["parts"] if p["name"] == "Bluetooth chip"][0]
+        assert chip["newer"] and not chip["byBluetooth"]                          # the chip goes last
+        c.query_status = lambda lock: {**reported, "sub_version": "1.00.76", "battery_percent": 80}
+        chip = [p for p in api.firmware(B2)["parts"] if p["name"] == "Bluetooth chip"][0]
+        assert chip["byBluetooth"] and chip["newer"]
+        api.bluetooth_chip_install(B2)
+        for _ in range(200):
+            st = api.firmware_install_status(B2)
+            if not st["running"]:
+                break
+            time.sleep(0.01)
+        assert st["ok"] and calls == [B2] and [(p["part"], p["state"], p["now"]) for p in st["parts"]] == [
+            ("ble", "done", "1.14.28")]
+        BLE.available = lambda: "Bluetooth needs the optional 'bleak' package."
+        assert not [p for p in api.firmware(B2)["parts"] if p["name"] == "Bluetooth chip"][0]["byBluetooth"]
+        try:
+            api.bluetooth_chip_install(B2)
+        except ValueError as e:
+            assert "bleak" in str(e) and calls == [B2]
+        else:
+            raise AssertionError("started without Bluetooth")
+    finally:
+        BLE.available = real
+
+
+@_api_in_tmp_home
+def test_bluetooth_wifi_scan_and_setup(api):
+    from locklyctl import ble as BLE
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    c.bluetooth_wifi_scan = lambda lock: [{"ssid": "Net A", "rssi": 62, "router_type": 3},
+                                          {"ssid": "Net A", "rssi": 51, "router_type": 3},
+                                          {"ssid": "", "rssi": 40, "router_type": 0},
+                                          {"ssid": "Guest", "rssi": 70, "router_type": 3}]
+    given = []
+    c.bluetooth_wifi_setup = lambda lock, ssid, pw, country, on_event: given.append((ssid, pw, country)) or {
+        "code": 3, "text": "connected"}
+    real = BLE.available
+    BLE.available = lambda: ""
+    try:
+        assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3},
+                                              {"ssid": "Guest", "rssi": -70, "routerType": 3}]
+        r = api.bluetooth_wifi_setup(B2, "Net A", "pw-1", "ph")
+        assert r["ok"] and given == [("Net A", "pw-1", "PH")]
+    finally:
+        BLE.available = real
+
+
+@_api_in_tmp_home
 def test_bluetooth_check_and_set_time(api):
     from locklyctl import ble as BLE
     api.sign_in("a@b", "right", False)

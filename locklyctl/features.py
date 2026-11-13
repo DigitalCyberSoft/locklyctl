@@ -1054,3 +1054,97 @@ def parse_face_capture_ack(ack_hex: str, lock: dict) -> dict:
                 "detail": f"status={status}" + (" (final/accepted)" if done else " (in progress)")}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "status": None, "done": False, "detail": f"unparseable: {e}"}
+
+
+# ── Wi-Fi over Bluetooth: the app's Wi-Fi setup screen (WLE), app 3.3.4 ──────
+#
+# 0xAE ScanWiFiList174Cmd asks the lock which networks it sees; 0x99
+# ConfiguratorWiFi153Cmd saves a network (mode 0) or asks how joining it went
+# (mode 1, the same fields again: ConfiguratorWiFiDataSource.c). Both carry the
+# nonce from a status check. The server, port and heartbeat come from Lockly
+# (getHeartbeatTime), as ConfiguratorWiFiRepositoryImpl.f fetches them.
+
+WIFI_RESULT = {0: "saved", 1: "the lock couldn't save it", 2: "the lock couldn't connect to it",
+               3: "connected", 4: "wrong Wi-Fi password"}          # ConfiguratorWiFiResponse
+
+
+def _padded_text_hex(text: str, size: int) -> str:
+    """Strings.h: each character as a byte, cut or zero-padded to ``size`` bytes."""
+    data = bytes(ord(ch) & 0xFF for ch in text)
+    return data[:size].ljust(size, b"\0").hex()
+
+
+def wifi_password_bytes(lock: dict, status: dict) -> int:
+    """32, or 64 on a Visage whose back board is 1.00.73 up to 3.00.00 or
+    3.00.03 and later (BluetoothBean.isSupportMaxWifiPassword)."""
+    back = status.get("sub_version")
+    if str(lock.get("mod") or "").upper() in ("PGK728WRHK", "PGK728WHK", "PGK7SWHK") and back:
+        if (version_at_least(back, "1.00.73") and version_lower(back, "3.00.00")) or version_at_least(back, "3.00.03"):
+            return 64
+    return 32
+
+
+def build_wifi_scan(lock: dict, nonce: str, position: int = 0xFF) -> str:
+    """0xAE: scan time 0, list position (255 starts a scan), then 1
+    (ScanWiFiList174Cmd.getRequestData)."""
+    enc_mc, mc_len, key = _enc(lock)
+    raw = P._assemble_fields("AE", mc_len, enc_mc, "0", f"{position:x}", "1", (nonce or "").upper())
+    return P._aes_wrap(raw, key)
+
+
+def parse_wifi_scan(d: str) -> dict:
+    """0AAE payload: result (00 done, 02 still scanning), total, position, then
+    entries [rssi(1) router type(1) SSID] separated by 0A."""
+    out = {"result": d[:2], "total": 0, "position": 0, "networks": []}
+    if d[:2] != "00" or len(d) < 6:
+        return out
+    out["total"], out["position"] = int(d[2:4], 16), int(d[4:6], 16)
+    body = d[6:].rstrip("0")
+    body += "0" * (len(body) % 2)
+    entry = ""
+    for i in range(0, len(body) + 2, 2):
+        b = body[i:i + 2]
+        if b in ("0A", "0a", "") and len(entry) >= 4:
+            out["networks"].append({"rssi": int(entry[0:2], 16), "router_type": int(entry[2:4], 16),
+                                    "ssid": bytes.fromhex(entry[4:]).decode("utf-8", "replace")})
+            entry = ""
+        elif b:
+            entry += b
+    return out
+
+
+def build_wifi_setup(lock: dict, nonce: str, *, ssid: str, password: str, host: str, port: int,
+                     heartbeat_min: int, country: str, router_type: int, hidden: bool = False,
+                     query: bool = False, password_bytes: int = 32, scan_support: bool = True) -> str:
+    """0x99 ConfiguratorWiFi153Cmd.getData. Raises ValueError for a network
+    name or password the field can't hold."""
+    ssid_hex = ssid.encode("utf-8").hex()
+    if len(ssid_hex) > 64:
+        raise ValueError("Wi-Fi name is longer than 32 bytes.")
+    if len(password) > password_bytes:
+        raise ValueError(f"This lock takes Wi-Fi passwords up to {password_bytes} characters.")
+    enc_mc, mc_len, key = _enc(lock)
+    fields = ["99", mc_len, enc_mc, ssid_hex.ljust(64, "0"), _padded_text_hex(password, password_bytes),
+              _padded_text_hex(host, 128), _padded_text_hex(country, 2), _padded_text_hex(str(port), 4),
+              "1" if query else "0", f"{(int(scan_support) << 7) | (heartbeat_min & 0x7F):x}"]
+    if scan_support:
+        fields += [f"{router_type:x}", "1" if hidden else "0"]
+    raw = P._assemble_fields(*fields, (nonce or "").upper())
+    return P._aes_wrap(raw, key)
+
+
+def parse_wifi_setup(d: str) -> dict:
+    """0A99 payload: 00 then a result code (WIFI_RESULT), and with 3 the lock's
+    client id (length-prefixed text); 02 means the lock is still working on it."""
+    out = {"result": d[:2], "code": None, "text": "", "client_id": ""}
+    if d[:2] == "02":
+        out["text"] = "working on it"
+    elif d[:2] == "00" and len(d) >= 4:
+        out["code"] = int(d[2:4], 16)
+        out["text"] = WIFI_RESULT.get(out["code"], f"result {out['code']}")
+        if out["code"] == 3 and len(d) >= 6:
+            n = int(d[4:6], 16)
+            out["client_id"] = bytes.fromhex(d[6:6 + 2 * n]).decode("ascii", "replace")
+    else:
+        out["text"] = f"the lock refused it ({d[:2] or 'no data'})"
+    return out

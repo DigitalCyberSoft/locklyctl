@@ -734,7 +734,10 @@ class Api:
                   "current": on_lock.get(p["part"]) or "",
                   "newer": F.version_lower(on_lock.get(p["part"]), p["version"]),
                   "sizeKb": p["size_kb"],
-                  "byPhone": not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock))}
+                  "byPhone": not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock)),
+                  # The chip's own update (Dialog SUOTA) from this computer, when it has Bluetooth.
+                  "byBluetooth": multi and p["part"] == "ble" and not BLE.available()
+                                 and not plan["send"]}       # the app does the chip only after the rest
                  for p in offer["parts"]]
         send = [{"part": p["part"], "name": self._PART_NAMES[p["part"]], "version": p["version"],
                  "current": on_lock.get(p["part"]) or ""} for p in plan["send"]]
@@ -777,6 +780,39 @@ class Api:
                          name="locklyctl-firmware", daemon=True).start()
         return self.firmware_install_status(lock_id)
 
+    def bluetooth_chip_install(self, lock_id: str) -> dict:
+        """Start installing Lockly's newest Bluetooth-chip firmware over
+        Bluetooth from this computer (LocklyClient.bluetooth_chip_update, which
+        checks versions, battery and the file first). Runs in the background:
+        poll firmware_install_status."""
+        lock = self._lock(lock_id)
+        why = BLE.available()
+        if why:
+            raise ValueError(why)
+        with self._fw_lock:
+            if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
+                raise ValueError("A firmware install is already running on this door.")
+        c = self._c()
+        offered = next((p["version"] for p in c.firmware_offer(lock)["parts"] if p["part"] == "ble"), "")
+        if not offered:
+            raise ValueError("Lockly offers no Bluetooth-chip firmware for this lock.")
+        current = (c.status_cache.get(lock["ID"]) or {}).get("ble_version") or ""
+        job = {"running": True, "ok": None, "stage": "start", "progress": None, "away": None,
+               "text": "Looking for the lock over Bluetooth", "error": "", "versions": {},
+               "clockKnown": False, "clockOffset": None,
+               "parts": [{"part": "ble", "name": self._PART_NAMES["ble"], "version": offered,
+                          "current": current, "state": "sending", "now": ""}]}
+        with self._fw_lock:
+            if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
+                raise ValueError("A firmware install is already running on this door.")
+            self._fw_jobs[lock["ID"]] = job
+
+        def install(on_event):
+            return {"versions": {"ble": c.bluetooth_chip_update(lock, on_event)["after"]}}
+        threading.Thread(target=self._run_firmware_install, args=(lock, {}, job),
+                         kwargs={"install": install}, name="locklyctl-firmware", daemon=True).start()
+        return self.firmware_install_status(lock_id)
+
     def firmware_install_status(self, lock_id: str) -> dict:
         """Where the firmware install on this door is: {"running", "ok", "stage",
         "progress", "away", "text", "error", "parts", "versions"}, or running
@@ -797,8 +833,10 @@ class Api:
             p["now"] = versions.get(p["part"]) or ""
             p["state"] = "done" if F.version_at_least(p["now"], p["version"]) else "behind"
 
-    def _run_firmware_install(self, lock: dict, plan: dict, job: dict, bluetooth: bool = False) -> None:
-        """Thread entry point: runs the install and records how it ended."""
+    def _run_firmware_install(self, lock: dict, plan: dict, job: dict, bluetooth: bool = False,
+                              install=None) -> None:
+        """Thread entry point: runs the install (``install(on_event)`` when
+        given, else the Wi-Fi install of ``plan``) and records how it ended."""
         def on_event(event: dict) -> None:
             with self._fw_lock:
                 job.update(stage=event.get("stage"), progress=event.get("progress"),
@@ -811,9 +849,10 @@ class Api:
                     for p in job["parts"]:
                         p["state"] = "restarting" if p["state"] == "sending" else p["state"]
         try:
-            result = self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event,
-                                                bluetooth=bluetooth)
-        except (LocklyError, ValueError) as e:
+            result = (install(on_event) if install else
+                      self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event,
+                                                 bluetooth=bluetooth))
+        except (LocklyError, ValueError, BLE.BluetoothError) as e:
             outcome = {"ok": False, "error": str(e)}
         except Exception as e:          # thread boundary: record it, or the page would wait forever
             _LOG.exception("firmware install on %s stopped", lock.get("ID"))
@@ -855,6 +894,43 @@ class Api:
         if st is None:
             raise LocklyError("The lock didn't answer over Bluetooth.", "bluetooth")
         return self._view(lock)
+
+    # ── Wi-Fi, given to the lock over Bluetooth (the app's Wi-Fi setup) ──
+
+    def bluetooth_wifi_scan(self, lock_id: str) -> list[dict]:
+        """The Wi-Fi networks the lock sees, asked over Bluetooth from this
+        computer: [{"ssid", "rssi", "routerType"}], strongest first, one per name."""
+        lock = self._lock(lock_id)
+        why = BLE.available()
+        if why:
+            raise ValueError(why)
+        try:
+            seen = self._c().bluetooth_wifi_scan(lock)
+        except BLE.BluetoothError as e:
+            raise LocklyError(str(e), "bluetooth") from e
+        best: dict[str, dict] = {}
+        for n in sorted(seen, key=lambda n: n["rssi"]):
+            if n["ssid"] and n["ssid"] not in best:
+                best[n["ssid"]] = {"ssid": n["ssid"], "rssi": -n["rssi"], "routerType": n["router_type"]}
+        return list(best.values())
+
+    def bluetooth_wifi_setup(self, lock_id: str, ssid: str, password: str, country: str = "") -> dict:
+        """Give the lock a Wi-Fi network over Bluetooth, then ask until it says
+        how joining went: {"ok", "text", "lock"}. The password isn't stored or logged."""
+        lock = self._lock(lock_id)
+        why = BLE.available()
+        if why:
+            raise ValueError(why)
+        if not ssid:
+            raise ValueError("Choose a network.")
+        import locale
+        tag = locale.getlocale()[0] or ""
+        cc = (country or (tag.split("_")[1][:2] if "_" in tag else "US")).upper()
+        try:
+            r = self._c().bluetooth_wifi_setup(lock, ssid, password, country=cc, on_event=lambda e: None)
+        except BLE.BluetoothError as e:
+            raise LocklyError(str(e), "bluetooth") from e
+        return {"ok": r["code"] == 3, "text": r["text"], "lock": self._view(lock)}
 
     # ── connection test ──────────────────────────────────────────────────
 

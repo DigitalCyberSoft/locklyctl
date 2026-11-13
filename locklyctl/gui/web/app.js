@@ -889,6 +889,42 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
   });
 });
 
+// ── Wi-Fi, given to the lock over Bluetooth ────────────────────────────
+
+$("btn-wifi-scan").addEventListener("click", async (ev) => {
+  const v = current();
+  const out = $("wifi-out"), form = $("wifi-form");
+  out.replaceChildren(h("p", { class: "muted" }, "Asking the lock over Bluetooth which networks it sees…"));
+  form.hidden = true;
+  await busy(ev.currentTarget, async () => {
+    try {
+      const nets = await call("bluetooth_wifi_scan", v.id);
+      form.ssid.replaceChildren(...nets.map((n) => h("option", { value: n.ssid }, `${n.ssid} (${n.rssi} dBm)`)));
+      form.hidden = !nets.length;
+      out.replaceChildren(h("p", { class: "muted" }, nets.length ? "" : "The lock sees no networks."));
+    } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  });
+});
+
+$("wifi-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const v = current();
+  const f = ev.currentTarget, out = $("wifi-out");
+  const ok = await confirmDialog(`Give ${doorLabel(v)} the network ${f.ssid.value}?`,
+    "This replaces the Wi-Fi network saved on the lock. Keep this computer next to the door; it takes up to a minute and a half.",
+    "Give it");
+  if (!ok) return;
+  out.replaceChildren(h("p", { class: "muted" }, `Saving ${f.ssid.value} on the lock and waiting for it to join…`));
+  await busy(f.querySelector("button"), async () => {
+    try {
+      const r = await call("bluetooth_wifi_setup", v.id, f.ssid.value, f.password.value);
+      f.password.value = "";
+      updateLock(r.lock);
+      out.replaceChildren(h("p", { class: r.ok ? "ok" : "form-error" }, r.ok ? `Connected to ${f.ssid.value}.` : `It didn't connect: ${r.text}.`));
+    } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  });
+});
+
 // ── firmware ───────────────────────────────────────────────────────────
 
 $("btn-firmware").addEventListener("click", async (ev) => {
@@ -908,9 +944,11 @@ $("btn-firmware").addEventListener("click", async (ev) => {
         h("td", {}, p.name),
         h("td", {}, p.current || h("span", { class: "muted" }, "not reported")),
         h("td", { class: p.newer ? "bad" : "" }, p.offered, p.newer ? " (newer)" : ""),
-        h("td", { class: "muted" }, p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
+        h("td", { class: "muted" }, p.byBluetooth ? "Bluetooth, from this computer"
+          : p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
       const install = r.install;
-      const byPhone = r.parts.filter((p) => p.newer && p.byPhone).map((p) => p.name);
+      const byPhone = r.parts.filter((p) => p.newer && p.byPhone && !p.byBluetooth).map((p) => p.name);
+      const chip = r.parts.find((p) => p.newer && p.byBluetooth);
       out.replaceChildren(
         h("p", {}, `Lockly offers ${r.kind === "multi" ? "release " : "firmware "}${r.release}`
           + (r.answered ? "." : ". The lock didn't answer, so its own versions are missing.")),
@@ -926,7 +964,11 @@ $("btn-firmware").addEventListener("click", async (ev) => {
               icon("firmware"), "Install over Wi-Fi"))
           : (r.kind === "multi" && install.blocked ? h("p", { class: "fine" }, install.blocked) : null),
         byPhone.length ? h("p", { class: "fine" }, `${byPhone.join(", ")}: install with the Lockly app, at the door.`)
-          : null);
+          : null,
+        chip ? h("div", { class: "fw-install" },
+          h("p", {}, `Over Bluetooth from this computer this sends Bluetooth chip ${chip.offered}.`),
+          h("button", { class: "btn btn-ink", type: "button", onclick: () => installBluetoothChip(v, chip) },
+            icon("bluetooth"), "Install over Bluetooth")) : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });
@@ -957,6 +999,20 @@ async function installFirmware(v, install, btn) {
     `${list}. The lock downloads the files and installs them itself, then restarts. Leave the door alone `
     + "until this says it's done; it can take several minutes." + bleNote, "Install");
   if (!ok || busyNow(v)) return;
+  await followInstall(v, () => call("firmware_install", v.id, install.parts, !!ble.inRange));
+}
+
+// The Bluetooth chip's own update, sent over Bluetooth from this computer.
+async function installBluetoothChip(v, chip) {
+  const ok = await confirmDialog(`Update the Bluetooth chip on ${doorLabel(v)}?`,
+    `Bluetooth chip ${chip.current || "?"} → ${chip.offered}, sent from this computer over Bluetooth. `
+    + "Keep this computer next to the door until this says it's done; it takes several minutes.", "Update");
+  if (!ok || busyNow(v)) return;
+  await followInstall(v, () => call("bluetooth_chip_install", v.id));
+}
+
+// Shows an install's progress until it ends; ``start`` begins it and returns its first status.
+async function followInstall(v, start) {
   pending.set(v.id, "firmware");
   refreshControls(v.id);
   const show = (st) => {
@@ -976,7 +1032,7 @@ async function installFirmware(v, install, btn) {
         clock ? `${clock}: people on a schedule may not get in until it's set.` : "The lock's clock is right.") : null);
   };
   try {
-    let st = await call("firmware_install", v.id, install.parts, !!ble.inRange);
+    let st = await start();
     while (st.running) {
       show(st);
       await new Promise((resolve) => setTimeout(resolve, 2000));
