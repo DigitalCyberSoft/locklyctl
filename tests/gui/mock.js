@@ -38,9 +38,12 @@ window.pywebview = {
     async sign_in(email) { await wait(400); return { signedIn: true, email }; },
     async sign_out() { return { signedIn: false, email: "owner@example.com" }; },
     async locks() { await wait(150); return locks.map((l) => ({ ...l })); },
-    async check_all() { await wait(800); return locks.map((l) => ({ ...l, state: l.state === "unknown" ? "asleep" : l.state, checkedAt: Date.now() / 1000 })); },
-    async check(id) { await wait(600); return { ...find(id), checkedAt: Date.now() / 1000 }; },
-    async check_doors(ids) { await wait(900); return ids.map((id) => Object.assign(find(id), { state: "locked", checkedAt: Date.now() / 1000 })).map((l) => ({ ...l })); },
+    async check(id) {                      // doors answer at different speeds; some stay asleep
+      const l = find(id), n = parseInt(id, 16);
+      await wait(500 + (n % 7) * 350);
+      if (l.state === "unknown" || l.state === "asleep") l.state = n % 3 ? "locked" : "asleep";
+      return { ...l, cached: false, checkedAt: Date.now() / 1000 };
+    },
     async lock(id) { await wait(700); Object.assign(find(id), { state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async unlock(id) { await wait(700); Object.assign(find(id), { state: "unlocked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async keep_unlocked(id, minutes) { await wait(500); const until = new Date(Date.now() + minutes * 60000).toTimeString().slice(0, 5); Object.assign(find(id), { keepUnlockedUntil: until, state: "unlocked" }); return { ok: true, until, detail: "", lock: { ...find(id) } }; },
@@ -117,15 +120,18 @@ setTimeout(() => {
   if (scene === "dark-detail") { click('.plate[aria-label^="3A"]'); }
   if (scene.startsWith("firmware")) { click('.plate[aria-label^="2A Front"]'); click("#tab-connection"); setTimeout(() => click("#btn-firmware"), 200); }
   if (scene === "firmware-install") { setTimeout(() => { click(".fw-install button"); setTimeout(() => click("#confirm-ok"), 300); }, 1200); }
+  // Clicking a door connects to it first; Unlock can be held once that's done.
+  const whenUnlockable = (fn) => { const b = document.getElementById("btn-unlock"); b.disabled ? setTimeout(() => whenUnlockable(fn), 100) : fn(b); };
   if (scene === "hold") {
     click('.plate[aria-label^="1204"]');
-    document.getElementById("btn-unlock").dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true }));
+    whenUnlockable((b) => b.dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true })));
   }
   if (scene === "hold-cancel") {
     click('.plate[aria-label^="1204"]');
-    const b = document.getElementById("btn-unlock");
-    b.dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true }));
-    setTimeout(() => b.dispatchEvent(new PointerEvent("pointerup", { button: 0, pointerId: 1, bubbles: true })), 400);
+    whenUnlockable((b) => {
+      b.dispatchEvent(new PointerEvent("pointerdown", { button: 0, pointerId: 1, bubbles: true }));
+      setTimeout(() => b.dispatchEvent(new PointerEvent("pointerup", { button: 0, pointerId: 1, bubbles: true })), 400);
+    });
   }
   if (scene === "preview") {
     click('.plate[aria-label^="4C,"]'); click("#tab-schedules");

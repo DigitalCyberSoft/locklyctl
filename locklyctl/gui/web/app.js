@@ -121,7 +121,8 @@ const doorLabel = (v) => (v.unit ? `${v.unit}${v.rest ? " " + v.rest : ""}` : v.
 
 function updateLock(view) {
   const i = locks.findIndex((l) => l.id === view.id);
-  if (i >= 0) locks[i] = view; else locks.push(view);
+  if (i < 0) return;        // an answer that came in after signing out, or into another account
+  locks[i] = view;
   renderPlates();
   renderFavs();
   if (view.id === currentId) renderDoor();
@@ -203,17 +204,16 @@ $("sign-out").addEventListener("click", async () => {
 });
 
 $("check-all").addEventListener("click", async (ev) => {
-  const ok = await confirmDialog(`Check all ${locks.length} doors?`,
-    "Each lock wakes up to answer, and beeps. Locks that are asleep may not answer.", "Check all doors");
+  const doors = locks.filter((v) => v.route !== "bluetooth");
+  const left = locks.length - doors.length;
+  const ok = await confirmDialog(`Check all ${doors.length} doors?`,
+    "Each lock wakes up to answer, and beeps. Locks that are asleep may not answer."
+    + (left ? ` ${left} ${left === 1 ? "door has no hub, so it's" : "doors have no hub, so they're"} left out.` : ""),
+    "Check all doors");
   if (!ok) return;
   await busy(ev.currentTarget, async () => {
-    toast(`Checking ${locks.length} doors…`);
-    try {
-      const fresh = await call("check_all");
-      fresh.forEach(updateLock);
-      const answered = fresh.filter((l) => l.state === "locked" || l.state === "unlocked").length;
-      toast(`${answered} of ${fresh.length} doors answered.`);
-    } catch (e) { toast(e.message, true); }
+    toast(`Checking ${doors.length} doors…`);
+    reportChecks(await checkDoors(doors), "doors");
   });
 });
 
@@ -223,17 +223,19 @@ function renderPlates() {
   const items = locks.map((v) => {
     const num = v.unit || v.name;
     const batt = v.battery != null ? `${v.battery}%` : v.lowBattery ? "Low battery" : null;
+    const doing = pending.get(v.id);
+    const word = doing ? DOING_SHORT[doing] : STATE_WORD[stateOf(v)];
     return h("li", {},
       h("button", {
-        class: "plate", type: "button", "data-state": stateOf(v),
+        class: "plate", type: "button", "data-state": stateOf(v), "aria-busy": doing ? "true" : null,
         "aria-current": v.id === currentId ? "true" : "false",
-        "aria-label": `${doorLabel(v)}, ${STATE_WORD[stateOf(v)]}${v.favorite ? ", favorite" : ""}`,
-        onclick: () => selectLock(v.id),
+        "aria-label": `${doorLabel(v)}, ${word}${v.favorite ? ", favorite" : ""}`,
+        onclick: () => selectLock(v.id, true),
       },
         h("span", { class: "plate-num" + (v.unit ? "" : " wordy") }, num),
         h("span", { class: "plate-rest" }, v.unit ? v.rest : ""),
         h("span", { class: "plate-state" },
-          h("span", { class: "plate-word" }, stateIcon(stateOf(v)), STATE_WORD[stateOf(v)]),
+          h("span", { class: "plate-word" }, doing ? icon(v.route) : stateIcon(stateOf(v)), word),
           batt && h("span", { class: "plate-batt" + (v.lowBattery || (v.battery != null && v.battery <= 20) ? " low" : "") }, batt)),
         v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, icon("favorite-on"))));
   });
@@ -251,24 +253,56 @@ function renderRetry() {
 }
 
 $("retry-asleep").addEventListener("click", async (ev) => {
-  const ids = asleepDoors().map((v) => v.id);
-  if (!ids.length) return;
+  const doors = asleepDoors();
+  if (!doors.length) return;
   await busy(ev.currentTarget, async () => {
-    toast(`Asking ${ids.length} ${ids.length === 1 ? "door" : "doors"} again…`);
-    try {
-      const fresh = await call("check_doors", ids);
-      fresh.forEach(updateLock);
-      const answered = fresh.filter((l) => l.state === "locked" || l.state === "unlocked").length;
-      toast(`${answered} of ${fresh.length} answered.`, answered === 0);
-    } catch (e) { toast(e.message, true); }
+    toast(`Asking ${doors.length} ${doors.length === 1 ? "door" : "doors"} again…`);
+    reportChecks(await checkDoors(doors), "");
   });
 });
 
+// Ask doors for their live status, CHECK_AT_ONCE at a time. Each door shows
+// "Connecting…" from the start and updates as soon as its own answer is in.
+// Doors with no hub, and doors busy with something else, are skipped.
+const CHECK_AT_ONCE = 6;      // as many at once as LocklyClient.refresh_all_status asks
+async function checkDoors(doors) {
+  const queue = doors.filter((v) => v.route !== "bluetooth" && !pending.has(v.id));
+  const asked = queue.length;
+  queue.forEach((v) => pending.set(v.id, "check"));
+  renderPlates();
+  renderFavs();
+  if (queue.some((v) => v.id === currentId)) renderDoor();
+  const fresh = [];
+  const failed = [];
+  const worker = async () => {
+    for (let v = queue.shift(); v; v = queue.shift()) {
+      let view = null;
+      try { view = await call("check", v.id); }
+      catch (e) { failed.push(`${doorLabel(v)}: ${e.message}`); }
+      pending.delete(v.id);
+      if (view) { fresh.push(view); updateLock(view); } else refreshControls(v.id);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CHECK_AT_ONCE, asked) }, worker));
+  return { asked, fresh, failed };
+}
+
+function reportChecks(r, noun) {
+  if (!r.asked) { toast("Those doors are busy with something else right now."); return; }
+  if (r.failed.length) {
+    toast(r.failed.length === 1 ? r.failed[0] : `${r.failed.length} doors couldn't be asked. ${r.failed[0]}`, true);
+    return;
+  }
+  const answered = r.fresh.filter((l) => l.state === "locked" || l.state === "unlocked").length;
+  toast(`${answered} of ${r.asked}${noun ? " " + noun : ""} answered.`, answered === 0);
+}
+
 // ── favorites: one tap to lock or unlock, without opening the door ─────
 
-const pending = new Map();    // lock id → "lock" | "unlock" | "check" while it's out
-const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Checking…", keep: "Setting it to stay unlocked…",
+const pending = new Map();    // lock id → what's being done to it while that's out (a DOING key)
+const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Connecting…", keep: "Setting it to stay unlocked…",
   firmware: "Updating firmware…" };
+const DOING_SHORT = { ...DOING, keep: "Setting…", firmware: "Updating…" };   // short enough for a plate
 
 function renderFavs() {
   const favs = locks.filter((v) => v.favorite);
@@ -276,10 +310,10 @@ function renderFavs() {
   $("fav-list").replaceChildren(...favs.map((v) => {
     const st = stateOf(v);
     const off = pending.has(v.id) || v.route === "bluetooth";
-    return h("li", { class: "fav", "data-state": st },
+    return h("li", { class: "fav", "data-state": st, "aria-busy": pending.has(v.id) ? "true" : null },
       h("button", {
         class: "fav-door", type: "button", "aria-current": v.id === currentId ? "true" : "false",
-        onclick: () => selectLock(v.id),
+        onclick: () => selectLock(v.id, true),
       },
         h("span", { class: "fav-name" }, doorLabel(v)),
         h("span", { class: "fav-state" }, DOING[pending.get(v.id)] || STATE_WORD[st])),
@@ -303,7 +337,7 @@ async function runCommand(v, kind) {
   refreshControls(v.id);
   try {
     if (kind === "check") {
-      toast(`Waking ${label}…`);
+      toast(`Connecting to ${label}…`);
       const view = await call("check", v.id);
       updateLock(view);
       toast(view.state === "asleep" ? `${label} didn't answer.` : `${label}: ${STATE_WORD[view.state]}.`,
@@ -321,12 +355,21 @@ async function runCommand(v, kind) {
   }
 }
 
+// After a confirm dialog: the door may have got busy while it was open.
+function busyNow(v) {
+  if (!pending.has(v.id)) return false;
+  toast(`${doorLabel(v)} is busy (${DOING[pending.get(v.id)]}). Try again when that's done.`, true);
+  return true;
+}
+
 function refreshControls(id) {
+  renderPlates();
   renderFavs();
   if (id === currentId) renderDoor();
 }
 
-function selectLock(id) {
+// connect: the door was clicked, so also ask it for its live status.
+function selectLock(id, connect = false) {
   const changed = id !== currentId;
   currentId = id;
   renderPlates();
@@ -336,6 +379,8 @@ function selectLock(id) {
     resetSchedules();
     loadTab(activeTab);
   }
+  const v = current();
+  if (connect && v) checkDoors([v]).then((r) => { if (r.failed.length) toast(r.failed[0], true); });
 }
 
 // ── the door panel ─────────────────────────────────────────────────────
@@ -358,11 +403,12 @@ function renderDoor() {
   fav.title = noRoute && !v.favorite ? "This door has no hub, so it can only be opened over Bluetooth." : "";
 
   const st = $("d-state");
-  st.dataset.state = v.state;
-  st.replaceChildren(stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
-    : v.state === "asleep" ? "Didn't answer (asleep or offline)"
-      : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]);
-  st.dataset.state = v.route === "bluetooth" ? "unknown" : v.state;
+  const doing = pending.get(v.id);
+  st.dataset.state = doing ? "busy" : v.route === "bluetooth" ? "unknown" : v.state;
+  st.replaceChildren(...(doing ? [icon(v.route), DOING[doing]]
+    : [stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
+      : v.state === "asleep" ? "Didn't answer (asleep or offline)"
+        : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]]));
 
   const facts = [];
   if (v.battery != null) facts.push(h("li", { class: v.battery <= 20 ? "warn" : "" }, icon("battery"), `Battery ${v.battery}%`));
@@ -412,7 +458,7 @@ async function keepUnlocked(v, minutes) {
   const ok = await confirmDialog(`Keep ${doorLabel(v)} unlocked for ${hoursText(minutes)}?`,
     "It opens within about 20 seconds and locks again by itself when the time is up, even with this app closed.",
     "Keep unlocked");
-  if (!ok || pending.has(v.id)) return;
+  if (!ok || busyNow(v)) return;
   pending.set(v.id, "keep");
   refreshControls(v.id);
   toast(`Setting ${doorLabel(v)} to stay unlocked…`);
@@ -539,7 +585,8 @@ async function loadActivity() {
     const events = await call("activity", id);
     if (id !== currentId) return;
     if (!events.length) {
-      panel.replaceChildren(h("p", { class: "muted" }, "Nobody used this door in the last 7 days."));
+      panel.replaceChildren(h("p", { class: "muted" }, "Lockly's cloud has no record of this door in the last 7 days. "
+        + "That doesn't mean nobody used it: the cloud only has what was uploaded to it."));
       return;
     }
     panel.replaceChildren(h("table", { class: "log" },
@@ -802,7 +849,7 @@ async function installFirmware(v, install) {
   const ok = await confirmDialog(`Install new firmware on ${doorLabel(v)}?`,
     `${list}. The lock downloads the files and installs them itself, then restarts. Leave the door alone `
     + "until this says it's done; it can take several minutes.", "Install");
-  if (!ok || pending.has(v.id)) return;
+  if (!ok || busyNow(v)) return;
   pending.set(v.id, "firmware");
   refreshControls(v.id);
   const show = (st) => {

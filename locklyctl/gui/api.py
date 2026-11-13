@@ -312,23 +312,10 @@ class Api:
         c.prime_cached_status(c.locks)
         return [self._view(lk, cfg) for lk in c.locks]
 
-    def check_all(self) -> list[dict]:
-        """Live status for every lock. Wakes them all (they beep)."""
-        c = self._c()
-        c.refresh_all_status(c.locks)
-        cfg = config.load_config()
-        return [self._view(lk, cfg) for lk in c.locks]
-
-    def check_doors(self, lock_ids: list[str]) -> list[dict]:
-        """Live status for some locks, e.g. the ones that seemed asleep. Wakes them."""
-        c = self._c()
-        wanted = [self._lock(i) for i in lock_ids]
-        c.refresh_all_status(wanted)
-        cfg = config.load_config()
-        return [self._view(lk, cfg) for lk in wanted]
-
     def check(self, lock_id: str) -> dict:
-        """Live status for one lock (wakes it)."""
+        """Live status for one lock (wakes it, and it beeps). The GUI asks
+        several doors at once with parallel calls, so each door's answer
+        shows as soon as it's in."""
         lock = self._lock(lock_id)
         self._c().query_status(lock)
         return self._view(lock)

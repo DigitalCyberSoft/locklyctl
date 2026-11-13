@@ -3,7 +3,8 @@
 //   node tests/gui/screenshots.mjs [chrome-binary]
 // Drives headless Chrome over the DevTools protocol so phone shots get real
 // mobile emulation (headless windows can't be narrower than 500px).
-// Also fails if any page is wider than its screen, which would scroll sideways.
+// Also fails if any page is wider than its screen, which would scroll sideways,
+// or if a door plate's status runs past the plate.
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,14 @@ const overflow = (width) => `JSON.stringify([...document.querySelectorAll("body 
   if (!e.offsetParent || e.getBoundingClientRect().right <= ${width} + 1) return false;
   return !e.closest(".tabs");
 }).slice(0, 6).map((e) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.className ? "." + String(e.className).split(" ")[0] : "")))`;
+
+// Plate status lines that run into the plate's padding, which the screen-edge
+// check above can't see (a plate is narrower than the screen).
+const cramped = `JSON.stringify([...document.querySelectorAll(".plate-word")].filter((w) => {
+  if (!w.offsetParent) return false;            // not shown (e.g. the People view is open)
+  const p = w.closest(".plate"), cs = getComputedStyle(p);
+  return w.getBoundingClientRect().right > p.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth) + 0.5;
+}).slice(0, 6).map((w) => w.closest(".plate").getAttribute("aria-label")))`;
 
 const profile = mkdtempSync(join(tmpdir(), "locklyctl-shots-"));
 const proc = spawn(chrome, ["--headless", "--disable-gpu", "--hide-scrollbars", "--remote-debugging-port=0",
@@ -81,6 +90,8 @@ try {
       expression: overflow(view.width), returnByValue: true });
     const wide = JSON.parse(result.value);
     if (wide.length) { console.error(`${name}: wider than the screen: ${wide.join(", ")}`); failed = true; }
+    const tight = JSON.parse((await s("Runtime.evaluate", { expression: cramped, returnByValue: true })).result.value);
+    if (tight.length) { console.error(`${name}: runs past its plate: ${tight.join("; ")}`); failed = true; }
     const { data } = await s("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(out, `${name}.png`), Buffer.from(data, "base64"));
     console.log(`${name}.png  ${view.width}x${view.height}@${view.deviceScaleFactor}x  ${scheme}`);
