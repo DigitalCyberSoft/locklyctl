@@ -400,19 +400,23 @@ def test_bluetooth_check_and_set_time(api):
                                            "detail": "Bluetooth needs the optional 'bleak' package."}
     finally:
         BLE.available = real
-    c.bluetooth_in_range = lambda lock: True
-    assert api.bluetooth_check(B2)["inRange"] is True
-    c.bluetooth_status = lambda lock: c.status_cache.update(
-        {lock["ID"]: {"reachable": True, "ts": 1, "is_locked": True, "clock_offset_s": 0}}) or {"is_locked": True}
-    v = api.bluetooth_set_time(B2)
-    assert (v["clockKnown"], v["clockOffset"], v["state"]) == (True, 0, "locked")
-    c.bluetooth_status = lambda lock: None
+    BLE.available = lambda: ""                              # as on a computer with bleak, whatever this one has
     try:
-        api.bluetooth_set_time(B2)
-    except LocklyError as e:
-        assert "didn't answer over Bluetooth" in str(e)
-    else:
-        raise AssertionError("no answer was reported as set")
+        c.bluetooth_in_range = lambda lock: True
+        assert api.bluetooth_check(B2)["inRange"] is True
+        c.bluetooth_status = lambda lock: c.status_cache.update(
+            {lock["ID"]: {"reachable": True, "ts": 1, "is_locked": True, "clock_offset_s": 0}}) or {"is_locked": True}
+        v = api.bluetooth_set_time(B2)
+        assert (v["clockKnown"], v["clockOffset"], v["state"]) == (True, 0, "locked")
+        c.bluetooth_status = lambda lock: None
+        try:
+            api.bluetooth_set_time(B2)
+        except LocklyError as e:
+            assert "didn't answer over Bluetooth" in str(e)
+        else:
+            raise AssertionError("no answer was reported as set")
+    finally:
+        BLE.available = real
 
 @_api_in_tmp_home
 def test_favorites(api):

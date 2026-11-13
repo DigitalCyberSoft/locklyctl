@@ -37,6 +37,19 @@ def available() -> str:
     return ""
 
 
+class _NoBleak(Exception):
+    """Stands in for bleak's error class when bleak isn't installed (never raised)."""
+
+
+def _bleak_error() -> type[Exception]:
+    """bleak's error class, or one nothing raises when bleak isn't installed, so
+    the frame handling below works with any client object."""
+    if importlib.util.find_spec("bleak") is None:
+        return _NoBleak
+    from bleak.exc import BleakError
+    return BleakError
+
+
 class FrameAssembler:
     """Joins notification chunks into whole frames, as BLELoader.E/w do: a chunk
     holding the header starts a new frame (from its last header, as the app does
@@ -143,10 +156,9 @@ class BleLink:
 
     @staticmethod
     async def _disconnect(client) -> None:
-        from bleak.exc import BleakError
         try:
             await client.disconnect()
-        except BleakError:                         # already gone: nothing left to close
+        except _bleak_error():                     # already gone: nothing left to close
             pass
 
     # -- one command ---------------------------------------------------------
@@ -161,13 +173,12 @@ class BleLink:
         return reply.hex().upper() if reply else None
 
     async def _exchange(self, frame: bytes, timeout: float) -> bytes | None:
-        from bleak.exc import BleakError
         while not self._frames.empty():            # anything left from before isn't the answer
             self._frames.get_nowait()
         try:
             for i in range(0, len(frame), CHUNK):
                 await self._client.write_gatt_char(WRITE, frame[i:i + CHUNK], response=self._respond)
-        except BleakError as e:
+        except _bleak_error() as e:
             raise BluetoothError(f"Bluetooth write failed: {e}") from e
         task = asyncio.ensure_future(self._frames.get())
         done, _ = await asyncio.wait({task}, timeout=timeout)
