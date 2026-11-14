@@ -18,11 +18,13 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 import requests
 
+from . import bind as BIND
 from . import ble as BLE
 from . import config
 from . import features as F
@@ -758,6 +760,120 @@ class LocklyClient:
                 return done(False, f"the lock didn't answer: {trail}", None)
         with self._bluetooth_session(lock) as (_link, st):
             return done(*give(st["ble_nonce"]), "bluetooth")
+
+    # -- setting up a new lock (the app's BindLockManager; bind.py) --------------
+
+    def nearby_new_locks(self, timeout: float = BLE.SCAN_S) -> list[dict]:
+        """Locks this computer hears over Bluetooth that aren't on this account:
+        [{"name", "rssi", "model"}], strongest first; "model" is None when setup
+        isn't ported for it. Listens only. Raises BLE.BluetoothError."""
+        why = BLE.available()
+        if why:
+            raise BLE.BluetoothError(why)
+        mine = {str(lk.get("blename") or "") for lk in self.locks}
+        return [{**d, "model": BIND.model_for(d["name"])} for d in BLE.nearby(timeout) if d["name"] not in mine]
+
+    def add_lock(self, ble_name: str, code: str, *, name: str, pin: str, serial: str = "",
+                 on_event: Callable[[dict], None] = lambda e: None) -> dict:
+        """Set up a new or reset lock over Bluetooth from this computer and put
+        it on this account, as the app does (bind.py lists the steps and their
+        sources): the card's 8-digit ``code``, then the admin ``pin`` and the
+        door ``name``; the time zone is this computer's. Returns the lock as the
+        account now lists it. Raises LocklyError (refused, wrong code, not
+        reset, an account call failed) or BLE.BluetoothError.
+
+        Once the lock has taken its new master code, that and its device ID are
+        kept in the owner-only config ("bind_pending") until the account has
+        the lock, so a run that stops after that can be started again: the lock
+        then refuses 01 01 as not reset, and the kept codes carry on. The code,
+        master code and PIN are never logged or returned."""
+        model = BIND.model_for(ble_name)
+        if model is None:
+            raise LocklyError(f"Setting up {ble_name} isn't ported: only these models are: "
+                              + ", ".join(BIND.MODELS) + ".", "unsupported")
+        if any(str(lk.get("blename") or "") == ble_name for lk in self.locks):
+            raise LocklyError(f"{ble_name} is already on this account.", "exists")
+        try:
+            card_serial, code = BIND.card(code)
+        except ValueError as e:
+            raise LocklyError(str(e), "code") from e
+        serial = serial or card_serial
+        if not (pin.isdigit() and len(pin) >= 6):
+            raise LocklyError("The admin PIN is 6 or more digits (the app's minimum for a Visage).", "pin")
+        if not name.strip():
+            raise LocklyError("Give the door a name.", "name")
+        why = BLE.available()
+        if why:
+            raise BLE.BluetoothError(why)
+        offset = F.computer_utc_offset_minutes()
+        pending = config.load_config().get("bind_pending") or {}
+        link = BLE.BleLink(ble_name)
+        try:
+            on_event({"stage": "connect", "text": f"Connecting to {ble_name} over Bluetooth"})
+            link.connect()
+            link.exchange(BIND.build_old_status("000000", datetime.now()))   # wake-up; any answer or none
+            on_event({"stage": "code", "text": "Giving it the Activation Code"})
+            rnd = BIND.random_digits()
+            r = BIND.parse_set_master_code(link.exchange(BIND.build_set_master_code(code, rnd)), rnd)
+            if r["ok"]:
+                mc, device_id = r["mc"], r["device_id"]
+                if not BIND.start_master_code_ok(link.exchange(BIND.build_start_master_code(code, mc, device_id))):
+                    raise LocklyError("The lock didn't put its new master code in force (01 04).", "bind")
+                config.save_config({**config.load_config(), "bind_pending": {
+                    "blename": ble_name, "ID": device_id, "mc": mc}})
+            elif r["error"] == BIND.NOT_RESET and pending.get("blename") == ble_name:
+                mc, device_id = pending["mc"], pending["ID"]          # set up by an earlier run
+                on_event({"stage": "code", "text": "It took the code in an earlier run; carrying on"})
+            elif r["error"] == BIND.NOT_RESET:
+                raise LocklyError("The lock isn't reset (it answered F8): it's set up already. Reset it at the "
+                                  "door first, which deletes its users.", "not-reset")
+            elif r["error"] in BIND.WRONG_CODE:
+                raise LocklyError(f"The lock says the Activation Code is wrong ({r['error']}).", "code")
+            else:
+                raise LocklyError("The lock didn't answer the Activation Code.", "bind")
+            lock = {"ID": device_id, "mc": mc, "hc": "", "mod": model, "blename": ble_name,
+                    "tz": BIND.account_tz(offset)}
+            self._tl.ble = link
+            ack = link.exchange(BIND.build_old_status(P.encrypt_master_code(mc, device_id), datetime.now()))
+            if not BIND.old_status_ok(ack):
+                raise LocklyError("The lock didn't answer the status check with its new master code.", "bind")
+            body = self._post_para_des3("initialCode/add", {"deviceId": device_id, "activationCode": code,
+                                                            "bleName": ble_name})
+            registered = str(body.get("cod")) == "200"
+            st = self.query_status(lock)
+            if not st or not st.get("ble_nonce"):
+                raise LocklyError("The lock didn't answer a status check with its new keys.", "bind")
+            if st.get("lock_type") != BIND.MODELS[model]:
+                raise LocklyError(f"It reports lock type {st.get('lock_type')}, not a {model}; stopped before "
+                                  "putting it on the account.", "unsupported")
+            on_event({"stage": "zone", "text": f"Giving it the time zone, {F.utc_offset_text(offset)}"})
+            hours = int(offset / 60)
+            zone_ok, _ = F.check_reply(self.exchange_frame(lock, F.build_time_zone_set(lock, st["ble_nonce"],
+                                                                                     hours)), lock)
+            on_event({"stage": "pin", "text": "Setting its admin PIN"})
+            st = self.query_status(lock) or st
+            pin_ok, detail = BIND.admin_pin_ok(self.exchange_frame(lock, BIND.build_set_admin_pin(
+                lock, st["ble_nonce"], pin)))
+            if not pin_ok:
+                raise LocklyError(f"The lock didn't take the admin PIN: {detail}.", "pin")
+            st = self.query_status(lock) or st                  # its clock, in its zone
+        finally:
+            self._tl.ble = None
+            link.close()
+        on_event({"stage": "account", "text": "Putting it on your Lockly account"})
+        record = BIND.account_record(device_id=device_id, mc=mc, pin=pin, name=name.strip(), model=model,
+                                     ble_name=ble_name, tz=lock["tz"], status=st, serial=serial)
+        body = self._post_para_des3("backac", {"acct": self.email, "arr": [record]})
+        if str(body.get("cod")) != "200":
+            raise LocklyError(f"Lockly didn't add it to the account: {P.describe_cod(body.get('cod'))}. The lock "
+                              "is set up; run the same setup again to retry.", str(body.get("cod")))
+        cfg = config.load_config()
+        cfg.pop("bind_pending", None)
+        config.save_config(cfg)
+        added = next((lk for lk in self.load_devices() if lk.get("ID") == device_id), None)
+        if added is None:
+            raise LocklyError("Lockly accepted the lock but doesn't list it yet; check again in a minute.", "account")
+        return {"lock": added, "zone": zone_ok, "registered": registered}
 
     def refresh_all_status(self, locks: list[dict], max_workers: int = 6) -> dict:
         """Query every lock's live status in parallel, caching results. This

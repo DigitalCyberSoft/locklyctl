@@ -1736,3 +1736,220 @@ def test_time_zone_over_bluetooth_when_the_server_says_offline():
         restore()
     assert r["ok"] and r["via"] == "bluetooth" and len(ch.sent) == 1        # one remote try, then Bluetooth
     assert [_plain(f)[:2] for f in links[0].frames] == ["1E", "33", "1E"] and links[0].closed
+
+
+# -- setting up a new lock (bind.py; the app's BindLockManager) ----------------------
+
+from locklyctl import bind as BIND                          # noqa: E402
+
+NEW_MC, NEW_ID, CARD = "13572468", "cc00112233445566778899aa", "24681357"
+
+
+def _plain_reply(payload_hex):
+    pl = bytes.fromhex(payload_hex)
+    fr = bytes([0xA1, 0xB2, 0xC3, 0xD4, (len(pl) + 7) % 256, (len(pl) + 7) // 256]) + pl
+    return (fr + bytes([P.crc8_lockly(fr)])).hex().upper()
+
+
+def _xor(data, key):
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+def _digits(s):
+    return bytes(int(c) for c in s)
+
+
+class _NewVisage:
+    """A Visage that isn't set up yet, answering the setup frames as the app
+    expects (bind.py): unmasks each with the card's code, checks the fields,
+    and answers 01 01 masked with the random digits it was sent."""
+
+    def __init__(self, code=CARD, reset=True):
+        self.code, self.reset, self.pin, self.zone = code, reset, None, None
+        self.seen = []
+
+    def answer(self, frame_hex):
+        raw = _check_frame(frame_hex)
+        body, kind = raw[6:-2], raw[-2]
+        if kind == 1:                                            # the old-format status check
+            if body[:2] == bytes.fromhex("0903"):
+                assert body[2:5] == bytes(3)                     # master code of zeros, so no mask
+                self.seen.append("wake")
+                return None                                      # the app carries on without an answer
+            enc = bytes.fromhex(P.encrypt_master_code(NEW_MC, NEW_ID))
+            plain = _xor(body, enc)
+            assert plain[:2] == bytes.fromhex("0908") and plain[2:10] == enc and len(plain) == 16
+            self.seen.append("old status")
+            return _plain_reply("0A09" + "00" * 8)
+        if kind == 3:
+            plain = _xor(body, _digits(self.code))
+            if plain[:3] == bytes.fromhex("010108"):
+                self.seen.append("01 01")
+                if not self.reset:
+                    return _plain_reply("0C01F8")
+                if plain[3:11] != _digits(self.code):
+                    return _plain_reply("0C01FF")
+                rnd = plain[11:19]
+                assert len(plain) == 19 and all(b < 10 for b in rnd)
+                self.reset = False
+                return _plain_reply(_xor(bytes.fromhex("0A0101") + _digits(NEW_MC) + bytes.fromhex(NEW_ID) + b"\x03",
+                                         rnd).hex())
+            if plain[:3] != bytes.fromhex("010408"):
+                self.seen.append("01 01")                        # another code's mask: garbage to this lock
+                return _plain_reply("0C01FF")
+            assert plain[3:11] == _digits(NEW_MC) and plain[11:].hex() == NEW_ID
+            self.seen.append("01 04")
+            return _plain_reply("0A010400")
+        d = _plain(frame_hex, NEW_MC, NEW_ID)
+        if d.startswith("1E"):
+            self.seen.append("status")
+            clock = d[20:32]                                     # the time it was sent: its clock is right
+            return _reply("1E", "01000E0B" + "A0" + "46FF46FF" + clock + "00" * 3 + "69" + "00" * 13, NEW_MC, NEW_ID)
+        if d.startswith("33"):
+            self.seen.append("zone")
+            assert d[20:22] == "01"                              # mode 1, set
+            self.zone = d[22:24]
+            return _reply("33", "00", NEW_MC, NEW_ID)
+        assert d.startswith("0102"), d
+        self.seen.append("pin")
+        self.pin = "".join(d[22 + i:24 + i][1] for i in range(0, 12, 2))
+        return _reply("0102", "".join("0" + c for c in self.pin), NEW_MC, NEW_ID)
+
+
+def _setup_client(lock, server=None):
+    """A client next to ``lock`` (a _NewVisage) and a stand-in for Lockly's
+    server: (client, calls, restore)."""
+    from locklyctl import ble as BLE
+    from locklyctl.transport import LocklyClient
+
+    class Link:
+        def __init__(self, name):
+            self.name, self.closed = name, False
+
+        def connect(self, **kw):
+            pass
+
+        def exchange(self, frame_hex):
+            return lock.answer(frame_hex)
+
+        def close(self):
+            self.closed = True
+    real = (BLE.BleLink, BLE.available)
+    BLE.BleLink, BLE.available = Link, (lambda: "")
+    c = LocklyClient("a@b")
+    c.locks = [{"ID": UUID, "na": "Old door", "mod": "PGK728WRHK", "blename": "PGK728WRHK000001", "mc": MC}]
+    calls = []
+    server = server or {}
+    c._post_para_des3 = lambda endpoint, obj, **kw: calls.append((endpoint, obj)) or dict(server.get(endpoint,
+                                                                                                    {"cod": "200"}))
+    c.load_devices = lambda: [*c.locks, {"ID": NEW_ID, "na": "New door", "mod": "PGK728WRHK"}]
+
+    def restore():
+        BLE.BleLink, BLE.available = real
+    return c, calls, restore
+
+
+def test_setup_frames_match_app():
+    assert BIND.card("SN:PGK728WRHK0012345 AC:24681357") == ("PGK728WRHK0012345", "24681357")
+    assert BIND.card(" 24681357 ") == ("", "24681357")
+    for bad in ("2468135", "AC:2468", "SN:x AC:24681357"):
+        try:
+            BIND.card(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(bad)
+    rnd = "90817263"
+    plain = _xor(_check_frame(BIND.build_set_master_code(CARD, rnd))[6:-2], _digits(CARD))
+    assert plain == bytes.fromhex("010108") + _digits(CARD) + _digits(rnd)          # SetMasterCodeCmd :51-62
+    assert _check_frame(BIND.build_set_master_code(CARD, rnd))[-2] == 3
+    reply = _plain_reply(_xor(bytes.fromhex("0A0101") + _digits(NEW_MC) + bytes.fromhex(NEW_ID) + b"\x03",
+                              _digits(rnd)).hex())
+    assert BIND.parse_set_master_code(reply, rnd) == {"ok": True, "mc": NEW_MC, "device_id": NEW_ID}
+    assert BIND.parse_set_master_code(_plain_reply("0C01F8"), rnd) == {"ok": False, "error": "F8"}
+    assert BIND.parse_set_master_code(None, rnd) == {"ok": False, "error": ""}
+    plain = _xor(_check_frame(BIND.build_start_master_code(CARD, NEW_MC, NEW_ID))[6:-2], _digits(CARD))
+    assert plain == bytes.fromhex("010408") + _digits(NEW_MC) + bytes.fromhex(NEW_ID)
+    assert BIND.start_master_code_ok(_plain_reply("0A010400")) and not BIND.start_master_code_ok(_plain_reply("0A010401"))
+    lock = {"mc": NEW_MC, "ID": NEW_ID}
+    enc = P.encrypt_master_code(NEW_MC, NEW_ID)
+    n = "00112233445566778899AABBCCDDEEFF"
+    assert _plain(BIND.build_set_admin_pin(lock, n, "246802"), NEW_MC, NEW_ID).startswith(
+        "0102" + f"{len(enc) // 2:02d}" + enc.upper() + "020406080002" + n)
+    assert BIND.admin_pin_ok(_reply("0102", "020406080002", NEW_MC, NEW_ID)) == (True, "set")
+    assert BIND.admin_pin_ok(_plain_reply("0C01FD"))[0] and not BIND.admin_pin_ok(_plain_reply("0C0102"))[0]
+    assert [BIND.account_tz(m) for m in (480, -210, 0)] == ["+8:00", "-3:30", "+0:00"]
+    assert BIND.model_for("PGK728WRHK004321") == "PGK728WRHK" and BIND.model_for("PGD7Y0001") is None
+
+
+def test_setting_up_a_new_visage():
+    with tempfile.TemporaryDirectory() as d:
+        _set_home(d)
+        lock = _NewVisage()
+        c, calls, restore = _setup_client(lock)
+        events = []
+        try:
+            r = c.add_lock("PGK728WRHK004321", f"SN:PGK728WRHK0012345 AC:{CARD}", name="New door", pin="246802",
+                           on_event=events.append)
+        finally:
+            restore()
+            _set_home(None)
+    assert lock.seen == ["wake", "01 01", "01 04", "old status", "status", "zone", "status", "pin", "status"]
+    assert lock.pin == "246802" and lock.zone == f"{F.time_zone_byte(int(F.computer_utc_offset_minutes() / 60)):02X}"
+    assert [e for e, _ in calls] == ["initialCode/add", "backac"]
+    assert calls[0][1] == {"deviceId": NEW_ID, "activationCode": CARD, "bleName": "PGK728WRHK004321"}
+    rec = calls[1][1]["arr"][0]
+    assert calls[1][1]["acct"] == "a@b" and len(calls[1][1]["arr"]) == 1
+    assert {k: rec[k] for k in ("ID", "mc", "hc", "na", "mod", "blename", "serialNum", "audio")} == {
+        "ID": NEW_ID, "mc": NEW_MC, "hc": "246802", "na": "New door", "mod": "PGK728WRHK",
+        "blename": "PGK728WRHK004321", "serialNum": "PGK728WRHK0012345", "audio": 1}
+    assert rec["tz"] == BIND.account_tz(F.computer_utc_offset_minutes())
+    assert r["lock"]["ID"] == NEW_ID and r["zone"] and r["registered"]
+    text = " ".join(e["text"] for e in events)
+    assert CARD not in text and NEW_MC not in text and "246802" not in text      # never shown
+
+
+def test_setup_refusals_and_a_second_run():
+    from locklyctl.transport import LocklyError
+
+    def refused(lock, **kw):
+        c, calls, restore = _setup_client(lock, kw.pop("server", None))
+        try:
+            c.add_lock(kw.pop("ble", "PGK728WRHK004321"), kw.pop("code", CARD), name="Door", pin=kw.pop("pin", "246802"))
+        except LocklyError as e:
+            return str(e), calls
+        finally:
+            restore()
+        raise AssertionError("it was set up")
+    with tempfile.TemporaryDirectory() as d:
+        _set_home(d)
+        try:
+            why, calls = refused(_NewVisage(reset=False))
+            assert "isn't reset" in why and calls == []
+            why, calls = refused(_NewVisage(code="11112222"))
+            assert "Activation Code is wrong (FF)" in why and calls == []
+            assert "already on this account" in refused(_NewVisage(), ble="PGK728WRHK000001")[0]
+            assert "isn't ported" in refused(_NewVisage(), ble="PGD7Y000123")[0]
+            assert "6 or more digits" in refused(_NewVisage(), pin="1234")[0]
+            assert "8 digits" in refused(_NewVisage(), code="1234")[0]
+            lock = _NewVisage()                                    # the account refuses: kept for a second run
+            why, calls = refused(lock, server={"backac": {"cod": "500"}})
+            assert "run the same setup again" in why and [e for e, _ in calls] == ["initialCode/add", "backac"]
+            assert config_pending()["ID"] == NEW_ID
+            c, calls, restore = _setup_client(lock)               # the lock now answers F8: carry on
+            try:
+                r = c.add_lock("PGK728WRHK004321", CARD, name="Door", pin="246802")
+            finally:
+                restore()
+            assert r["lock"]["ID"] == NEW_ID and lock.seen.count("01 04") == 1 and "bind_pending" not in config_all()
+        finally:
+            _set_home(None)
+
+
+def config_all():
+    from locklyctl import config
+    return config.load_config()
+
+
+def config_pending():
+    return config_all().get("bind_pending") or {}

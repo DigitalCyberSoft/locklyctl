@@ -14,6 +14,7 @@
     locklyctl wifi --ssid NAME --forget
     locklyctl timezone [LOCK ...]
     locklyctl timezone LOCK ... --sync [--yes]
+    locklyctl add [BLUETOOTH_NAME --code CODE --name NAME [--pin-file F] [--yes]]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -121,6 +122,14 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--sync", action="store_true",
                    help="give each named lock its time zone (the account's, else this computer's), as the "
                         "app does after setup and firmware updates, then the time (wakes it)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    p = sub.add_parser("add", help="set up a new or reset lock over Bluetooth from this computer and put it "
+                                   "on your account, as the app does; without a name, list the locks nearby "
+                                   "that aren't on it")
+    p.add_argument("ble_name", nargs="?", metavar="BLUETOOTH_NAME", help="the lock's Bluetooth name, from the list")
+    p.add_argument("--code", help="the Activation Card's 8 digits, or its QR text (SN:... AC:...); asked if left out")
+    p.add_argument("--name", help="the door's name on your account; asked if left out")
+    p.add_argument("--pin-file", help="read the admin PIN (6 or more digits) from this file; asked if left out")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
                                         "runs (wakes it)")
@@ -443,5 +452,51 @@ def _timezone(client: LocklyClient, args) -> int:
     return EXIT_FAIL if failed else EXIT_OK
 
 
+def _add(client: LocklyClient, args) -> int:
+    if not args.ble_name:
+        try:
+            found = client.nearby_new_locks()
+        except BLE.BluetoothError as e:
+            print(C.red(f"  {e}"))
+            return EXIT_FAIL
+        if not found:
+            print("  no lock that isn't on your account is in Bluetooth range")
+        for d in found:
+            print(f"  {d['rssi']:>4} dBm  {d['name']}"
+                  + ("" if d["model"] else C.dim("  (setting up this model isn't ported)")))
+        return EXIT_OK
+    import getpass
+    ask = sys.stdin.isatty()
+    if not ask and not (args.code and args.name and args.pin_file and args.yes):
+        raise UsageError("add needs --code, --name, --pin-file and --yes when it can't ask")
+    code = args.code or getpass.getpass("  Activation Code (8 digits on the card): ")
+    name = args.name or input("  Door name: ").strip()
+    if args.pin_file:
+        with open(args.pin_file) as f:
+            pin = f.read().strip()
+    else:
+        pin = getpass.getpass("  Admin PIN for the lock (6 or more digits): ")
+        if getpass.getpass("  The same PIN again: ") != pin:
+            raise UsageError("the two PINs differ")
+    if not args.yes and not C.confirm(f"  set up {C.bold(args.ble_name)} as {name!r} on your account? "
+                                      "(keep this computer next to it)", default=False):
+        return EXIT_OK
+
+    def progress(event: dict) -> None:
+        print(C.dim(f"    {event['text']}"), flush=True)
+    try:
+        r = client.add_lock(args.ble_name, code, name=name, pin=pin, on_event=progress)
+    except BLE.BluetoothError as e:
+        print(C.red(f"  {e}"))
+        return EXIT_FAIL
+    print(C.green(f"  {_name(r['lock'])}: set up and on your account ✓"))
+    if not r["zone"]:
+        print(C.yellow(f"  It didn't take the time zone; run: locklyctl timezone {_name(r['lock'])!r} --sync"))
+    if not r["registered"]:
+        print(C.dim("  Lockly didn't record the Activation Code (initialCode/add); the lock works without it."))
+    return EXIT_OK
+
+
 _HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
-             "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone}
+             "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
+             "add": _add}

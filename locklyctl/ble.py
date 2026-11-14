@@ -119,6 +119,30 @@ def _name_of(device, adv) -> str:
     return ((adv.local_name if adv else None) or device.name or "").strip()
 
 
+def nearby(timeout: float = SCAN_S) -> list[dict]:
+    """Devices advertising the locks' service (fff0) by name, strongest first:
+    [{"name", "rssi"}]. Listens only. A lock that isn't set up yet shows up
+    here, as in the app's setup scan (ManualScanBleActivity :385). Raises
+    BluetoothError when Bluetooth can't be used."""
+    from bleak import BleakScanner
+    from bleak.exc import BleakError
+
+    async def scan() -> list[dict]:
+        found = await BleakScanner.discover(timeout=timeout, return_adv=True, service_uuids=[SERVICE])
+        best: dict[str, int] = {}
+        for device, adv in found.values():
+            name = _name_of(device, adv)
+            if name and SERVICE in (u.lower() for u in (adv.service_uuids or [])):
+                _heard[name] = time.monotonic()
+                best[name] = max(best.get(name, adv.rssi), adv.rssi)
+        return sorted(({"name": n, "rssi": r} for n, r in best.items()), key=lambda x: -x["rssi"])
+    try:
+        with _SCAN_LOCK:
+            return asyncio.run(scan())
+    except BleakError as e:
+        raise BluetoothError(f"Bluetooth: {e}") from e
+
+
 def in_range(name: str, timeout: float = SCAN_S) -> bool:
     """Whether a device advertising this name is heard within ``timeout``.
     Listens only; nothing is sent to the lock. Raises BluetoothError when
