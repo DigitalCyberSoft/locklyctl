@@ -357,13 +357,14 @@ def _firmware(client: LocklyClient, args) -> int:
     multi = offer["kind"] == F.FW_MULTI_PART
     on_lock = F.firmware_display_versions(lock, plan["status"], offer["kind"])
     print(f"  {_name(lock)}: Lockly offers {'release ' if multi else ''}{offer['release']}")
+    app = ", Lockly app" if offer["kind"] == F.FW_CAMERA else ", Lockly app at the door"
     for p in offer["parts"]:
-        current = on_lock.get(p["part"]) or "?"
-        newer = F.version_lower(on_lock.get(p["part"]), p["version"])
+        known = on_lock.get(p["part"])
+        newer = F.version_lower(known, p["version"])
         by_phone = not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock))
-        print(f"    {p['part']:<7} {current:>8} → {p['version']:<9} "
-              + (C.yellow("newer") if newer else C.dim("current"))
-              + C.dim(", Lockly app at the door" if by_phone else ", over Wi-Fi"))
+        print(f"    {p['part']:<7} {known or '?':>8} → {p['version']:<9} "
+              + (C.yellow("newer") if newer else C.dim("current" if known else "not reported"))
+              + C.dim(app if by_phone else ", over Wi-Fi"))
     send = ", ".join(f"{p['part']} {p['version']}" for p in plan["send"])
     if not args.install:
         print(C.dim(f"  --install sends over Wi-Fi: {send}") if send and not plan["blocked"]

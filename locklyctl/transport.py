@@ -1029,8 +1029,10 @@ class LocklyClient:
         return ok, detail
 
     # -- firmware: what Lockly offers (cloud only; no lock is woken) -----------
-    # Request shapes as app 3.3.4 sends them; all three were answered live on
-    # 2026-11-12 (a Visage, a PGD7Y and a Vision).
+    # Request shapes as app 3.3.4 sends them. Answered live: fwver/msh/new (a
+    # Visage), lockly/syspara (a PGD7Y) and fwver/new (a Vision) on 2026-11-12;
+    # vision/camgwver (the Vision, whose camera login makes it a camera lock)
+    # on 2026-11-14.
 
     _FW_PARTS = (("front", "front"), ("back", "back"), ("hub", "wifi"), ("ble", "ble"),
                  ("screen", "screen"))
@@ -1045,7 +1047,9 @@ class LocklyClient:
         if kind == F.FW_MULTI_PART:
             endpoint, req = "fwver/msh/new", {"acct": self.email, "did": lock["ID"],
                                               "model": int(lock_type or F._KNOWN_LOCK_TYPES.get(model.upper(), 0))}
-        else:
+        elif kind == F.FW_CAMERA:           # PGNetManager.getNewVer
+            endpoint, req = "vision/camgwver", {"acct": self.email, "dv": lock["ID"]}
+        else:                               # PGNetManager.getFirmwareNewVersion
             endpoint, req = "fwver/new", {"acct": self.email, "dv": lock["ID"]}
         assert self.des3_key is not None, "des3 key not available — call load_devices() first"
         para = P.des3_encrypt(self.des3_key, json.dumps(req, separators=(",", ":")))
@@ -1077,12 +1081,18 @@ class LocklyClient:
             out["release"] = body.get("value") or None
             if out["release"]:
                 out["parts"].append({"part": "main", "version": out["release"], "size_kb": None})
-        else:
+        else:       # fwver/new (FirmwareNewVersionBean) or vision/camgwver (GetNewVerBean)
             out["release"] = body.get("ver") or None
+            sizes = {"front": body.get("short_desc"), "back": body.get("back_short_desc")}
             for key, part in (("ver", "main"), ("lkmver", "front"), ("lksver", "back"),
                               ("camver", "camera"), ("gwver", "gateway")):
                 if body.get(key):
-                    out["parts"].append({"part": part, "version": body[key], "size_kb": None})
+                    out["parts"].append({"part": part, "version": body[key],
+                                         "size_kb": _int_or_none(sizes.get(part)) if kind == F.FW_FRONT_BACK else None})
+            # GetNewVerBean.isBleUpdate: the chip's file comes only with all five fields
+            if kind == F.FW_CAMERA and all(body.get("ble" + k) for k in ("Ver", "Url", "Name", "Size", "Crc")):
+                out["parts"].append({"part": "ble", "version": body["bleVer"],
+                                     "size_kb": _int_or_none(body["bleSize"])})
         return out
 
     # -- firmware: install over Wi-Fi (multi-part locks), as app 3.3.4 does ------
@@ -1104,6 +1114,10 @@ class LocklyClient:
         offer = self._offer_from_reply(lock, body)
         plan = {"offer": offer, "status": st, "onLock": F.firmware_versions_on_lock(st), "send": [],
                 "downloadUrl": str(body.get("downloadUrl") or ""), "files": [], "blocked": ""}
+        if offer["kind"] == F.FW_CAMERA:
+            plan["blocked"] = ("A camera Vision's firmware is updated by the Lockly app: Lockly gives only its "
+                               "versions, not the files, except the Bluetooth chip's.")
+            return plan
         if offer["kind"] != F.FW_MULTI_PART:
             plan["blocked"] = "This lock's firmware is installed from a phone over Bluetooth: use the Lockly app."
             return plan

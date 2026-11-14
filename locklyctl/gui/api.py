@@ -774,6 +774,7 @@ class Api:
                   "newer": F.version_lower(on_lock.get(p["part"]), p["version"]),
                   "sizeKb": p["size_kb"],
                   "byPhone": not multi or (p["part"] == "ble" and F.bluetooth_chip_needs_phone(lock)),
+                  "byApp": offer["kind"] == F.FW_CAMERA,     # through the app, not said to be at the door
                   # The chip's own update (Dialog SUOTA) from this computer, when it has Bluetooth.
                   "byBluetooth": multi and p["part"] == "ble" and not BLE.available()
                                  and not plan["send"]}       # the app does the chip only after the rest

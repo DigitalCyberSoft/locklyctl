@@ -1117,7 +1117,7 @@ $("btn-firmware").addEventListener("click", async (ev) => {
         h("td", {}, p.current || h("span", { class: "muted" }, "not reported")),
         h("td", { class: p.newer ? "bad" : "" }, p.offered, p.newer ? " (newer)" : ""),
         h("td", { class: "muted" }, p.byBluetooth ? "Bluetooth, from this computer"
-          : p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
+          : p.byApp ? "Lockly app" : p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
       const install = r.install;
       const byPhone = r.parts.filter((p) => p.newer && p.byPhone && !p.byBluetooth).map((p) => p.name);
       const chip = r.parts.find((p) => p.newer && p.byBluetooth);

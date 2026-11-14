@@ -626,17 +626,30 @@ def uses_event_log(lock: dict) -> bool:
 
 
 # ── firmware: which check the app uses (FirmwareUpgradeCheckerRepositoryImpl.b,
-# app 3.3.4). Multi-part Wi-Fi locks ask fwver/msh/new and update over MQTT;
-# camera locks ask fwver/new; the rest ask lockly/syspara and are updated by
-# the phone over Bluetooth. PGD238T joins the multi-part list from firmware
-# 1.01.01; it's left out rather than guessed.
+# app 3.3.4), in its order: multi-part Wi-Fi locks ask fwver/msh/new and update
+# over MQTT; front/back locks (isSupport103OTA) ask fwver/new unless they are
+# camera locks; camera locks (a Vision with its camera's P2P login) ask
+# vision/camgwver; the rest ask lockly/syspara and are updated by the phone over
+# Bluetooth. PGD238T joins the multi-part list from firmware 1.01.01; it's left
+# out rather than guessed.
 FW_MULTI_PART = "multi"
+FW_FRONT_BACK = "frontback"
 FW_CAMERA = "camera"
 FW_SINGLE = "single"
 _MULTI_PART_MODELS = {"PGK7SWH", "PGK7SWHK", "PGK728WHK", "PGK728WRHK", "PGD728FN25", "PGK6SWH",
                       "PGD679LEW", "PGK628WH", "PGD628FG25", "PGK728WKL", "PGD728FG25", "PGI301",
                       "PGD7AWG25", "PGD7YWG25"}
-_CAMERA_MODELS = {"PGK798HK"}            # isCameraLock: only the model checked live
+# The app tests lock types; these are their model names, from LockTypeMapper or,
+# for types it lacks, from the BluetoothBean test (isPGK798HK is type 117).
+# isSupport103OTA (BluetoothBeanManager:272):
+_FRONT_BACK_MODELS = {"PGD679", "PGD698L", "PGD698D", "PGD898", "PGD899", "PGD698LL", "PGD698DL",
+                      "PGD898DAF", "PGD898S", "PGD679LZ", "PGD898X", "PGD897D", "PGD899X", "PGK6SWH",
+                      "PGD673DA", "PGD899G", "PGD679LEW", "PGK628WH", "PGD679DZ", "PGK798HK",
+                      "PGD728FNG25", "PGD728FG25", "PGK7SWHK", "PGK728WHK", "PGK728WRHK"}
+# isVision (BluetoothBean:4070):
+_VISION_MODELS = {"PGD798", "PGI303FC", "PGD698L", "PGD698D", "PGD898", "PGD798C", "PGD798NV", "PGD899",
+                  "PGD798D", "PGD698LL", "PGD698DL", "PGD898DAF", "PGD898S", "PGD898X", "PGD897D",
+                  "PGD899X", "PGD899G", "PGD798UZ", "PGK798HK"}
 # isSupportSuotaUpgrade: the Bluetooth chip is flashed by the phone, not over MQTT
 _SUOTA_MODELS = {"PGK728WHK", "PGK728WRHK", "PGK7SWHK"}
 # Lock types the multi-part check sends as "model" when no live status is at
@@ -644,11 +657,22 @@ _SUOTA_MODELS = {"PGK728WHK", "PGK728WRHK", "PGK7SWHK"}
 _KNOWN_LOCK_TYPES = {"PGK728WRHK": 105}
 
 
+def is_camera_lock(lock: dict) -> bool:
+    """BluetoothBean.isCameraLock: a Vision whose camera's P2P login is set. The
+    account record carries it as p2pdid and p2ppw; the app restores its
+    aipnDid and aipnPassword from them (UserManager, app 3.3.4)."""
+    return (str(lock.get("mod") or "").upper() in _VISION_MODELS
+            and bool(lock.get("p2pdid")) and bool(lock.get("p2ppw")))
+
+
 def firmware_check_kind(lock: dict) -> str:
     model = str(lock.get("mod") or "").upper()
     if model in _MULTI_PART_MODELS:
         return FW_MULTI_PART
-    return FW_CAMERA if model in _CAMERA_MODELS else FW_SINGLE
+    camera = is_camera_lock(lock)
+    if model in _FRONT_BACK_MODELS and not camera:
+        return FW_FRONT_BACK
+    return FW_CAMERA if camera else FW_SINGLE
 
 
 def bluetooth_chip_needs_phone(lock: dict) -> bool:
@@ -761,9 +785,13 @@ def firmware_versions_on_lock(status: dict) -> dict:
 
 
 def firmware_display_versions(lock: dict, status: dict, kind: str) -> dict:
-    """The lock's version for each part an offer can name, to show beside it."""
+    """The lock's version for each part an offer can name, to show beside it.
+    A camera's and gateway's come from the account record, where "0" means
+    not reported."""
+    reported = lambda v: "" if str(v or "") in ("", "0") else str(v)
     on_lock = {**firmware_versions_on_lock(status),
-               "main": status.get("firmware_version") or str(lock.get("fwv") or "")}
+               "main": status.get("firmware_version") or str(lock.get("fwv") or ""),
+               "camera": reported(lock.get("camver")), "gateway": reported(lock.get("gwver"))}
     if kind != FW_MULTI_PART:
         on_lock.pop("front")            # front = main version is the multi-part app's reading only
     return on_lock

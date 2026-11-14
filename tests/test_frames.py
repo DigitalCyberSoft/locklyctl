@@ -144,6 +144,12 @@ def test_firmware_offer_shapes():
                           "screenVer": "", "screenUrl": "", "screenName": "", "screenSize": None},
         "lockly/syspara": {"cod": "200", "para": "firmware_ver", "value": "2.02.80", "notify": "N"},
         "fwver/new": {"cod": "920", "msg": "920"},
+        # shaped as Lockly answered the Vision on 2026-11-14 (values made up)
+        "vision/camgwver": {"cod": "200", "AlertLevel": 1, "mod": "PGK798HK", "ver": "1.14.30",
+                            "title": "Firmware Update Required", "content": "Update now",
+                            "lkmver": "1.00.60", "lksver": "1.00.17", "camver": "0079", "gwver": "0143",
+                            "bleVer": "1.14.29", "bleUrl": "u", "bleName": "l.img", "bleSize": "280",
+                            "bleCrc": "2BE517", "vgurl": ""},
     }
     sent = {}
     c._post = lambda ep, body, **kw: sent.setdefault(ep, body) and replies[ep]
@@ -156,8 +162,33 @@ def test_firmware_offer_shapes():
     assert o["kind"] == F.FW_SINGLE and o["parts"] == [{"part": "main", "version": "2.02.80", "size_kb": None}]
     assert sent["lockly/syspara"]["para"] == "firmware_ver" and sent["lockly/syspara"]["did"] == UUID
     assert c.firmware_offer({"ID": UUID, "mod": "PGK798HK"})["release"] is None       # 920: nothing newer
+    assert "fwver/new" in sent and "vision/camgwver" not in sent       # no camera login: front/back check
+    o = c.firmware_offer({"ID": UUID, "mod": "PGK798HK", "p2pdid": "d", "p2ppw": "p"})
+    assert o["kind"] == F.FW_CAMERA and o["release"] == "1.14.30" and o["title"] == "Firmware Update Required"
+    assert [(p["part"], p["version"], p["size_kb"]) for p in o["parts"]] == [
+        ("main", "1.14.30", None), ("front", "1.00.60", None), ("back", "1.00.17", None),
+        ("camera", "0079", None), ("gateway", "0143", None), ("ble", "1.14.29", 280)]
+    assert sent["vision/camgwver"]["mod"] == "PGK798HK" and "para" in sent["vision/camgwver"]
+    replies["vision/camgwver"] = {**replies["vision/camgwver"], "bleCrc": ""}    # isBleUpdate: all five
+    o = c.firmware_offer({"ID": UUID, "mod": "PGK798HK", "p2pdid": "d", "p2ppw": "p"})
+    assert "ble" not in [p["part"] for p in o["parts"]]
     assert F.version_lower("1.00.72", "1.00.76") and not F.version_lower("1.14.24", "1.00.95")
     assert not F.version_lower("3.2.02.02", "2.02.72")                               # lengths differ
+
+
+def test_firmware_check_kind():
+    """The app's order (FirmwareUpgradeCheckerRepositoryImpl.b, app 3.3.4):
+    multi-part, then front/back unless it's a camera lock, then camera, then
+    single. A camera lock is a Vision with its camera's P2P login."""
+    cam = {"p2pdid": "did", "p2ppw": "pw"}
+    kind = lambda mod, **kw: F.firmware_check_kind({"mod": mod, **kw})
+    assert kind("PGK728WRHK") == kind("PGK728WRHK", **cam) == F.FW_MULTI_PART
+    assert kind("PGK798HK") == kind("PGK798HK", p2pdid="did", p2ppw="") == F.FW_FRONT_BACK
+    assert kind("PGK798HK", **cam) == kind("pgd798", **cam) == F.FW_CAMERA
+    assert kind("PGD798") == kind("PGD7Y") == kind("PGD7Y", **cam) == F.FW_SINGLE
+    assert kind("PGD679") == F.FW_FRONT_BACK
+    on_lock = F.firmware_display_versions({"fwv": "1.14.16", "camver": "0", "gwver": "0142"}, {}, F.FW_CAMERA)
+    assert (on_lock["main"], on_lock["camera"], on_lock["gateway"]) == ("1.14.16", "", "0142")
 
 
 def test_plan_keep_unlocked():
