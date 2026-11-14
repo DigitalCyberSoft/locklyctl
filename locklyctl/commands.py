@@ -409,8 +409,8 @@ def _welcome(client: LocklyClient, args) -> int:
 def _api(client: LocklyClient):
     """The app's own shaping of people, activity and keep-unlocked windows,
     over this command's signed-in client."""
-    from .gui.api import Api
-    return Api.for_client(client)
+    from .gui.api import over_client
+    return over_client(client)
 
 
 def _keep(client: LocklyClient, args) -> int:

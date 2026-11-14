@@ -706,8 +706,8 @@ def do_face_probe(client: LocklyClient, lock: dict) -> None:
 
 def _api(client: LocklyClient):
     """The app's own keep-unlocked windows, over this menu's signed-in client."""
-    from .gui.api import Api
-    return Api.for_client(client)
+    from .gui.api import over_client
+    return over_client(client)
 
 
 def do_keep(client: LocklyClient, lock: dict) -> None:

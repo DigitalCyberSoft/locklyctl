@@ -238,14 +238,6 @@ class Api:
         self._fw_jobs: dict[str, dict] = {}     # lock id → firmware install in progress or done
         self._fw_lock = threading.Lock()
 
-    @classmethod
-    def for_client(cls, client: LocklyClient) -> "Api":
-        """An Api over a client that is already signed in: the command line's
-        way to the same people, activity and keep-unlocked windows the app shows."""
-        api = cls()
-        api._client = client
-        return api
-
     # ── session ──────────────────────────────────────────────────────────
 
     def session(self) -> dict:
@@ -1203,3 +1195,13 @@ class Api:
         return {"model": lock.get("mod") or "", "hub": lock.get("hubid") or "",
                 "cachedOk": bool(cached), "liveOk": bool(live),
                 "trail": c.last_transport_trail(), "lock": self._view(lock)}
+
+
+def over_client(client: LocklyClient) -> Api:
+    """An Api over a client that is already signed in: the command line's way
+    to the same people, activity and keep-unlocked windows the app shows. A
+    function, not a method, so the page's bridge doesn't offer it."""
+    api = Api()
+    api._client = client
+    return api
+

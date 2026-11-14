@@ -251,3 +251,15 @@ def test_keep_unlocked_from_the_menu(monkeypatch, capsys):
     cli.lock_menu(c, c.locks[1])
     assert len(c.sent) == 2 and "ended, and locked" in capsys.readouterr().out
     assert B2 not in config.load_config()["keep_unlocked"]
+
+
+def test_the_page_is_not_offered_the_command_lines_way_in():
+    from locklyctl.gui.api import Api, over_client
+    from locklyctl.gui.server import exposed_methods
+    offered = exposed_methods(Api(client_factory=FakeClient))
+    assert "over_client" not in offered and "for_client" not in offered
+    # what the page does call, old and new
+    assert {"session", "unlock", "lock", "capabilities", "door_access", "suspend_person", "resume_person",
+            "unlock_app", "app_lock", "set_app_lock", "remove_app_lock", "lock_now", "erase_saved_data"} <= offered
+    c = FakeClient("a@b")
+    assert over_client(c)._c() is c
