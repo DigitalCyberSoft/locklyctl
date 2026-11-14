@@ -42,6 +42,7 @@ way the official app does.
 | The lock's own time zone (0x33), which the Lockly app gives a lock when it's set up and after a firmware update: `locklyctl timezone` shows each lock's zone in the Lockly account next to this computer's, and `--sync` (or "Give it its time zone" under Maintenance) gives a lock the account's zone, then the time | ✅ sent remotely to six locks on 2026-11-14 (`timezone ... --sync`): each acknowledged the zone, then the time. Two locks that were offline fell back to Bluetooth and were out of range. The frame matches the app's field by field (SetTimeZoneCmd). Whole hours only, as the app sends it. Only models the app sends it to by model alone (the Visage among them; not the PGD7Y or the Vision). The lock's own setting can't be read (the app never reads it), so it isn't compared. It isn't sent after locklyctl's firmware installs yet. Changing the zone in the Lockly account isn't built (the app sends the whole lock record for that) |
 | Bluetooth straight from this computer to a lock next to it: status checks, which also set its clock, and reaching it after a firmware install if its Wi-Fi doesn't come back | ⚠️ run on a Visage (2026-11-13): found by name, connected in 6.4 s, answered status checks; with the Auto setting it reached a Visage whose Wi-Fi was offline in 21 s. Such a door is then asked over Bluetooth first for 5 minutes, and clicking it within a minute of a Bluetooth answer doesn't connect again (the lock drops an idle Bluetooth connection after 6-8 s, so every check is a new connection). Only status checks go over Bluetooth: commands that change the lock don't yet. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
 | Connection setting: Auto (hub or Lockly's server, then Bluetooth from this computer for a status check that got no answer), Remote only, or Bluetooth only (status checks only) | ✅ the app's Settings, `--connection` on the command line; Auto is the default. An app with no Bluetooth (the packaged and phone apps) says so there instead of offering the choice |
+| App lock: a passcode asked for when the app starts, which seals what locklyctl saves on the device (Settings, App lock) | ✅ tested against stand-ins, and run with the real page and backend on Linux (2026-11-15): a sealed config started at the unlock screen, refused a wrong passcode and opened with the right one in 0.15 s. ⚠️ not run on a phone, Windows or macOS. See [App lock](#app-lock) for what it does and doesn't protect |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
 | Access log (last 7 days), in the Lockly app's own words | ✅ Visages: from Lockly's event log, which the lock fills over its Wi-Fi, as the Lockly app reads it (checked against a lock's own log). Other locks: from Lockly's cloud log, which only has what was uploaded to it, so often empty; reading those locks' own logs isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
@@ -137,6 +138,50 @@ go through a hub or Lockly's server and says so for the rest.
 Phones have no keyring, so a remembered sign-in is kept in the app's private
 storage, which other apps can't read.
 
+## App lock
+
+In **Settings**, **App lock** sets a passcode (4 characters or more: digits,
+letters or both). From then on locklyctl asks for it when it starts, and the
+file it saves on the device is sealed with it: the remembered sign-in, saved
+Wi-Fi passwords, favorites, the door list's order, merged people and paused
+people's schedules. **Lock now** asks for it again without quitting.
+
+- **How.** scrypt (N 65536, r 8, p 1: 64 MiB and about 0.1 s a guess on a
+  2025 desktop core) turns the passcode into two keys; the config is
+  encrypted with AES-256-CTR and authenticated with HMAC-SHA256, the
+  construction backups use. The keys stay in memory while the app is
+  unlocked; the passcode isn't kept.
+- **The keyring.** Turning the lock on moves the remembered sign-in and saved
+  Wi-Fi passwords out of the OS keyring into the sealed file, and keeps new
+  ones there: the desktop session opens the keyring without the passcode.
+  Turning it off moves the sign-in back.
+- **Wrong passcodes.** The fifth in a row starts a 30 s wait that doubles
+  with each further one, up to 15 minutes, and survives a restart.
+- **Forgotten.** Nothing recovers it. "Forgot the passcode?" on the unlock
+  screen erases what locklyctl saved on the device; the locks and the Lockly
+  account aren't touched, and you sign in again.
+- **Command line and MCP.** Both use the same file, so with the lock on the
+  menus and commands ask for the passcode at a terminal. Where nothing can
+  ask (cron, `locklyctl-mcp`), give `--passcode-file FILE` or set
+  `LOCKLYCTL_PASSCODE_FILE`: the file's first line is the passcode, and
+  anyone who can read that file can open the saved data.
+
+What it doesn't protect:
+
+- **A short PIN against a copied file.** At 0.104 s a guess (measured on one
+  core of a 2025 desktop), every 4-digit PIN takes 17 minutes and every
+  6-digit PIN 29 hours; more cores divide that. The wait after wrong
+  passcodes only slows guessing in the app. A long passcode is what stops
+  someone who has the file.
+- **An app that's open.** Once unlocked it stays unlocked until it's quit or
+  **Lock now** is pressed: it doesn't lock by itself after a while, and a
+  phone keeps an app open in the background.
+- **Other files.** The log (`locklyctl.log`: status and error codes, device
+  IDs and firmware progress, but no password, PIN, master code or sign-in),
+  downloaded firmware, and backups (sealed with their own passphrase) aren't
+  part of it. Data written before the lock was turned on may still be
+  recoverable from the disk.
+
 ## AI assistants (MCP)
 
 `locklyctl-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
@@ -181,7 +226,8 @@ the credential goes to the OS keyring (with the `keyring` extra), otherwise to
 `~/.locklyctl/config.json` (owner-only). It's equivalent to your password, so
 use `--logout` on shared machines. `--debug` prints protocol logging.
 `--connection auto|remote|bluetooth` overrides the saved connection setting
-for one run.
+for one run. With an [app lock](#app-lock) set, the passcode is asked for
+first, or read from `--passcode-file FILE`.
 
 Once a login is saved, single actions run without the menus:
 
@@ -281,6 +327,9 @@ Protocol reference: <https://digitalcybersoft.github.io/lockly_api_docs/>.
 
 - A lock's master code and UUID together can forge any command. locklyctl only
   holds them in memory while it runs.
+- The remembered sign-in is as good as your Lockly password. Without an
+  [app lock](#app-lock) it sits in the OS keyring, or on a phone in the app's
+  private storage, readable by anything that can read those.
 - Commands marked ⚠️ are correctly framed but their contents aren't proven on
   a lock. A wrong field is most likely rejected, but try them on a door you
   can physically reach first.

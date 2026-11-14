@@ -127,6 +127,9 @@ h1, h2, p { margin: 0; }
   border-top: 4px solid var(--brass); padding: 2rem 1.75rem 1.5rem;
 }
 .signin-title { font-size: 2rem; }
+.forgot { font-size: var(--fs-sm); color: var(--ink-soft); }
+.forgot summary { cursor: pointer; min-height: 2rem; }
+.forgot[open] { display: grid; gap: 0.75rem; justify-items: start; }
 
 /* ── layout ───────────────────────────────────────────────────────── */
 .app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }

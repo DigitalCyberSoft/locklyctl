@@ -20,6 +20,7 @@ from .. import config
 from .. import features as F
 from .. import guard as G
 from .. import protocol as P
+from .. import vault
 from .. import view as V
 from .. import wifi_passwords as W
 from ..const import CONNECTIONS
@@ -240,7 +241,11 @@ class Api:
     # ── session ──────────────────────────────────────────────────────────
 
     def session(self) -> dict:
-        """Sign in silently with the saved login, if there is one."""
+        """Sign in silently with the saved login, if there is one. With the
+        app lock on and this run not unlocked yet, nothing can be read:
+        {"locked": True, "wait": seconds until a passcode is taken}."""
+        if config.locked():
+            return {"signedIn": False, "locked": True, "wait": config.unlock_wait(), "email": ""}
         cfg = config.load_config()
         email, pw_hash = cfg.get("email"), config.load_credential(cfg)
         if not (email and pw_hash):
@@ -287,6 +292,58 @@ class Api:
                 self._client.close()
             finally:
                 self._client = None
+
+    # ── the app lock: a passcode that seals what's saved on this device ──
+
+    def unlock_app(self, passcode: str) -> dict:
+        """Open the sealed data with the app passcode, then sign in as
+        session() does. A wrong passcode raises ("Wrong passcode."), and after
+        config.FREE_TRIES of them in a row there is a wait before the next."""
+        config.unlock(passcode or "")
+        return self.session()
+
+    def app_lock(self) -> dict:
+        """{"on": a passcode seals this device's saved data, "available": why
+        one can't be used here ("" when it can)}."""
+        return {"on": config.sealed(), "available": vault.available()}
+
+    def set_app_lock(self, new: str, current: str = "") -> dict:
+        """Turn the app lock on, or change its passcode (``current`` required).
+        ``strength`` is vault.strength's word for the new one; ``leftInKeyring``
+        names secrets that were copied into the sealed data but couldn't be
+        deleted from the OS keyring."""
+        left = config.set_passcode(new, current or None)
+        return {"on": True, "strength": vault.strength(new), "leftInKeyring": left}
+
+    def remove_app_lock(self, current: str) -> dict:
+        """Turn the app lock off; the saved sign-in goes back to the OS keyring
+        where there is one (as session() would move it)."""
+        config.remove_passcode(current or "")
+        cfg = config.load_config()
+        if cfg.get("pw_hash") and config._keyring():
+            config._save_credential(cfg, cfg.get("email", ""), cfg["pw_hash"])
+        return {"on": False}
+
+    def lock_now(self) -> dict:
+        """End the session and forget the app lock's keys: the passcode is
+        asked for again. Refused while a firmware install runs, which this
+        would cut off from the lock."""
+        if not config.sealed():
+            raise ValueError("There's no app passcode yet. Set one in Settings first.")
+        self._refuse_while_installing("Locking the app")
+        self.close()
+        config.lock()
+        return {"locked": True, "wait": config.unlock_wait()}
+
+    def erase_saved_data(self) -> dict:
+        """For a forgotten passcode: delete what locklyctl saved on this
+        device, so it can be signed in to afresh. Only while locked; unlocked,
+        the passcode can be changed or turned off instead."""
+        if not config.locked():
+            raise ValueError("locklyctl isn't locked. Change or turn off the passcode in Settings instead.")
+        self._refuse_while_installing("Erasing the saved data")
+        config.erase()
+        return {"signedIn": False, "email": ""}
 
     def _set_client(self, client: LocklyClient) -> None:
         self._refuse_while_installing("Signing in again")

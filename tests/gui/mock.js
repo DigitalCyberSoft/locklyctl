@@ -57,6 +57,8 @@ const access = (lockId, userId, person, role, when, extra = {}) => {
     hasPin: false, pin: "", fingerprints: 0, faces: 0, cards: 0, twoStep: false, recordKey: "", ...extra };
 };
 let roster = [];
+// The app lock: &scene=locked starts locked (the passcode is 2468); &scene=applock has one set.
+let passcode = ["locked", "applock"].includes(scene) ? "2468" : "", unlocked = scene !== "locked", wrong = 0;
 
 window.pywebview = {
   api: {
@@ -64,7 +66,28 @@ window.pywebview = {
       return { device, bluetooth: device === "phone" ? "Bluetooth needs the optional 'bleak' package (pip install 'locklyctl[bluetooth]')." : "",
         commandLine: device === "computer", version: "0.3.0", logPath: "/home/owner/.locklyctl/locklyctl.log" };
     },
-    async session() { await wait(200); return scene === "signin" ? { signedIn: false, email: "owner@example.com" } : { signedIn: true, email: "owner@example.com" }; },
+    async session() {
+      await wait(200);
+      if (!unlocked) return { signedIn: false, locked: true, wait: 0, email: "" };
+      return scene === "signin" ? { signedIn: false, email: "owner@example.com" } : { signedIn: true, email: "owner@example.com" };
+    },
+    async unlock_app(code) {
+      await wait(250);                     // the key derivation takes a moment
+      if (wrong >= 5) throw new Error("Too many wrong passcodes. Try again in 30 s.");
+      if (code !== passcode) { wrong++; throw new Error("Wrong passcode."); }
+      unlocked = true; wrong = 0;
+      return this.session();
+    },
+    async app_lock() { return { on: !!passcode, available: "" }; },
+    async set_app_lock(code, current) {
+      await wait(250);
+      if (passcode && current !== passcode) throw new Error("Wrong passcode.");
+      passcode = code;
+      return { on: true, strength: /^\d{1,9}$/.test(code) || code.length < 8 ? "short" : "long", leftInKeyring: [] };
+    },
+    async remove_app_lock(current) { await wait(250); if (current !== passcode) throw new Error("Wrong passcode."); passcode = ""; return { on: false }; },
+    async lock_now() { unlocked = false; return { locked: true, wait: 0 }; },
+    async erase_saved_data() { passcode = ""; unlocked = true; return { signedIn: false, email: "" }; },
     async sign_in(email) { await wait(400); return { signedIn: true, email }; },
     async sign_out() { return { signedIn: false, email: "owner@example.com" }; },
     async locks() { await wait(150); return ordered().map((l) => ({ ...l })); },
@@ -231,7 +254,7 @@ setTimeout(() => {
     setTimeout(() => { click(".maint-rows li:nth-child(2) .maint-row"); if (scene !== "maint") setTimeout(() => click("#btn-firmware"), 200); }, 200);
   }
   if (scene === "firmware-install") { setTimeout(() => { click(".fw-install button"); setTimeout(() => click("#confirm-ok"), 300); }, 1400); }
-  if (scene === "settings") click("#view-settings");
+  if (scene === "settings" || scene === "applock") click("#view-settings");
   // Clicking a door connects to it first; Unlock can be held once that's done.
   const whenUnlockable = (fn) => { const b = document.getElementById("btn-unlock"); b.disabled ? setTimeout(() => whenUnlockable(fn), 100) : fn(b); };
   if (scene === "hold") {

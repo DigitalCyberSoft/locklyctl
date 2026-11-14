@@ -62,6 +62,25 @@
     </form>
   </main>
 
+  <!-- Unlock: the app passcode, when one seals what locklyctl saved on this device (Settings, App lock) -->
+  <main id="unlock" class="screen signin" hidden>
+    <form id="unlock-form" class="signin-plate" novalidate>
+      <h1 class="signin-title"><img class="logo" src="logo.svg" alt="">locklyctl</h1>
+      <p class="muted">Enter the app passcode to open locklyctl on this device.</p>
+      <label class="field">
+        <span>Passcode</span>
+        <input name="passcode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+      </label>
+      <p class="form-error" id="unlock-error" role="alert"></p>
+      <button class="btn btn-primary" type="submit">Unlock</button>
+      <details class="forgot">
+        <summary>Forgot the passcode?</summary>
+        <p class="fine">Nothing can open the saved data without it. You can erase what locklyctl saved on this device (the sign-in, favorites, the door list's order, saved Wi-Fi passwords) and sign in again with your Lockly account. Your locks and your Lockly account aren't touched.</p>
+        <button class="btn btn-quiet btn-danger" type="button" id="unlock-erase">Erase what's saved on this device</button>
+      </details>
+    </form>
+  </main>
+
   <!-- The app: Doors and People for every day, Maintenance for the locks themselves, Settings for this app.
        On a phone the views are a bar at the bottom, and each view shows its list or one item, not both. -->
   <div id="app" class="screen app" hidden>
@@ -360,6 +379,25 @@
             <label><input type="radio" name="conn" value="bluetooth"><span>Bluetooth only</span></label>
           </fieldset>
           <p class="fine" id="conn-note"></p>
+        </section>
+
+        <section class="job" id="job-applock">
+          <h2>App lock</h2>
+          <p class="muted" id="applock-about"></p>
+          <form id="applock-form" class="inline-form" novalidate>
+            <div class="row">
+              <label class="field field-short" id="applock-current-field" hidden><span>Current passcode</span><input name="current" type="password" autocomplete="off"></label>
+              <label class="field field-short"><span id="applock-new-label">Passcode</span><input name="passcode" type="password" autocomplete="new-password"></label>
+              <label class="field field-short"><span>Again</span><input name="again" type="password" autocomplete="new-password"></label>
+            </div>
+            <p class="form-error" id="applock-error" role="alert"></p>
+            <div class="row">
+              <button class="btn btn-ink" type="submit" id="applock-set">Turn on</button>
+              <button class="btn btn-quiet" type="button" id="applock-now" hidden>Lock now</button>
+              <button class="btn btn-quiet btn-danger" type="button" id="applock-off" hidden>Turn off</button>
+            </div>
+            <p class="fine">At least 4 characters: digits, letters or both. A short PIN keeps out someone who picks this device up. It does not stop someone who copies the saved file, who can try every 6-digit PIN within a day; a long passcode does. A forgotten passcode can't be recovered: the saved data can only be erased.</p>
+          </form>
         </section>
 
         <section class="job">

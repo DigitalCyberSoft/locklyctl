@@ -17,6 +17,7 @@ in the reply to the call that created it.
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 import sys
 import threading
@@ -34,7 +35,7 @@ except ImportError:                             # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
     from mcp.types import ToolAnnotations
 
-from . import __version__, config
+from . import __version__, config, vault
 from .gui.api import Api
 
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
@@ -49,7 +50,7 @@ Doors whose connection is "bluetooth" have no hub and can't be reached remotely.
 Never unlock a door, or change who can get in, unless the user clearly asked for it."""
 
 _PRIVATE = {"pin", "recordKey", "weekData", "startTime", "endTime", "timeType", "status",
-            "doorUnit", "doorRest", "doorModel", "doorRoute"}
+            "doorUnit", "doorRest", "doorModel", "doorRoute", "doorAccessUsers"}
 
 
 def _when(ts) -> str | None:
@@ -78,6 +79,9 @@ class Doors:
         with self._lock:
             if not self._ready:
                 s = self.api.session()
+                if s.get("locked"):
+                    raise ToolError("locklyctl's saved data is locked with the app passcode. Start locklyctl-mcp "
+                                    "with --passcode-file FILE (or LOCKLYCTL_PASSCODE_FILE set) so it can open it.")
                 if not s.get("signedIn"):
                     raise ToolError(s.get("message") or
                                     "Not signed in. Run `locklyctl` (or the desktop app) once, "
@@ -329,8 +333,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="also offer tools that change people, PINs and door modes")
     ap.add_argument("--allow-unlock", action="store_true", help="also offer unlock_door")
     ap.add_argument("--debug", action="store_true", help="protocol logging on stderr")
+    ap.add_argument("--passcode-file", metavar="FILE",
+                    help="with the app lock on (the app's Settings), read the app passcode from FILE's first "
+                         "line; LOCKLYCTL_PASSCODE_FILE does the same. This server can't ask for it")
     a = ap.parse_args(argv)
     config._setup_logging(debug=a.debug)              # stderr + file; stdout is MCP's
+    path = a.passcode_file or os.environ.get("LOCKLYCTL_PASSCODE_FILE")
+    if path and config.locked():
+        try:
+            config.unlock(config.passcode_from_file(path))
+        except (vault.VaultError, OSError) as e:
+            print(f"locklyctl-mcp: {e}", file=sys.stderr)
+            return 1
     build_server(allow_writes=a.allow_writes, allow_unlock=a.allow_unlock).run()
     return 0
 

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from . import features as F
 from . import protocol as P
 from . import config
+from . import vault
 from . import view as V
 from .const import CONNECTIONS
 from .transport import LocklyClient, LocklyError
@@ -789,6 +790,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False,
         where = config._save_credential(cfg, email, client.pw_hash)
         say(dim("  (stored your login credential in "
                 + ("the system keyring" if where == "keyring"
+                   else "locklyctl's saved data, sealed with the app passcode" if config.sealed()
                    else "~/.locklyctl/config.json, readable only by you")
                 + "; clear it any time with --logout)"))
     else:
@@ -796,6 +798,35 @@ def login_flow(*, prompt: bool = True, quiet: bool = False,
     client.connection = config.connection_mode(cfg)
     say(green(f"  logged in — {len(client.locks)} lock(s) found"))
     return client
+
+
+def unlock_saved_data(passcode_file: str | None) -> int:
+    """With the app lock on (set in the app's Settings), open the saved data
+    for this run: with the passcode in ``passcode_file`` or the file
+    $LOCKLYCTL_PASSCODE_FILE names, else by asking for it at a terminal.
+    Returns 0 when it's open (or there is no lock), else the exit status:
+    2 when nothing could ask, 1 when the passcode was wrong or unreadable."""
+    try:
+        if not config.locked():
+            return 0
+        path = passcode_file or os.environ.get("LOCKLYCTL_PASSCODE_FILE")
+        if path:
+            config.unlock(config.passcode_from_file(path))
+            return 0
+        if not sys.stdin.isatty():
+            print("locklyctl: the saved data is locked with the app passcode: give --passcode-file FILE "
+                  "(or set LOCKLYCTL_PASSCODE_FILE)", file=sys.stderr)
+            return 2
+        for _ in range(3):
+            try:
+                config.unlock(getpass.getpass("  App passcode: "))
+                return 0
+            except vault.WrongPasscode:
+                print(red("  wrong passcode"), file=sys.stderr)
+        return 1
+    except (vault.VaultError, OSError) as e:        # too many tries, damaged data, an unreadable passcode file
+        print(f"locklyctl: {e}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -818,10 +849,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server", metavar="URL",
                         help="sign in to a private locklyctl-mqtt server at URL instead of Lockly's "
                              "services (plain JSON over its REST API; remote commands relay through it)")
+    parser.add_argument("--passcode-file", metavar="FILE",
+                        help="with the app lock on (the app's Settings), read the app passcode from FILE's "
+                             "first line instead of asking for it; LOCKLYCTL_PASSCODE_FILE does the same")
     parser.add_argument("--version", action="version", version=f"locklyctl {__version__}")
     commands.add_subcommands(parser)
     args = parser.parse_args(argv)
     config._setup_logging(debug=args.debug)
+    if args.command != "gui":                       # the app asks for the passcode on its own screen
+        try:
+            status = unlock_saved_data(args.passcode_file)
+        except (EOFError, KeyboardInterrupt):
+            return 130
+        if status:
+            return status
     if args.logout:
         cfg = config.load_config()
         config._save_credential(cfg, cfg.get("email", ""), None)

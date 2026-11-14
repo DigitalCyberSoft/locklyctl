@@ -108,7 +108,7 @@ async function call(name, ...args) {
 }
 
 function show(screen) {
-  for (const id of ["boot", "signin", "app"]) $(id).hidden = id !== screen;
+  for (const id of ["boot", "unlock", "signin", "app"]) $(id).hidden = id !== screen;
 }
 
 function toast(text, bad = false) {
@@ -190,8 +190,139 @@ async function boot() {
   } catch (e) {
     s = { signedIn: false, message: e.message };
   }
+  afterSession(s);
+}
+
+// Where a session (Api.session, or the one unlock_app returns) leads: the unlock
+// screen while the app lock holds, else the app, else signing in.
+function afterSession(s) {
+  if (s.locked) return showUnlock(s.wait);
   if (s.signedIn) return enterApp(s.email);
   showSignin(s.email, s.message);
+}
+
+// ── the app lock: a passcode that seals what locklyctl saved on this device ──
+
+function showUnlock(wait, message) {
+  const f = $("unlock-form");
+  f.passcode.value = "";
+  $("unlock-error").textContent = message
+    || (wait ? `Too many wrong passcodes. Try again in ${wait < 90 ? `${wait} s` : `${Math.ceil(wait / 60)} min`}.` : "");
+  show("unlock");
+  f.passcode.focus();
+}
+
+$("unlock-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.currentTarget;
+  $("unlock-error").textContent = "";
+  await busy(f.querySelector("button[type=submit]"), async () => {
+    try {
+      const s = await call("unlock_app", f.passcode.value);
+      f.passcode.value = "";
+      afterSession(s);
+    } catch (e) {
+      f.passcode.value = "";
+      $("unlock-error").textContent = e.message;
+      f.passcode.focus();
+    }
+  });
+});
+
+$("unlock-erase").addEventListener("click", async () => {
+  const ok = await confirmDialog("Erase what's saved on this device?",
+    "The saved sign-in, favorites, the door list's order and saved Wi-Fi passwords on this device are deleted, and "
+    + "can't be brought back. Your locks and your Lockly account aren't touched. You'll sign in again with your "
+    + "Lockly email and password.", "Erase");
+  if (!ok) return;
+  try {
+    const s = await call("erase_saved_data");
+    showSignin(s.email);
+  } catch (e) { $("unlock-error").textContent = e.message; }
+});
+
+// Settings, App lock: off (set a passcode), or on (change it, lock now, turn it off).
+async function renderAppLock() {
+  const f = $("applock-form");
+  let st;
+  try { st = await call("app_lock"); } catch (e) { $("applock-about").textContent = e.message; f.hidden = true; return; }
+  f.hidden = !!st.available;
+  $("applock-about").textContent = st.available
+    ? `An app passcode can't be used on this device. ${st.available}`
+    : st.on ? "On. locklyctl asks for the passcode when it starts, and what it saves on this device is sealed with it."
+      : "Ask for a passcode when locklyctl starts on this device. The passcode seals what the app saves here "
+        + "(the sign-in, saved Wi-Fi passwords, favorites, the door list's order): without it the file can't be read.";
+  $("applock-current-field").hidden = !st.on;
+  $("applock-new-label").textContent = st.on ? "New passcode" : "Passcode";
+  $("applock-set").textContent = st.on ? "Change passcode" : "Turn on";
+  $("applock-now").hidden = $("applock-off").hidden = !st.on;
+  f.dataset.on = st.on ? "1" : "";
+  f.reset();
+  $("applock-error").textContent = "";
+}
+
+$("applock-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.currentTarget;
+  const on = f.dataset.on === "1";
+  const err = (text) => { $("applock-error").textContent = text; };
+  err("");
+  if (f.passcode.value.length < 4) return err("The passcode needs at least 4 characters.");
+  if (f.passcode.value !== f.again.value) return err("The two passcodes aren't the same.");
+  if (on && !f.current.value) return err("Enter the current passcode to change it.");
+  await busy(f.querySelector("#applock-set"), async () => {
+    try {
+      const r = await call("set_app_lock", f.passcode.value, on ? f.current.value : "");
+      await renderAppLock();
+      if (r.leftInKeyring.length) {
+        toast(`The app lock is on, but a copy of ${r.leftInKeyring.join(", ")} couldn't be removed from the system keyring: remove it there.`, true);
+      } else {
+        toast((on ? "Passcode changed." : "The app lock is on.")
+          + (r.strength === "short" ? " This passcode is short: it won't stop someone who copies the saved file." : ""));
+      }
+    } catch (e) { err(e.message); }
+  });
+});
+
+$("applock-off").addEventListener("click", async (ev) => {
+  const f = $("applock-form");
+  if (!f.current.value) { $("applock-error").textContent = "Enter the current passcode to turn the app lock off."; f.current.focus(); return; }
+  const ok = await confirmDialog("Turn the app lock off?",
+    "locklyctl will open without a passcode, and what it saves on this device won't be sealed.", "Turn off");
+  if (!ok) return;
+  await busy(ev.currentTarget, async () => {
+    try {
+      await call("remove_app_lock", f.current.value);
+      await renderAppLock();
+      toast("The app lock is off.");
+    } catch (e) { $("applock-error").textContent = e.message; }
+  });
+});
+
+$("applock-now").addEventListener("click", async () => {
+  try {
+    const r = await call("lock_now");
+    forgetSession();
+    showUnlock(r.wait);
+  } catch (e) { toast(e.message, true); }
+});
+
+// Signing out and locking both end the session: the next one has its own doors and
+// people, and a locked or signed-out page keeps none of the last one's.
+function forgetSession() {
+  locks = []; currentId = null; editing = false;
+  people = []; personKey = null; peopleLoaded = false; newPersonMode = false;
+  renderPlates();
+  renderFavs();
+  renderDoor();
+  renderMaint();
+  renderPerson();
+  $("people-list").replaceChildren();
+  $("people-search").value = "";
+  for (const id of ["panel-activity", "access-list"]) $(id).replaceChildren();
+  resetSchedules();
+  resetJobs();
+  $("who").textContent = "";
 }
 
 function showSignin(email, message) {
@@ -244,6 +375,7 @@ async function enterApp(email) {
   show("app");
   showView("doors");
   renderAbout();
+  renderAppLock();
   call("connection").then(showConnection, (e) => { $("conn-note").textContent = e.message; });
   $("plates").replaceChildren(h("li", { class: "muted" }, "Loading doors…"));
   try {
@@ -289,9 +421,7 @@ $("sign-out").addEventListener("click", async () => {
     toast(e.message, true);
     return;
   }
-  locks = []; currentId = null; editing = false;
-  people = []; personKey = null; peopleLoaded = false;    // the next account has its own
-  renderFavs();
+  forgetSession();
   showSignin(s.email);
 });
 

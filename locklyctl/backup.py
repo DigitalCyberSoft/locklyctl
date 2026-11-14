@@ -29,8 +29,8 @@ from . import config
 from . import features as F
 from . import protocol as P
 from . import view as V
-from ._crypto import AES
 from .transport import LocklyError
+from .vault import ctr as _ctr       # AES-256-CTR on the block cipher alone; the app lock uses it too
 
 FORMAT = "locklyctl-backup"
 VERSION = 1
@@ -69,17 +69,6 @@ def _keys(passphrase: str, salt: bytes, n: int, r: int, p: int) -> tuple[bytes, 
     dk = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=n, r=r, p=p,
                         maxmem=_MAX_SCRYPT_MEM + (16 << 20), dklen=64)
     return dk[:32], dk[32:]
-
-
-def _ctr(key: bytes, iv: bytes, data: bytes) -> bytes:
-    """AES-256-CTR: the counter block starts at iv and counts up as a 128-bit
-    big-endian number (as Go's cipher.NewCTR does)."""
-    if not data:
-        return b""
-    start = int.from_bytes(iv, "big")
-    blocks = b"".join(((start + i) % (1 << 128)).to_bytes(16, "big") for i in range((len(data) + 15) // 16))
-    stream = AES.new(key, AES.MODE_ECB).encrypt(blocks)[:len(data)]
-    return (int.from_bytes(data, "big") ^ int.from_bytes(stream, "big")).to_bytes(len(data), "big")
 
 
 def _mac(key: bytes, n: int, r: int, p: int, salt: bytes, iv: bytes, ct: bytes) -> bytes:

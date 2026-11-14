@@ -51,7 +51,7 @@ from pathlib import Path
 from . import config
 
 _LOG = logging.getLogger("locklyctl")
-_KEYRING_SERVICE = "locklyctl-wifi"
+_KEYRING_SERVICE = config.WIFI_KEYRING_SERVICE
 PLATFORM = sys.platform                 # which system store from_system asks; tests set it
 NMCLI, SECURITY, NETSH, NETWORKSETUP = "nmcli", "security", "netsh", "networksetup"
 TIMEOUT_S = {"darwin": 120.0, "win32": 30.0}    # macOS waits while an administrator's password is typed
