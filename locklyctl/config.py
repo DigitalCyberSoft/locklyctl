@@ -91,6 +91,33 @@ def save_config(cfg: dict) -> None:
     os.replace(tmp, p)
 
 
+# Suspended access users: a lock_id:user_id -> {"user_type", "date"} map in the
+# owner-only config, so `resume` can restore the exact schedule a `suspend`
+# replaced with an expired window. The date is a schedule, not a secret, but it
+# stays in the owner-only config all the same.
+def _suspended_key(lock_id: str, user_id: int) -> str:
+    return f"{lock_id}:{user_id}"
+
+
+def stash_suspended(lock_id: str, user_id: int, record: dict) -> None:
+    cfg = load_config()
+    users = dict(cfg.get("suspended_users") or {})
+    users[_suspended_key(lock_id, user_id)] = record
+    save_config({**cfg, "suspended_users": users})
+
+
+def get_suspended(lock_id: str, user_id: int) -> dict | None:
+    return (load_config().get("suspended_users") or {}).get(_suspended_key(lock_id, user_id))
+
+
+def pop_suspended(lock_id: str, user_id: int) -> dict | None:
+    cfg = load_config()
+    users = dict(cfg.get("suspended_users") or {})
+    record = users.pop(_suspended_key(lock_id, user_id), None)
+    save_config({**cfg, "suspended_users": users})
+    return record
+
+
 # The saved credential is the SHA-256 password hash, which the login API takes
 # directly — so it is password-equivalent. It goes in the OS keyring (Secret
 # Service / Keychain / Credential Locker) when the optional `keyring` package

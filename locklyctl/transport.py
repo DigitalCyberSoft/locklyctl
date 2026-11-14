@@ -1781,6 +1781,109 @@ class LocklyClient:
         body = self._rest_ok("acu/getAuInfoByDid", {"deviceId": lock["ID"], "userAcuId": user_acu_id})
         return body.get("obj") or {}
 
+    # -- suspend / resume an access user (credential-preserving) ---------------
+    # Proven on a Visage (2026-11-14): re-pushing a user's 0x73 record with a
+    # changed type/window keeps their PIN, fingerprints and face. Suspend swaps
+    # the window for one entirely in the past (the lock then refuses them);
+    # resume restores the exact original type + 10-byte date, which suspend
+    # stashed in the owner-only config. The PIN is read from the lock and passed
+    # straight back so it is never dropped, and never logged.
+
+    def _read_access_user(self, lock: dict, user_id: int) -> dict:
+        """The user's current on-lock record: type + 10-byte date (0x76) and
+        slot, PIN, multi-verify and credential counts (0x9F)."""
+        ack, d = self.exchange_built(lock, lambda n: F.build_access_user_detail(lock, n, user_id=user_id))
+        det = F.parse_access_user_detail(d) if d else {}
+        if det.get("status") != "00" or det.get("date") is None:
+            raise LocklyError(f"the lock has no user {user_id} (or it would not report one)")
+        entry = next((u for u in self.lock_user_table(lock) if u.get("user_id") == user_id), None)
+        if entry is None:
+            raise LocklyError(f"user {user_id} is not in the lock's user table")
+        return {"user_type": det["user_type"], "date": det["date"], "pwd_id": entry["pwd_id"],
+                "pin": entry.get("pin") or "", "multi_verify": entry.get("multi_verify", 0),
+                "faces": entry.get("faces", 0), "fingerprints": entry.get("fingerprints", 0),
+                "cards": entry.get("cards", 0)}
+
+    def _user_counts(self, lock: dict, user_id: int) -> dict:
+        """Just the credential counts for a user (0x9F), to confirm nothing was
+        dropped by a write."""
+        entry = next((u for u in self.lock_user_table(lock) if u.get("user_id") == user_id), None)
+        if entry is None:
+            return {"faces": 0, "fingerprints": 0, "cards": 0}
+        return {k: entry.get(k, 0) for k in ("faces", "fingerprints", "cards")}
+
+    def _push_access_user(self, lock: dict, *, user_type: int, pwd_id: int, user_id: int,
+                          date: str, pin: str, multi_verify: int) -> None:
+        """0x73 mode 1 with an explicit date and the user's existing PIN; raises
+        unless the lock confirms status 00."""
+        ack, d = self.exchange_built(lock, lambda n: F.build_access_user_set(
+            lock, n, user_type=user_type, pwd_id=pwd_id, user_id=user_id,
+            date=date, pin=pin, multi_verify=multi_verify))
+        if not d or F.parse_access_user_reply(d).get("status") != "00":
+            raise LocklyError(F.check_reply(ack, lock)[1])
+
+    def _resume_from_cloud(self, lock: dict, user_id: int) -> dict | None:
+        """Reconstruct a user's schedule from the cloud record when no stash
+        exists. Best-effort (it is not exact-byte): weekly windows come back as
+        all-day for the stored weekmask. Returns {"user_type", "date"} or None."""
+        from datetime import datetime
+        user = next((u for u in (self.list_users(lock) or [])
+                     if int(u.get("userAcuId") or -1) == user_id), None)
+        if user is None:
+            return None
+        time_type = str(user.get("timeType") or "")
+        if time_type == "WEEK":
+            week = int(user.get("weekData") or 0)
+            return {"user_type": F.UT_GUEST_WEEKLY, "date": F.access_date_weekly(week, (0, 0), (0, 0))}
+        if time_type in ("MORE_LIMIT", "ONE_LIMIT") and user.get("startTime") and user.get("endTime"):
+            tz = F.lock_tz(lock)
+            start = datetime.fromtimestamp(int(user["startTime"]) / 1000, tz)
+            end = datetime.fromtimestamp(int(user["endTime"]) / 1000, tz)
+            return {"user_type": F.UT_GUEST_PERIOD, "date": F.access_date_period(start, end)}
+        if time_type == "NO_LIMIT" or str(user.get("type")) == "FAMILY":
+            return {"user_type": F.UT_FAMILY, "date": F.access_date_permanent()}
+        return None
+
+    def suspend_access_user(self, lock: dict, user_id: int, *, dry_run: bool = False) -> dict:
+        """Suspend a user: save their current schedule, then push an expired
+        window (type 0x12). Returns before/after credential counts (equal means
+        nothing was dropped); a dry run returns the frame and the schedule it
+        would save, and sends nothing."""
+        rec = self._read_access_user(lock, user_id)
+        stash = {"user_type": rec["user_type"], "date": rec["date"]}
+        before = {k: rec[k] for k in ("faces", "fingerprints", "cards")}
+        if dry_run:
+            frame = F.build_access_user_set(
+                lock, self._dry_run_nonce(), user_type=F.UT_GUEST_PERIOD, pwd_id=rec["pwd_id"],
+                user_id=user_id, date=F.access_date_expired(), pin=rec["pin"],
+                multi_verify=rec["multi_verify"])
+            return {"dry_run": True, "frame": frame, "stash": stash, "before": before}
+        config.stash_suspended(lock["ID"], user_id, stash)
+        self._push_access_user(lock, user_type=F.UT_GUEST_PERIOD, pwd_id=rec["pwd_id"], user_id=user_id,
+                               date=F.access_date_expired(), pin=rec["pin"], multi_verify=rec["multi_verify"])
+        return {"stash": stash, "before": before, "after": self._user_counts(lock, user_id)}
+
+    def resume_access_user(self, lock: dict, user_id: int, *, dry_run: bool = False) -> dict:
+        """Undo a suspend: restore the stashed schedule (exact), or, with no
+        stash, reconstruct it from the cloud (``source`` says which). Returns
+        the restored schedule and, on a real run, the after counts."""
+        stash, source = config.get_suspended(lock["ID"], user_id), "stash"
+        if not stash:
+            stash, source = self._resume_from_cloud(lock, user_id), "cloud"
+            if not stash:
+                raise LocklyError(f"no saved schedule for user {user_id}; suspend it first, or the cloud "
+                                  "record is not one this can reconstruct")
+        rec = self._read_access_user(lock, user_id)
+        if dry_run:
+            frame = F.build_access_user_set(
+                lock, self._dry_run_nonce(), user_type=stash["user_type"], pwd_id=rec["pwd_id"],
+                user_id=user_id, date=stash["date"], pin=rec["pin"], multi_verify=rec["multi_verify"])
+            return {"dry_run": True, "frame": frame, "restore": stash, "source": source}
+        self._push_access_user(lock, user_type=stash["user_type"], pwd_id=rec["pwd_id"], user_id=user_id,
+                               date=stash["date"], pin=rec["pin"], multi_verify=rec["multi_verify"])
+        config.pop_suspended(lock["ID"], user_id)
+        return {"restore": stash, "source": source, "after": self._user_counts(lock, user_id)}
+
     def delete_sensor(self, lock: dict, *, user_acu_id: int, pwd_id: int, sensor_type: int,
                       code: int, crdntl_id: int | None) -> None:
         """Remove one fingerprint / card / face: lock (0x74) then cloud (crdntl/delete)."""

@@ -15,6 +15,8 @@
     locklyctl timezone [LOCK ...]
     locklyctl timezone LOCK ... --sync [--yes]
     locklyctl add [BLUETOOTH_NAME --code CODE --name NAME [--pin-file F] [--yes]]
+    locklyctl suspend LOCK USER [--dry-run] [--yes]
+    locklyctl resume LOCK USER [--dry-run] [--yes]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -144,6 +146,14 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--install", action="store_true",
                    help="install it over Wi-Fi (multi-part locks such as the Visage), then confirm it")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    for name, verb in (("suspend", "suspend"), ("resume", "restore")):
+        p = sub.add_parser(name, help=f"{verb} an access user on a Visage without touching their PIN, "
+                                      "fingerprint or face (suspend expires their window; resume puts the "
+                                      "saved schedule back)")
+        p.add_argument("lock")
+        p.add_argument("user", help="the user's name (case-insensitive) or numeric id")
+        p.add_argument("--dry-run", action="store_true", help="print the frame and the saved schedule, send nothing")
+        p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -503,6 +513,69 @@ def _add(client: LocklyClient, args) -> int:
     return EXIT_OK
 
 
+def _resolve_user(client: LocklyClient, lock: dict, query: str) -> int:
+    """A user's numeric id from a name (case-insensitive, via the cloud list) or
+    a number given directly."""
+    q = str(query).strip()
+    if q.isdigit():
+        return int(q)
+    matches = [u for u in (client.list_users(lock) or [])
+               if str(u.get("name") or "").strip().lower() == q.lower()]
+    ids = sorted({int(u["userAcuId"]) for u in matches if u.get("userAcuId") is not None})
+    if len(ids) == 1:
+        return ids[0]
+    if not ids:
+        raise UsageError(f"no user matches {query!r} on {_name(lock)} (give the numeric id, or an exact name)")
+    raise UsageError(f"{query!r} matches several users on {_name(lock)}: ids {ids}")
+
+
+def _suspend(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    user_id = _resolve_user(client, lock, args.user)
+    if args.dry_run:
+        r = client.suspend_access_user(lock, user_id, dry_run=True)
+        print(f"  [dry-run] suspend user {user_id} on {_name(lock)}")
+        print(f"    would save: type=0x{r['stash']['user_type']:02X} date={r['stash']['date']}")
+        print(f"    frame: {r['frame']}")
+        return EXIT_OK
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("suspend needs --yes when it can't ask for confirmation")
+        if not C.confirm(f"  suspend user {user_id} on {C.bold(_name(lock))}?", default=False):
+            return EXIT_OK
+    r = client.suspend_access_user(lock, user_id)
+    before, after = r["before"], r["after"]
+    if after == before:
+        print(C.green(f"  user {user_id} suspended ✓") + C.dim(
+            f"  (kept: faces {after['faces']}, fingerprints {after['fingerprints']}, cards {after['cards']})"))
+        return EXIT_OK
+    print(C.red(f"  user {user_id} suspended but credentials changed: {before} -> {after}"))
+    return EXIT_FAIL
+
+
+def _resume(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    user_id = _resolve_user(client, lock, args.user)
+    if args.dry_run:
+        r = client.resume_access_user(lock, user_id, dry_run=True)
+        print(f"  [dry-run] resume user {user_id} on {_name(lock)} (schedule from the {r['source']})")
+        print(f"    would restore: type=0x{r['restore']['user_type']:02X} date={r['restore']['date']}")
+        print(f"    frame: {r['frame']}")
+        return EXIT_OK
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("resume needs --yes when it can't ask for confirmation")
+        if not C.confirm(f"  resume user {user_id} on {C.bold(_name(lock))}?", default=False):
+            return EXIT_OK
+    r = client.resume_access_user(lock, user_id)
+    if r["source"] == "cloud":
+        print(C.yellow("  no saved schedule; reconstructed from the cloud record (may not match the exact "
+                       "prior window)"))
+    print(C.green(f"  user {user_id} resumed ✓") + C.dim(
+        f"  (type=0x{r['restore']['user_type']:02X} date={r['restore']['date']})"))
+    return EXIT_OK
+
+
 _HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
              "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
-             "add": _add}
+             "add": _add, "suspend": _suspend, "resume": _resume}
