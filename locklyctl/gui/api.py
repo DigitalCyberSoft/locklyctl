@@ -930,10 +930,12 @@ class Api:
     def bluetooth_wifi_scan(self, lock_id: str) -> list[dict]:
         """The Wi-Fi networks the lock sees, asked over Bluetooth from this
         computer, one per name, in the order to offer them (wifi_passwords.order):
-        [{"ssid", "rssi", "routerType", "known", "connected", "suggested"}].
+        [{"ssid", "rssi", "routerType", "known", "connected", "twinOf", "suggested"}].
         "known" is "saved" (locklyctl saved its password), "system" (this
         computer has the network saved) or ""; "connected", this computer is on
-        it; "suggested", the one to preselect (at most one)."""
+        it; "twinOf", the other band's name this computer is on instead
+        ("Home-5G" for "Home"), or ""; "suggested", the one to preselect (at
+        most one)."""
         lock = self._lock(lock_id)
         why = BLE.available()
         if why:
@@ -946,8 +948,8 @@ class Api:
         for n in sorted(seen, key=lambda n: n["rssi"]):
             if n["ssid"] and n["ssid"] not in best:
                 best[n["ssid"]] = {"ssid": n["ssid"], "rssi": -n["rssi"], "routerType": n["router_type"]}
-        return [{**best[o["ssid"]], "known": o["known"], "connected": o["connected"], "suggested": o["suggested"]}
-                for o in W.order(list(best))]
+        return [{**best[o["ssid"]], "known": o["known"], "connected": o["connected"], "twinOf": o["twin_of"],
+                 "suggested": o["suggested"]} for o in W.order(list(best))]
 
     def bluetooth_wifi_setup(self, lock_id: str, ssid: str, password: str, country: str = "") -> dict:
         """Give the lock a Wi-Fi network over Bluetooth, then ask until it says

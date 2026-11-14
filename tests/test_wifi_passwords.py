@@ -321,6 +321,29 @@ def test_order_saved_then_this_computers_then_signal():
         undo()
 
 
+def test_a_routers_band_names_count_as_one_network():
+    pairs = [("Home", "Home-5G"), ("Home_2G", "Home_5G"), ("Home 2.4GHz", "Home 5 GHz"), ("HOME5G", "HOME"),
+             ("Net (5GHz)", "Net"), ("TP-Link_ABCD", "TP-Link_ABCD_5G"), ("Net_5G_AB12", "Net_AB12"),
+             ("Mesh", "Mesh-6G")]
+    for a, b in pairs:
+        assert W.other_band(a, b) and W.other_band(b, a), (a, b)
+    others = [("Home", "Home"), ("Home-5G", "home-5g"), ("Net_2G", "Net_2.4G"), ("Lab2", "Lab25G"),
+              ("Cafe", "Cafe5"), ("Home", "Home5Gate"), ("Office WiFi6", "Office WiFi"), ("5G", "2G"),
+              ("Office IoT", "Office Staff"), ("Home-5G", "Work")]
+    for a, b in others:
+        assert not W.other_band(a, b), (a, b)
+    nets = [{"uuid": "a", "type": "802-11-wireless", "ssid": "Home-5G", "key_mgmt": "wpa-psk", "psk": "h-pw",
+             "shares": True, "active": True}]
+    undo = _setup(nets=nets)
+    try:                                       # on Home-5G, which the lock can't see; it sees Home
+        o = W.order(["Neighbor", "Home", "Cafe"])
+        assert [(x["ssid"], x["connected"], x["twin_of"], x["suggested"]) for x in o] == [
+            ("Home", False, "Home-5G", True), ("Neighbor", False, "", False), ("Cafe", False, "", False)]
+        assert o[0]["known"] == ""             # Home itself isn't saved here: its password is asked for
+    finally:
+        undo()
+
+
 FAKE_NETWORKSETUP = r"""
 import json, os, sys
 data = json.load(open(os.environ["LOCKLYCTL_FAKE_DATA"]))

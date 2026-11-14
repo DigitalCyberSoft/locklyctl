@@ -369,7 +369,9 @@ def _wifi(client: LocklyClient, args) -> int:
         for o in W.order(list(best)):                          # saved, this computer's, then signal
             n = best[o["ssid"]]
             marks = [{"saved": "password saved", "system": "saved on this computer"}.get(o["known"], ""),
-                     "this computer is on it" if o["connected"] else "", "suggested" if o["suggested"] else ""]
+                     "this computer is on it" if o["connected"]
+                     else f"this computer is on {o['twin_of']}" if o["twin_of"] else "",
+                     "suggested" if o["suggested"] else ""]
             mark = ", ".join(m for m in marks if m)
             print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}" + (f"  ({mark})" if mark else ""))
         return EXIT_OK

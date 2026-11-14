@@ -26,7 +26,11 @@ each group strongest first. It suggests only the first of the first two kinds.
 Only networks from the lock's own scan are offered: its Wi-Fi chip (a Renesas
 DA16200 on the Visage) has a 2.4 GHz radio only, so each of them broadcasts
 on 2.4 GHz. A 5 GHz-only network this computer is on never appears, so it's
-never offered either.
+never offered either. Many routers, ISPs' among them, give each band its own
+name on one network ("Home" and "Home-5G"), so when this computer is on one
+band's name, the other band's name counts as the network it's on too
+(other_band). Names that don't differ by a band alone aren't matched: two
+names for one network can't be told apart from two networks by name.
 
 A password is saved once a lock has joined the network with it (the lock's
 result 3), and a saved one the lock calls wrong (result 4) is forgotten
@@ -36,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -339,18 +344,47 @@ def connected() -> set[str]:
         return set()
 
 
+# A band written into a network's name by routers that name each band:
+# "Home-5G", "Home_2.4GHz", "Home (5 GHz)", "HOME5G". Not after a digit or a
+# dot ("Lab25G") and not before a letter or digit ("5Gate"); "Wi-Fi 6" is a
+# generation, not a band, and has no G.
+_BAND = re.compile(r"[\s_\-.]*\(?(?<![0-9.])(2\.4|2|5|6)\s?g(?:hz)?\)?(?![a-z0-9])", re.IGNORECASE)
+
+
+def _band(name: str) -> tuple[str, str | None]:
+    """(the name without its band, folded for comparing; the band: "2.4", "5", "6" or None)."""
+    m = _BAND.search(name)
+    if not m:
+        return name.casefold(), None
+    rest = (name[:m.start()] + name[m.end():]).strip(" _-.")
+    return rest.casefold(), "2.4" if m.group(1) in ("2", "2.4") else m.group(1)
+
+
+def other_band(a: str, b: str) -> bool:
+    """Whether ``a`` and ``b`` look like two bands' names on one router: the
+    same name but for the band in one or both ("Home" and "Home-5G", "Net_2G"
+    and "Net_5G"). Names that differ any other way, or name the same band,
+    don't."""
+    (ra, ba), (rb, bb) = _band(a), _band(b)
+    return bool(ra) and ra == rb and ba != bb
+
+
 def order(ssids: list[str]) -> list[dict]:
     """``ssids`` (the networks a lock sees, strongest first) in the order to
-    offer them: [{"ssid", "known", "connected", "suggested"}]. First the
-    networks locklyctl saved a password for (a lock joined each), then the one
-    this computer is connected to, then others it has saved, then the rest;
-    each group keeps signal order. Only a network of the first two kinds is
-    suggested, and only the first one."""
+    offer them: [{"ssid", "known", "connected", "twin_of", "suggested"}].
+    First the networks locklyctl saved a password for (a lock joined each),
+    then the one this computer is connected to, or its other band's name
+    ("twin_of": the name this computer is on; other_band), then others it has
+    saved, then the rest; each group keeps signal order. Only a network of the
+    first two kinds is suggested, and only the first one."""
     knowns, here = known(ssids), connected()
-    tier = lambda s: 0 if knowns[s] == "saved" else 1 if s in here else 2 if knowns[s] == "system" else 3  # noqa: E731
+    twin = {s: next((c for c in sorted(here) if other_band(s, c)), "") for s in ssids if s not in here}
+    tier = lambda s: (0 if knowns[s] == "saved" else 1 if s in here or twin.get(s)  # noqa: E731
+                      else 2 if knowns[s] == "system" else 3)
     ranked = sorted(ssids, key=tier)
     first = ranked[0] if ranked and tier(ranked[0]) <= 1 else None
-    return [{"ssid": s, "known": knowns[s], "connected": s in here, "suggested": s == first} for s in ranked]
+    return [{"ssid": s, "known": knowns[s], "connected": s in here, "twin_of": twin.get(s, ""),
+             "suggested": s == first} for s in ranked]
 
 
 def resolve(ssid: str) -> tuple[str | None, str, str]:

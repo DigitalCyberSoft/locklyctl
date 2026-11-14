@@ -918,14 +918,14 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
 // ── Wi-Fi, given to the lock over Bluetooth ────────────────────────────
 
 // Per network: "saved" (locklyctl has its password), "system" (this computer
-// has the network saved) or "", and whether this computer is on it. Passwords
-// themselves never reach the page.
+// has the network saved) or "", and whether this computer is on it, or on the
+// same router's other band name. Passwords themselves never reach the page.
 let wifiKnown = {}, wifiHere = {};
 const WIFI_MARK = { saved: "password saved", system: "saved on this computer" };
 
 function wifiLabel(o) {
   if (!o.value) return o.dataset.label;
-  const marks = [WIFI_MARK[wifiKnown[o.value]], wifiHere[o.value] ? "this computer is on it" : ""].filter(Boolean);
+  const marks = [WIFI_MARK[wifiKnown[o.value]], wifiHere[o.value]].filter(Boolean);
   return o.dataset.label + marks.map((m) => ` · ${m}`).join("");
 }
 
@@ -965,7 +965,8 @@ $("btn-wifi-scan").addEventListener("click", async (ev) => {
       // is preselected only when suggested, else the user picks.
       const nets = await call("bluetooth_wifi_scan", v.id);
       wifiKnown = Object.fromEntries(nets.map((n) => [n.ssid, n.known || ""]));
-      wifiHere = Object.fromEntries(nets.map((n) => [n.ssid, !!n.connected]));
+      wifiHere = Object.fromEntries(nets.map((n) => [n.ssid,
+        n.connected ? "this computer is on it" : n.twinOf ? `this computer is on ${n.twinOf}` : ""]));
       const pick = nets.find((n) => n.suggested);
       form.ssid.replaceChildren(
         ...(pick ? [] : [h("option", { value: "", disabled: true, "data-label": "Choose a network" })]),

@@ -592,7 +592,7 @@ def test_bluetooth_wifi_scan_and_setup(api):
     BLE.available = lambda: ""
     W.NMCLI = "/nonexistent/nmcli"                         # not this computer's NetworkManager
     try:
-        none = {"known": "", "connected": False, "suggested": False}
+        none = {"known": "", "connected": False, "twinOf": "", "suggested": False}
         assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3, **none},
                                               {"ssid": "Guest", "rssi": -70, "routerType": 3, **none}]
         try:
