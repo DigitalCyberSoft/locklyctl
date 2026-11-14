@@ -1864,7 +1864,11 @@ class LocklyClient:
         window that excludes now (type 0x12; the lock rejects a past window with
         E3). Returns before/after credential counts (equal means
         nothing was dropped); a dry run returns the frame and the schedule it
-        would save, and sends nothing."""
+        would save, and sends nothing. Refused for a user this already
+        suspended: a second suspend would save the far-future window as their
+        schedule, and resume would then restore that."""
+        if not dry_run and config.get_suspended(lock["ID"], user_id):
+            raise LocklyError(f"user {user_id} is already suspended; resume them first")
         rec = self._read_access_user(lock, user_id)
         stash = {"user_type": rec["user_type"], "date": rec["date"]}
         before = {k: rec[k] for k in ("faces", "fingerprints", "cards")}

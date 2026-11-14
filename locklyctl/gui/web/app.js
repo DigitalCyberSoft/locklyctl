@@ -48,12 +48,22 @@ const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["
 let api = null;
 let locks = [];             // every door in the list's order (Api.locks), hidden ones included
 let currentId = null;
-// Whether the door list shows hidden doors too (dimmed), so one can be put back.
-let showHidden = false;
-try { showHidden = localStorage.getItem("showHidden") === "1"; } catch (_) { /* storage blocked */ }
-const shownLocks = () => locks.filter((v) => showHidden || !v.hidden);
+// Editing the door list (favorites, order, hiding): it lists hidden doors too, so one can be put back.
+let editing = false;
+const shownLocks = () => locks.filter((v) => !v.hidden);
 let activeTab = "activity";
+let activeView = "doors";
 let toastTimer = null;
+
+// What this build and device can do (Api.capabilities), so the page offers only that.
+let caps = { device: "computer", bluetooth: "", commandLine: false, version: "", logPath: "" };
+const here = () => (caps.device === "phone" ? "this phone" : "this computer");
+const Here = () => here().replace(/^t/, "T");
+// Why a job that needs Bluetooth isn't offered here, or "" when Bluetooth can be tried.
+// A source install can add it (the reason says how); the packaged and phone apps can't yet.
+const noBluetooth = () => (!caps.bluetooth ? "" : caps.commandLine ? caps.bluetooth
+  : `The ${caps.device === "phone" ? "phone app" : "packaged app"} has no Bluetooth yet: `
+    + "use locklyctl from source on a computer with Bluetooth, next to the door.");
 
 // ── plumbing ───────────────────────────────────────────────────────────
 
@@ -136,6 +146,7 @@ function updateLock(view) {
   locks[i] = view;
   renderPlates();
   renderFavs();
+  renderMaint();
   if (view.id === currentId) renderDoor();
 }
 
@@ -171,6 +182,8 @@ function sinceText(ts) {
 
 async function boot() {
   api = await connect();
+  caps = { ...caps, ...(await call("capabilities")) };
+  document.documentElement.dataset.device = caps.device;
   let s;
   try {
     s = await call("session");
@@ -204,11 +217,17 @@ $("signin-form").addEventListener("submit", async (ev) => {
   });
 });
 
-// How doors are reached: one setting for this computer (Api.connection).
+// How doors are reached: one setting for this device (Api.connection), in Settings.
+// Without Bluetooth here there is nothing to choose, so it's said in a line instead.
 function showConnection(c) {
   for (const r of $("conn-mode").querySelectorAll("input")) r.checked = r.value === c.mode;
-  $("conn-note").textContent = c.bluetooth && c.mode !== "remote"
-    ? `Bluetooth can't be used on this computer: ${c.bluetooth}` : "";
+  const why = noBluetooth();
+  $("conn-mode").hidden = !!why && c.mode !== "bluetooth";
+  $("conn-about").textContent = why
+    ? "Doors are reached through their hub or Lockly's server."
+    : `How ${here()} reaches every door. Auto uses the hub or Lockly's server, and when a door doesn't answer a `
+      + `status check that way, tries it over Bluetooth from ${here()}. Only status checks go over Bluetooth so far.`;
+  $("conn-note").textContent = why ? `Bluetooth isn't used here. ${why}` : "";
 }
 
 $("conn-mode").addEventListener("change", async (ev) => {
@@ -223,6 +242,8 @@ $("conn-mode").addEventListener("change", async (ev) => {
 async function enterApp(email) {
   $("who").textContent = email;
   show("app");
+  showView("doors");
+  renderAbout();
   call("connection").then(showConnection, (e) => { $("conn-note").textContent = e.message; });
   $("plates").replaceChildren(h("li", { class: "muted" }, "Loading doors…"));
   try {
@@ -268,7 +289,8 @@ $("sign-out").addEventListener("click", async () => {
     toast(e.message, true);
     return;
   }
-  locks = []; currentId = null;
+  locks = []; currentId = null; editing = false;
+  people = []; personKey = null; peopleLoaded = false;    // the next account has its own
   renderFavs();
   showSignin(s.email);
 });
@@ -292,15 +314,20 @@ $("check-all").addEventListener("click", async (ev) => {
 // ── plates ─────────────────────────────────────────────────────────────
 
 function renderPlates() {
-  const nHidden = locks.filter((v) => v.hidden).length;
-  const tog = $("show-hidden");
-  tog.hidden = !nHidden && !showHidden;
-  tog.setAttribute("aria-pressed", String(showHidden));
-  tog.textContent = `${showHidden ? "Hide" : "Show"} hidden doors (${nHidden})`;
+  const edit = $("edit-list");
+  edit.setAttribute("aria-pressed", String(editing));
+  edit.textContent = editing ? "Done" : "Edit list";
+  $("plates").classList.toggle("editing", editing);
+  if (editing) {                // every door, hidden ones too, each a row with its list tools
+    $("plates").replaceChildren(...locks.map(editRow));
+    renderRetry();
+    return;
+  }
   const shown = shownLocks();
+  const nHidden = locks.length - shown.length;
   if (locks.length && !shown.length) {
-    $("plates").replaceChildren(h("li", { class: "muted" },
-      "Every door is hidden. Use “Show hidden doors” to bring one back."));
+    $("plates").replaceChildren(h("li", { class: "muted list-note" },
+      "Every door is hidden. “Edit list” brings one back."));
     renderRetry();
     return;
   }
@@ -311,10 +338,10 @@ function renderPlates() {
     const word = doing ? DOING_SHORT[doing] : stateWord(v);
     return h("li", {},
       h("button", {
-        class: "plate" + (v.hidden ? " is-hidden" : ""), type: "button", "data-state": stateOf(v),
+        class: "plate", type: "button", "data-state": stateOf(v),
         "aria-busy": doing ? "true" : null,
         "aria-current": v.id === currentId ? "true" : "false",
-        "aria-label": `${doorLabel(v)}, ${word}${v.favorite ? ", favorite" : ""}${v.hidden ? ", hidden" : ""}`,
+        "aria-label": `${doorLabel(v)}, ${word}${v.favorite ? ", favorite" : ""}`,
         onclick: () => selectLock(v.id, true),
       },
         h("span", { class: "plate-num" + (v.unit ? "" : " wordy") }, num),
@@ -324,6 +351,10 @@ function renderPlates() {
           batt && h("span", { class: "plate-batt" + (v.lowBattery || (v.battery != null && v.battery <= 20) ? " low" : "") }, batt)),
         v.favorite && h("span", { class: "plate-star", "aria-hidden": "true" }, icon("favorite-on"))));
   });
+  if (nHidden) {
+    items.push(h("li", { class: "muted list-note" },
+      `${plural(nHidden, "door is", "doors are")} hidden. “Edit list” shows ${nHidden === 1 ? "it" : "them"}.`));
+  }
   $("plates").replaceChildren(...items);
   renderRetry();
 }
@@ -333,7 +364,7 @@ const asleepDoors = () => locks.filter((v) => v.state === "asleep" && v.route !=
 
 function renderRetry() {
   const n = asleepDoors().length;
-  $("retry-asleep").hidden = !n || !$("people-ws").hidden;
+  $("retry-asleep").hidden = !n || editing;
   $("retry-asleep").replaceChildren(icon("check"), `Retry ${n} asleep`);
 }
 
@@ -391,7 +422,7 @@ const DOING_SHORT = { ...DOING, keep: "Setting…", firmware: "Updating…" };  
 
 function renderFavs() {
   const favs = locks.filter((v) => v.favorite && !v.hidden);     // hiding a door takes it off here too
-  $("favs").hidden = !favs.length;
+  $("favs").hidden = editing || !favs.length;
   $("fav-list").replaceChildren(...favs.map((v) => {
     const st = stateOf(v);
     const off = pending.has(v.id) || v.route === "bluetooth";
@@ -458,18 +489,31 @@ function refreshControls(id) {
   if (id === currentId) renderDoor();
 }
 
-// connect: the door was clicked, so also ask it for its live status.
+// On a phone a view shows its list or one item, not both (style.css): this says which.
+function setPane(ws, pane) {
+  $(ws).dataset.pane = pane;
+  if (pane === "detail") $(ws).querySelector(".door").scrollTop = 0;
+}
+for (const b of document.querySelectorAll(".back")) {
+  b.addEventListener("click", () => setPane(b.closest(".workspace").id, "list"));
+}
+
+// The door being worked on, in Doors and in Maintenance alike.
+// connect: it was chosen in the door list, so also ask it for its live status.
 function selectLock(id, connect = false) {
   const changed = id !== currentId;
   currentId = id;
   renderPlates();
   renderFavs();
   renderDoor();
+  renderMaint();
   if (changed) {
     resetSchedules();
+    resetJobs();
     loadTab(activeTab);
   }
   const v = current();
+  if (connect) setPane("doors-ws", "detail");
   if (connect && v && !recentlyOverBluetooth(v)) {
     checkDoors([v]).then((r) => { if (r.failed.length) toast(r.failed[0], true); });
   }
@@ -497,28 +541,12 @@ function renderDoor() {
     v.route ? h("span", { class: "route" }, icon(v.route), `Reached ${ROUTE_TEXT[v.route]}.`) : null);
   const noRoute = v.route === "bluetooth";
   for (const id of ["btn-lock", "btn-unlock", "btn-check"]) $(id).disabled = noRoute || pending.has(v.id);
-  const fav = $("btn-fav");
-  fav.setAttribute("aria-pressed", String(!!v.favorite));
-  fav.replaceChildren(h("span", { class: "star" }, icon(v.favorite ? "favorite-on" : "favorite")), "Favorite");
-  fav.disabled = noRoute && !v.favorite;     // a door with no hub can't be opened from a favorite
-  fav.title = noRoute && !v.favorite ? "This door has no hub, so it can only be opened over Bluetooth." : "";
-  const hide = $("btn-hide");
-  hide.setAttribute("aria-pressed", String(!!v.hidden));
-  hide.textContent = v.hidden ? "Unhide" : "Hide";
-  hide.title = v.hidden ? "Put this door back in the door list."
-    : "Leave this door out of the door list. “Check all doors” still checks it.";
-  // The doors a move steps past: what the list shows, plus this door even if hidden
-  // (the same frame as view.move in Python).
-  const frame = locks.filter((l) => showHidden || !l.hidden || l.id === v.id);
-  const at = frame.findIndex((l) => l.id === v.id);
-  $("btn-up").disabled = at <= 0;
-  $("btn-down").disabled = at >= frame.length - 1;
 
   const st = $("d-state");
   const doing = pending.get(v.id);
   st.dataset.state = doing ? "busy" : v.route === "bluetooth" ? "unknown" : v.state;
   st.replaceChildren(...(doing ? [icon(v.route), DOING[doing]]
-    : [stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub — only reachable over Bluetooth"
+    : [stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub: only reachable over Bluetooth"
       : v.state === "asleep" ? (v.offline ? "Offline: Lockly's server says its Wi-Fi isn't connected"
         : "Didn't answer (asleep or offline)")
         : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]]));
@@ -530,7 +558,7 @@ function renderDoor() {
   const since = sinceText(v.checkedAt);
   if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}`
     : `Checked ${since}${v.via === "bluetooth" ? " over Bluetooth" : ""}`));
-  if (v.wifiOffline) facts.push(h("li", { class: "warn" }, "Wi-Fi offline: Lockly's server says so, and this computer reached it over Bluetooth"));
+  if (v.wifiOffline) facts.push(h("li", { class: "warn" }, `Wi-Fi offline: Lockly's server says so, and ${here()} reached it over Bluetooth`));
   if (v.state === "asleep" && v.bluetoothNote) facts.push(h("li", {}, `Bluetooth: ${v.bluetoothNote}`));
   const clock = clockText(v.clockKnown, v.clockOffset);
   const fix = clockFixText(v.clockFix);
@@ -539,14 +567,13 @@ function renderDoor() {
   if (v.firmware) facts.push(h("li", {}, `Firmware ${v.firmware}`));
   $("d-facts").replaceChildren(...facts);
   renderKeep(v);
-  renderTimeZone(v);
 }
 
 function renderTimeZone(v) {
   $("tz-box").hidden = !v.takesTimeZone;
   $("tz-note").textContent = v.timeZone === "not set"
-    ? `The Lockly account has no time zone for this lock, so it gets this computer's (${v.computerTimeZone}).`
-    : `In the Lockly account: ${v.timeZone}. This computer: ${v.computerTimeZone}.`
+    ? `The Lockly account has no time zone for this lock, so it gets ${here()}'s (${v.computerTimeZone}).`
+    : `In the Lockly account: ${v.timeZone}. ${Here()}: ${v.computerTimeZone}.`
       + (v.timeZone !== v.computerTimeZone ? " They differ: the lock gets the account's." : "");
 }
 
@@ -615,53 +642,63 @@ async function endKeep(v) {
 $("btn-lock").addEventListener("click", () => { const v = current(); if (v) runCommand(v, "lock"); });
 $("btn-check").addEventListener("click", () => { const v = current(); if (v) runCommand(v, "check"); });
 
-$("btn-fav").addEventListener("click", async (ev) => {
-  const v = current();
-  if (!v) return;
-  ev.currentTarget.disabled = true;
-  try {
-    const view = await call("set_favorite", v.id, !v.favorite);
-    updateLock(view);
-    toast(view.favorite ? `${doorLabel(v)} is in your favorites.` : `${doorLabel(v)} removed from favorites.`);
-  } catch (e) { toast(e.message, true); }
-  finally { renderDoor(); }
+// ── the door list: favorites, your own order, and hiding doors ─────────
+
+$("edit-list").addEventListener("click", () => {
+  editing = !editing;
+  renderPlates();
+  renderFavs();
 });
 
-// ── the door list: hide doors and put them in your own order ───────────
+// One door in the edit list. Every door is listed, so a move steps past hidden ones too.
+function editRow(v, i, all) {
+  const name = doorLabel(v);
+  const noRoute = v.route === "bluetooth";
+  const cantFav = noRoute && !v.favorite;      // a door with no hub can't be opened from a favorite
+  const tool = (key, attrs, ...kids) => h("button", { type: "button", "data-tool": key, ...attrs }, ...kids);
+  return h("li", { class: "edit-row" + (v.hidden ? " is-hidden" : ""), "data-id": v.id },
+    h("span", { class: "edit-name" }, name, v.hidden ? h("span", { class: "muted" }, " (hidden)") : null),
+    h("span", { class: "edit-tools" },
+      tool("fav", { class: "btn btn-quiet icon-only", "aria-pressed": String(!!v.favorite), disabled: cantFav,
+        "aria-label": `Favorite: ${name}`,
+        title: cantFav ? "This door has no hub, so it can only be opened over Bluetooth."
+          : "Favorites sit at the top of the list with Lock and Unlock.",
+        onclick: () => editDoor(v, "fav", "set_favorite", !v.favorite) }, icon(v.favorite ? "favorite-on" : "favorite")),
+      tool("up", { class: "btn btn-quiet icon-only", disabled: i === 0, "aria-label": `Move ${name} up`,
+        title: "Move up", onclick: () => moveDoor(v, -1, "up") }, "↑"),
+      tool("down", { class: "btn btn-quiet icon-only", disabled: i === all.length - 1, "aria-label": `Move ${name} down`,
+        title: "Move down", onclick: () => moveDoor(v, 1, "down") }, "↓"),
+      tool("hide", { class: "btn btn-quiet", "aria-pressed": String(!!v.hidden),
+        title: v.hidden ? "Put this door back in the door list." : "Leave this door out of the door list. “Check all” still checks it.",
+        onclick: () => editDoor(v, "hide", "set_hidden", !v.hidden) }, v.hidden ? "Show" : "Hide")));
+}
 
-$("btn-hide").addEventListener("click", async (ev) => {
-  const v = current();
-  if (!v) return;
-  const btn = ev.currentTarget;
-  btn.disabled = true;
+// The list is drawn again after each change, so put the keyboard back on the tool that made it.
+function refocus(id, tool) {
+  const el = document.querySelector(`.edit-row[data-id="${CSS.escape(id)}"] [data-tool="${tool}"]`);
+  if (el && !el.disabled) el.focus();
+}
+
+async function editDoor(v, tool, method, on) {
   try {
-    const view = await call("set_hidden", v.id, !v.hidden);
+    const view = await call(method, v.id, on);
     updateLock(view);
-    toast(view.hidden ? `${doorLabel(v)} is hidden from the door list. “Show hidden doors” brings it back.`
-      : `${doorLabel(v)} is back in the door list.`);
+    toast(method === "set_favorite"
+      ? (view.favorite ? `${doorLabel(v)} is in your favorites.` : `${doorLabel(v)} removed from favorites.`)
+      : (view.hidden ? `${doorLabel(v)} is hidden from the door list.` : `${doorLabel(v)} is back in the door list.`));
   } catch (e) { toast(e.message, true); }
-  finally { btn.disabled = false; renderDoor(); }
-});
+  refocus(v.id, tool);
+}
 
-async function moveDoor(by) {
-  const v = current();
-  if (!v) return;
+async function moveDoor(v, by, tool) {
   try {
-    locks = await call("move_lock", v.id, by, showHidden);
+    locks = await call("move_lock", v.id, by, true);
     renderPlates();
     renderFavs();
-    renderDoor();
+    renderMaint();
   } catch (e) { toast(e.message, true); }
+  refocus(v.id, tool);
 }
-$("btn-up").addEventListener("click", () => moveDoor(-1));
-$("btn-down").addEventListener("click", () => moveDoor(1));
-
-$("show-hidden").addEventListener("click", () => {
-  showHidden = !showHidden;
-  try { localStorage.setItem("showHidden", showHidden ? "1" : "0"); } catch (_) { /* storage blocked */ }
-  renderPlates();
-  if (current()) renderDoor();
-});
 
 // Hold to unlock: nothing is sent unless the button is held for the full fill.
 (() => {
@@ -710,7 +747,7 @@ $("show-hidden").addEventListener("click", () => {
 
 // ── tabs ───────────────────────────────────────────────────────────────
 
-const TABS = ["activity", "guests", "schedules", "connection"];
+const TABS = ["activity", "access", "schedules"];
 
 function selectTab(name, focus = false) {
   activeTab = name;
@@ -737,11 +774,8 @@ TABS.forEach((t, i) => {
 function loadTab(name) {
   if (!current()) return;
   if (name === "activity") loadActivity();
-  else if (name === "guests") loadGuests();
+  else if (name === "access") loadAccess();
   else if (name === "schedules") setupSchedules();
-  else if (name === "connection") {
-    for (const id of ["diag-out", "ble-out", "tz-out", "fw-out"]) $(id).replaceChildren();
-  }
 }
 
 async function loadActivity() {
@@ -768,63 +802,33 @@ async function loadActivity() {
   }
 }
 
-// ── guests ─────────────────────────────────────────────────────────────
+// ── access: the people on this door ────────────────────────────────────
+// The same rows and changes as the People view, for one door. The lock isn't woken to list them.
 
-async function loadGuests() {
+async function loadAccess() {
   const id = currentId;
-  const list = $("guest-list");
-  list.replaceChildren(h("p", { class: "muted" }, "Loading guest PINs…"));
+  const list = $("access-list");
+  mountGrant("door");
+  list.replaceChildren(h("p", { class: "muted" }, "Loading who can open this door…"));
   try {
-    const guests = await call("guests", id);
+    const rows = await call("door_access", id);
     if (id !== currentId) return;
-    if (!guests.length) {
-      list.replaceChildren(h("p", { class: "muted" }, "No guest PINs on this door."));
-      return;
-    }
-    const farFuture = new Date().getFullYear() + 50;
-    list.replaceChildren(...guests.map((g) => {
-      const permanent = !g.end || Number(g.end.slice(0, 4)) > farFuture;
-      return h("div", { class: "guest" },
-        h("div", {},
-          h("p", { class: "guest-name" }, g.name || "Unnamed"),
-          h("p", { class: "guest-meta" }, `PIN ${g.pin || "hidden"}`,
-            permanent ? ", no end date" : `, until ${g.end}`)),
-        h("button", { class: "btn btn-quiet", type: "button", onclick: (ev) => deleteGuest(g, ev.currentTarget) },
-          "Delete"));
-    }));
+    fill(list, rows.length
+      ? accessTable("Person", rows.map((d) => ({ p: { name: d.person }, d, reload: doorAccessChanged,
+          first: h("span", { class: "who" }, d.person) })))
+      : h("p", { class: "muted" }, "Nobody is on this door yet."));
   } catch (e) {
     if (id === currentId) list.replaceChildren(h("p", { class: "form-error" }, e.message));
   }
 }
 
-async function deleteGuest(g, btn) {
-  const ok = await confirmDialog(`Delete ${g.name || "this guest"}'s PIN?`,
-    "The PIN stops working on this door.", "Delete PIN");
-  if (!ok) return;
-  await busy(btn, async () => {
-    try {
-      await call("delete_guest", currentId, g.id);
-      toast("Guest PIN deleted.");
-      loadGuests();
-    } catch (e) { toast(e.message, true); }
-  });
+// After a change made from a door's Access tab: show it, and have People load afresh next time.
+async function doorAccessChanged() {
+  peopleLoaded = false;
+  await loadAccess();
 }
 
-$("guest-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const f = ev.currentTarget;
-  $("guest-error").textContent = "";
-  await busy(f.querySelector("button[type=submit]"), async () => {
-    try {
-      await call("add_guest", currentId, f.elements.name.value, f.pin.value, f.duration.value);
-      toast(`Guest PIN added for ${f.elements.name.value.trim()}.`);
-      f.reset();
-      loadGuests();
-    } catch (e) { $("guest-error").textContent = e.message; }
-  });
-});
-
-// ── schedules (experimental) ───────────────────────────────────────────
+// ── schedule: Welcome Mode hours and Rain Mode ─────────────────────────
 
 (() => {
   const box = $("w-days");
@@ -848,23 +852,19 @@ function resetSchedules() {
 function setupSchedules() {
   const v = current();
   const row = $("w-form-row");
-  if (!row.childElementCount) {
-    if (v.welcomeForm) {
-      row.append(h("p", { class: "muted" }, v.welcomeForm === "9B"
-        ? `${v.model || "This lock"} uses the 8-slot schedule (command 9B).`
-        : `${v.model || "This lock"} uses the single schedule (command 46).`));
-    } else {
-      row.append(h("label", { class: "field" },
-        h("span", {}, `Schedule type for ${v.model || "this lock"} (not known for this model)`),
-        h("select", { name: "form", onchange: syncWelcome },
-          h("option", { value: "" }, "Choose…"),
-          h("option", { value: "9B" }, "8-slot schedule (Visage and newer models)"),
-          h("option", { value: "46" }, "Single schedule (Touch and older models)"))));
-    }
+  if (!row.childElementCount && !v.welcomeForm) {
+    row.append(h("label", { class: "field" },
+      h("span", {}, `Schedule type for ${v.model || "this lock"} (not known for this model)`),
+      h("select", { name: "form", onchange: syncWelcome },
+        h("option", { value: "" }, "Choose…"),
+        h("option", { value: "9B" }, "8-slot schedule (Visage and newer models)"),
+        h("option", { value: "46" }, "Single schedule (Touch and older models)"))));
   }
   syncWelcome();
 }
 
+// The 8-slot form is tried on a Visage; the single-schedule form isn't yet, so only it
+// carries the caution and a Preview that shows the command without sending it.
 function syncWelcome() {
   const f = $("welcome-form");
   const form = welcomeForm();
@@ -872,8 +872,12 @@ function syncWelcome() {
   always.hidden = form !== "46";
   if (always.hidden && f.elements.action.value === "always") f.querySelector("input[value=set]").checked = true;
   $("w-hours").hidden = f.elements.action.value !== "set";
+  $("w-entry").hidden = form !== "9B";
+  $("w-caution").hidden = form === "9B";
+  $("w-preview").hidden = form === "9B";
   $("w-slot-note").textContent = form === "9B"
-    ? "Sending replaces every schedule slot on the lock with this one." : "";
+    ? "Sending replaces the door's other weekly hours with these. A “Keep unlocked” window that's running stays."
+    : "";
 }
 $("w-action").addEventListener("change", syncWelcome);
 
@@ -914,20 +918,25 @@ $("welcome-form").addEventListener("submit", async (ev) => {
   const form = welcomeForm();
   const action = f.elements.action.value;
   const days = [...f.querySelectorAll("input[name=day]:checked")].map((d) => d.value);
+  const entry = form === "9B" ? f.elements.entry.value : "first";
   $("welcome-error").textContent = "";
+  if (!ev.submitter) return;             // Enter in a field: sending to a lock takes the button
   if (!form) { $("welcome-error").textContent = "Choose the schedule type first."; return; }
   if (action === "set" && !days.length) { $("welcome-error").textContent = "Pick at least one day."; return; }
   if (send) {
+    const hours = `${f.start.value} to ${f.end.value}`;
     const what = action === "off" ? "turn Welcome Mode off"
       : action === "always" ? "keep the door unlocked around the clock"
-        : `keep the door unlocked ${f.start.value}–${f.end.value}`;
+        : form !== "9B" ? `keep the door unlocked ${hours}`
+          : entry === "auto" ? `unlock the door by itself at ${f.start.value} and lock it again at ${f.end.value}`
+            : `keep the door unlocked ${hours}, from the first time someone opens it`;
     const ok = await confirmDialog(`Send to ${doorLabel(v)}?`,
       `This asks the lock to ${what}.` + (form === "46" ? " This form hasn't been tried on a real lock yet." : ""), "Send to lock");
     if (!ok) return;
   }
   await busy([...f.querySelectorAll("button")], async () => {
     try {
-      const r = await call("welcome", v.id, form, action, days, f.start.value, f.end.value, send);
+      const r = await call("welcome", v.id, form, action, days, f.start.value, f.end.value, send, entry);
       showOutput($("welcome-out"), r);
     } catch (e) { $("welcome-error").textContent = e.message; }
   });
@@ -936,23 +945,87 @@ $("welcome-form").addEventListener("submit", async (ev) => {
 $("rain-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.currentTarget;
-  const send = ev.submitter && ev.submitter.value === "send";
   const v = current();
   const on = f.on.value === "1";
   $("rain-error").textContent = "";
-  if (send) {
-    const ok = await confirmDialog(`Send to ${doorLabel(v)}?`,
-      `This turns Rain Mode ${on ? "on" : "off"}.`, "Send to lock");
-    if (!ok) return;
-  }
+  if (!ev.submitter) return;             // Enter in a field: sending to a lock takes the button
+  const ok = await confirmDialog(`Send to ${doorLabel(v)}?`,
+    `This turns Rain Mode ${on ? "on" : "off"}.`, "Send to lock");
+  if (!ok) return;
   await busy([...f.querySelectorAll("button")], async () => {
     try {
-      showOutput($("rain-out"), await call("rain", v.id, on, send));
+      showOutput($("rain-out"), await call("rain", v.id, on, true));
     } catch (e) { $("rain-error").textContent = e.message; }
   });
 });
 
-// ── connection ─────────────────────────────────────────────────────────
+// ── maintenance: each door's health, and the jobs that keep a lock reachable ─
+// The list is drawn from what's already known (the last status checks and the
+// Lockly account): opening this view wakes no lock. Each job says what it wakes.
+
+const ROUTE_WORD = { hub: "Hub", wifi: "Wi-Fi", bluetooth: "No hub" };
+
+function clockWord(v) {
+  if (!v.clockKnown) return ["", ""];
+  if (v.clockOffset == null) return ["not set", "warn"];
+  return Math.abs(v.clockOffset) < CLOCK_WARN_S ? ["right", ""] : [offsetWords(v.clockOffset), "warn"];
+}
+
+function renderMaint() {
+  // A value not known yet (nothing has asked the lock) is a dot to the eye and "not known" to a screen reader.
+  const cell = (label, text, cls = "") => (text
+    ? h("span", { class: `m-cell ${cls}`.trim(), "data-label": label }, text)
+    : h("span", { class: "m-cell none", "data-label": label },
+      h("span", { "aria-hidden": "true" }, "·"), h("span", { class: "sr-only" }, "not known")));
+  $("maint-rows").replaceChildren(...locks.map((v) => {
+    const [clock, clockCls] = clockWord(v);
+    const lowBatt = v.lowBattery || (v.battery != null && v.battery <= 20);
+    const down = v.state === "asleep" && v.route !== "bluetooth";      // a door with no hub is never asked
+    return h("li", {}, h("button", {
+      class: "maint-row", type: "button", "aria-current": v.id === currentId ? "true" : "false",
+      onclick: () => { selectLock(v.id); setPane("maint-ws", "detail"); },
+    },
+      h("span", { class: "m-name" }, doorLabel(v), v.hidden ? h("span", { class: "muted" }, " (hidden)") : null),
+      cell("Reached", ROUTE_WORD[v.route] + (down ? (v.offline ? ", offline" : ", no answer") : ""), down ? "warn" : ""),
+      cell("Battery", v.battery != null ? `${v.battery}%` : v.lowBattery ? "low" : "", lowBatt ? "warn" : ""),
+      cell("Clock", clock, clockCls),
+      cell("Time zone", v.takesTimeZone ? v.timeZone : "", v.timeZone === "not set" ? "warn" : ""),
+      cell("Firmware", v.firmware)));
+  }));
+  renderMaintDoor();
+}
+
+// The jobs for the chosen door: only what this door has and this build can do.
+// A job that can't run here is said in a line, not offered as a button that fails.
+function renderMaintDoor() {
+  const v = current();
+  $("maint-empty").hidden = !!v;
+  $("maint-body").hidden = !v;
+  $("maint-cli").hidden = !caps.commandLine;
+  if (!v) return;
+  $("m-name").textContent = doorLabel(v);
+  $("m-sub").replaceChildren([v.model, v.hub && `hub ${v.hub}`].filter(Boolean).join(", ") + ". ",
+    h("span", { class: "route" }, icon(v.route), `Reached ${ROUTE_TEXT[v.route]}.`));
+  const remote = v.route !== "bluetooth";
+  const why = noBluetooth();
+  $("diag-about").hidden = $("diag-on").hidden = !remote;
+  $("diag-none").hidden = remote;
+  $("ble-on").hidden = !!why;
+  $("ble-none").hidden = !why;
+  $("ble-none").textContent = why ? `Setting the clock over Bluetooth isn't available here. ${why}` : "";
+  renderTimeZone(v);
+  $("job-wifi").hidden = !v.hasWifi;
+  $("wifi-on").hidden = !!why;
+  $("wifi-none").hidden = !why;
+  $("wifi-none").textContent = why ? `Wi-Fi setup goes over Bluetooth, which isn't available here. ${why}` : "";
+}
+
+// A different door: the last door's results don't belong to it.
+function resetJobs() {
+  for (const id of ["diag-out", "ble-out", "tz-out", "wifi-out", "fw-out"]) $(id).replaceChildren();
+  $("wifi-form").hidden = true;
+}
+
 
 $("btn-diagnose").addEventListener("click", async (ev) => {
   const v = current();
@@ -973,7 +1046,7 @@ $("btn-diagnose").addEventListener("click", async (ev) => {
   });
 });
 
-// ── Bluetooth, from this computer to a lock next to it ────────────────
+// ── Bluetooth, from this device to a lock next to it ──────────────────
 
 $("btn-ble-time").addEventListener("click", async (ev) => {
   const v = current();
@@ -1004,7 +1077,7 @@ $("btn-tz").addEventListener("click", async (ev) => {
       const r = await call("set_time_zone", v.id);
       updateLock(r.lock);
       out.replaceChildren(h("p", { class: r.ok ? "ok" : "form-error" }, r.ok
-        ? `Gave it ${r.zone}${r.source === "computer" ? " (this computer's)" : ""}${r.via === "bluetooth" ? " over Bluetooth" : ""}, then the time.`
+        ? `Gave it ${r.zone}${r.source === "computer" ? ` (${here()}'s)` : ""}${r.via === "bluetooth" ? " over Bluetooth" : ""}, then the time.`
         : `It didn't take it: ${r.text}.`));
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
@@ -1012,15 +1085,15 @@ $("btn-tz").addEventListener("click", async (ev) => {
 
 // ── Wi-Fi, given to the lock over Bluetooth ────────────────────────────
 
-// Per network: "saved" (locklyctl has its password), "system" (this computer
-// has the network saved) or "", and whether this computer is on it, or on the
+// Per network: "saved" (locklyctl has its password), "system" (this device
+// has the network saved) or "", and whether this device is on it, or on the
 // same router's other band name. Passwords themselves never reach the page.
 let wifiKnown = {}, wifiHere = {};
-const WIFI_MARK = { saved: "password saved", system: "saved on this computer" };
+const wifiMark = (known) => ({ saved: "password saved", system: `saved on ${here()}` })[known];
 
 function wifiLabel(o) {
   if (!o.value) return o.dataset.label;
-  const marks = [WIFI_MARK[wifiKnown[o.value]], wifiHere[o.value]].filter(Boolean);
+  const marks = [wifiMark(wifiKnown[o.value]), wifiHere[o.value]].filter(Boolean);
   return o.dataset.label + marks.map((m) => ` · ${m}`).join("");
 }
 
@@ -1028,9 +1101,9 @@ function showWifiPassword() {
   const f = $("wifi-form"), k = wifiKnown[f.ssid.value] || "";
   for (const o of f.ssid.options) o.textContent = wifiLabel(o);
   f.password.placeholder = k ? "Leave empty to use the saved password" : "";
-  $("wifi-pw-note").textContent = !f.ssid.value ? "Networks a lock has joined before, and the one this computer is on, come first."
+  $("wifi-pw-note").textContent = !f.ssid.value ? `Networks a lock has joined before, and the one ${here()} is on, come first.`
     : k === "saved" ? "locklyctl has this network's password saved."
-    : k === "system" ? "This computer has this network saved: leave the password empty to use it "
+    : k === "system" ? `${Here()} has this network saved: leave the password empty to use it `
       + "(on a Mac, macOS asks for an administrator's password first)."
       : "The password is saved once the lock has joined the network with it.";
   $("wifi-forget").hidden = k !== "saved";
@@ -1056,12 +1129,12 @@ $("btn-wifi-scan").addEventListener("click", async (ev) => {
   form.hidden = true;
   await busy(ev.currentTarget, async () => {
     try {
-      // In the order to offer them (saved, this computer's, then signal); one
+      // In the order to offer them (saved, this device's, then signal); one
       // is preselected only when suggested, else the user picks.
       const nets = await call("bluetooth_wifi_scan", v.id);
       wifiKnown = Object.fromEntries(nets.map((n) => [n.ssid, n.known || ""]));
       wifiHere = Object.fromEntries(nets.map((n) => [n.ssid,
-        n.connected ? "this computer is on it" : n.twinOf ? `this computer is on ${n.twinOf}` : ""]));
+        n.connected ? `${here()} is on it` : n.twinOf ? `${here()} is on ${n.twinOf}` : ""]));
       const pick = nets.find((n) => n.suggested);
       form.ssid.replaceChildren(
         ...(pick ? [] : [h("option", { value: "", disabled: true, "data-label": "Choose a network" })]),
@@ -1079,7 +1152,7 @@ $("wifi-form").addEventListener("submit", async (ev) => {
   const v = current();
   const f = ev.currentTarget, out = $("wifi-out");
   const ok = await confirmDialog(`Give ${doorLabel(v)} the network ${f.ssid.value}?`,
-    "This replaces the Wi-Fi network saved on the lock. Keep this computer next to the door; it takes up to a minute and a half.",
+    `This replaces the Wi-Fi network saved on the lock. Keep ${here()} next to the door; it takes up to a minute and a half.`,
     "Give it");
   if (!ok) return;
   out.replaceChildren(h("p", { class: "muted" }, `Saving ${f.ssid.value} on the lock and waiting for it to join…`));
@@ -1116,7 +1189,7 @@ $("btn-firmware").addEventListener("click", async (ev) => {
         h("td", {}, p.name),
         h("td", {}, p.current || h("span", { class: "muted" }, "not reported")),
         h("td", { class: p.newer ? "bad" : "" }, p.offered, p.newer ? " (newer)" : ""),
-        h("td", { class: "muted" }, p.byBluetooth ? "Bluetooth, from this computer"
+        h("td", { class: "muted" }, p.byBluetooth ? `Bluetooth, from ${here()}`
           : p.byApp ? "Lockly app" : p.byPhone ? "Lockly app, at the door" : "Over Wi-Fi")));
       const install = r.install;
       const byPhone = r.parts.filter((p) => p.newer && p.byPhone && !p.byBluetooth).map((p) => p.name);
@@ -1137,10 +1210,12 @@ $("btn-firmware").addEventListener("click", async (ev) => {
           : (r.kind === "multi" && install.blocked ? h("p", { class: "fine" }, install.blocked) : null),
         byPhone.length ? h("p", { class: "fine" }, `${byPhone.join(", ")}: install with the Lockly app, at the door.`)
           : null,
-        chip ? h("div", { class: "fw-install" },
-          h("p", {}, `Over Bluetooth from this computer this sends Bluetooth chip ${chip.offered}.`),
+        chip && !noBluetooth() ? h("div", { class: "fw-install" },
+          h("p", {}, `Over Bluetooth from ${here()} this sends Bluetooth chip ${chip.offered}.`),
           h("button", { class: "btn btn-ink", type: "button", onclick: () => installBluetoothChip(v, chip) },
-            icon("bluetooth"), "Install over Bluetooth")) : null);
+            icon("bluetooth"), "Install over Bluetooth")) : null,
+        chip && noBluetooth() ? h("p", { class: "fine" },
+          `Bluetooth chip ${chip.offered} is sent over Bluetooth, which isn't available here. ${noBluetooth()}`) : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });
@@ -1155,17 +1230,19 @@ async function installFirmware(v, install, btn) {
   const list = install.parts.map((p) => `${p.name} ${p.current || "?"} → ${p.version}`).join(", ");
   // The restart can leave the lock without its clock if its Wi-Fi doesn't come
   // back, and then only Bluetooth can give it the time: say which applies here.
-  const looking = h("p", { class: "muted" }, "Checking whether this computer can reach it over Bluetooth…");
-  $("fw-out").append(looking);
-  let ble = { inRange: false, detail: "" };
-  await busy(btn, async () => {
-    try { ble = await call("bluetooth_check", v.id); } catch (e) { ble.detail = e.message; }
-  });
-  looking.remove();
+  let ble = { inRange: false, detail: noBluetooth() ? "no Bluetooth here" : "" };
+  if (!noBluetooth()) {
+    const looking = h("p", { class: "muted" }, `Checking whether ${here()} can reach it over Bluetooth…`);
+    $("fw-out").append(looking);
+    await busy(btn, async () => {
+      try { ble = await call("bluetooth_check", v.id); } catch (e) { ble.detail = e.message; }
+    });
+    looking.remove();
+  }
   const bleNote = ble.inRange
-    ? " This computer can reach it over Bluetooth: if its Wi-Fi doesn't come back after the restart, "
+    ? ` ${Here()} can reach it over Bluetooth: if its Wi-Fi doesn't come back after the restart, `
       + "it gives the lock the time over Bluetooth."
-    : ` Warning: this computer can't reach it over Bluetooth (${(ble.detail || "not in range").replace(/\.$/, "")}). If its Wi-Fi `
+    : ` Warning: ${here()} can't reach it over Bluetooth (${(ble.detail || "not in range").replace(/\.$/, "")}). If its Wi-Fi `
       + "doesn't come back after the restart, its clock can't be set from here, and people on a schedule may "
       + "not get in until someone gives it the time over Bluetooth at the door, for example with the Lockly app.";
   const ok = await confirmDialog(`Install new firmware on ${doorLabel(v)}?`,
@@ -1175,11 +1252,11 @@ async function installFirmware(v, install, btn) {
   await followInstall(v, () => call("firmware_install", v.id, install.parts, !!ble.inRange));
 }
 
-// The Bluetooth chip's own update, sent over Bluetooth from this computer.
+// The Bluetooth chip's own update, sent over Bluetooth from this device.
 async function installBluetoothChip(v, chip) {
   const ok = await confirmDialog(`Update the Bluetooth chip on ${doorLabel(v)}?`,
-    `Bluetooth chip ${chip.current || "?"} → ${chip.offered}, sent from this computer over Bluetooth. `
-    + "Keep this computer next to the door until this says it's done; it takes several minutes.", "Update");
+    `Bluetooth chip ${chip.current || "?"} → ${chip.offered}, sent from ${here()} over Bluetooth. `
+    + `Keep ${here()} next to the door until this says it's done; it takes several minutes.`, "Update");
   if (!ok || busyNow(v)) return;
   await followInstall(v, () => call("bluetooth_chip_install", v.id));
 }
@@ -1189,7 +1266,7 @@ async function followInstall(v, start) {
   pending.set(v.id, "firmware");
   refreshControls(v.id);
   const show = (st) => {
-    if (v.id !== currentId || activeTab !== "connection") return;
+    if (v.id !== currentId || activeView !== "maint") return;
     const clock = st.clockKnown ? clockText(true, st.clockOffset) : null;
     fill($("fw-out"),
       h("p", {}, `${doorLabel(v)}:`),
@@ -1232,18 +1309,31 @@ let people = [];
 let personKey = null;
 let peopleLoaded = false;
 
+// Doors and People are for every day; Maintenance is for the locks themselves;
+// Settings is for this app. Choosing the view you're in goes back to its list (phones).
+const VIEWS = { doors: "doors-ws", people: "people-ws", maint: "maint-ws", settings: "settings-ws" };
+
 function showView(view) {
-  const isPeople = view === "people";
-  $("doors-ws").hidden = isPeople;
-  $("people-ws").hidden = !isPeople;
-  $("view-doors").setAttribute("aria-pressed", String(!isPeople));
-  $("view-people").setAttribute("aria-pressed", String(isPeople));
-  $("check-all").hidden = isPeople;
-  renderRetry();
-  if (isPeople && !peopleLoaded) loadPeople();
+  if (view === activeView && !$(VIEWS[view]).hidden && $(VIEWS[view]).dataset.pane) setPane(VIEWS[view], "list");
+  activeView = view;
+  for (const [name, ws] of Object.entries(VIEWS)) {
+    $(ws).hidden = name !== view;
+    $(`view-${name}`).setAttribute("aria-pressed", String(name === view));
+  }
+  if (view === "doors" && current() && activeTab === "access") loadAccess();   // People may have changed it
+  if (view === "people") {
+    mountGrant("people");
+    if (peopleLoaded) renderPerson(); else loadPeople();
+  }
+  if (view === "maint") renderMaint();
 }
-$("view-doors").addEventListener("click", () => showView("doors"));
-$("view-people").addEventListener("click", () => showView("people"));
+for (const name of Object.keys(VIEWS)) $(`view-${name}`).addEventListener("click", () => showView(name));
+
+function renderAbout() {
+  $("about-version").textContent = `locklyctl ${caps.version}`.trim();
+  // On a phone the log is inside the app's own storage, where nothing else can open it.
+  $("about-log").textContent = caps.device === "computer" && caps.logPath ? `Log file: ${caps.logPath}` : "";
+}
 
 async function loadPeople() {
   $("people-list").replaceChildren(h("li", { class: "muted" }, "Loading people from every door…"));
@@ -1300,7 +1390,10 @@ function renderPeople() {
     if (t.cards) bits.push(plural(t.cards, "card", "cards"));
     return h("li", {}, h("button", {
       type: "button", class: "person-row", "aria-current": p.key === personKey ? "true" : "false",
-      onclick: () => { newPersonMode = false; $("p-merge").hidden = false; personKey = p.key; renderPeople(); renderPerson(); },
+      onclick: () => {
+        newPersonMode = false; $("p-merge").hidden = false; personKey = p.key;
+        renderPeople(); renderPerson(); setPane("people-ws", "detail");
+      },
     },
       h("span", { class: "person-name" }, p.name),
       h("span", { class: "person-count" }, plural(p.doors.length, "door", "doors")),
@@ -1319,24 +1412,16 @@ function renderPerson() {
   $("p-sub").textContent = [p.email, `Can open ${plural(p.doors.length, "door", "doors")}`,
     roles.has("owner") ? "Account owner" : null].filter(Boolean).join(". ") + ".";
 
-  document.querySelector(".access-table").hidden = false;
-  $("p-doors").replaceChildren(...p.doors.flatMap((d) => {
-    const creds = credSummary(d);
-    const row = h("tr", {},
-      h("td", {}, h("div", { class: "door-cell" },
-        h("span", { class: "mini-unit" }, d.doorUnit || "—"),
-        h("span", {}, d.doorRest || (d.doorUnit ? "" : d.doorName), " ", h("span", { class: "muted" }, d.doorModel)))),
-      h("td", { class: d.role === "owner" ? "role-owner" : "" }, d.role.charAt(0).toUpperCase() + d.role.slice(1)),
-      h("td", {}, d.access, !d.enabled && h("div", { class: "off" }, "Switched off")),
-      h("td", {}, h("div", { class: "creds" },
-        creds.length ? creds.map((c) => h("span", { class: "cred" }, c)) : h("span", { class: "cred none" }, "Nothing yet"),
-        d.twoStep && h("span", { class: "cred" }, "Needs two"))),
-      h("td", {}, rowActions(p, d)));
-    return [row];
-  }));
-  setupGrant(p);
+  $("p-doors").hidden = false;
+  fill($("p-doors"), accessTable("Door", p.doors.map((d) => ({
+    p, d, reload: () => reloadPeople(p.key),
+    first: h("div", { class: "door-cell" },
+      d.doorUnit ? h("span", { class: "mini-unit" }, d.doorUnit) : null,
+      h("span", {}, d.doorUnit ? d.doorRest : d.doorName, " ", h("span", { class: "muted" }, d.doorModel))),
+  }))));
+  if (grantFor === "people") setupGrant(p);
 
-  // Merge controls — suggest records with the same name first
+  // Merge controls: suggest records with the same name first
   const norm = (n) => n.toLowerCase().replace(/\s+/g, " ").trim();
   const others = people.filter((x) => x.key !== p.key);
   const sameName = others.filter((o) => norm(o.name) === norm(p.name));
@@ -1384,57 +1469,116 @@ async function reloadPeople(keepKey) {
   } catch (e) { toast(e.message, true); }
 }
 
-function rowActions(p, d) {
+// A person's doors (People) or a door's people (its Access tab), one row each:
+// ``items`` are {first: the first cell, p: the person, d: their access on one door,
+// reload: what to show again after a change}.
+function accessTable(firstHead, items) {
+  return h("table", { class: "access-table" },
+    h("thead", {}, h("tr", {}, h("th", { scope: "col" }, firstHead), h("th", { scope: "col" }, "Role"),
+      h("th", { scope: "col" }, "When"), h("th", { scope: "col" }, "Can unlock with"),
+      h("th", { scope: "col" }, h("span", { class: "sr-only" }, "Changes")))),
+    h("tbody", {}, items.map(({ first, p, d, reload }) => {
+      const creds = credSummary(d);
+      return h("tr", {},
+        h("td", {}, first),
+        h("td", { class: d.role === "owner" ? "role-owner" : "" }, d.role.charAt(0).toUpperCase() + d.role.slice(1)),
+        h("td", {}, d.access, d.suspended && h("div", { class: "off" }, "Paused"),
+          !d.enabled && h("div", { class: "off" }, "Switched off")),
+        h("td", {}, h("div", { class: "creds" },
+          creds.length ? creds.map((c) => h("span", { class: "cred" }, c)) : h("span", { class: "cred none" }, "Nothing yet"),
+          d.twoStep && h("span", { class: "cred" }, "Needs two"))),
+        h("td", {}, rowActions(p, d, reload)));
+    })));
+}
+
+function rowActions(p, d, reload) {
   const cell = h("div", { class: "row-actions" });
   const detailsBtn = h("button", { class: "btn btn-quiet", type: "button", "aria-expanded": "false" }, "Details");
   const pinBtn = h("button", { class: "btn btn-quiet", type: "button" }, d.hasPin ? "Change PIN" : "Add PIN");
+  const pauseBtn = h("button", { class: "btn btn-quiet", type: "button",
+    title: d.suspended ? "Let them in again, on the schedule they had."
+      : "Stop them getting in for now. Their PIN, fingerprints and face stay on the lock." },
+    d.suspended ? "Resume" : "Pause");
   const removeBtn = h("button", { class: "btn btn-quiet btn-danger", type: "button" }, "Remove");
+  const all = [detailsBtn, pinBtn, pauseBtn, removeBtn];
 
-  detailsBtn.addEventListener("click", () => toggleDetails(detailsBtn, p, d));
+  detailsBtn.addEventListener("click", () => toggleDetails(detailsBtn, p, d, reload));
   pinBtn.addEventListener("click", () => {
     const input = h("input", { type: "password", inputmode: "numeric", maxlength: "8", "aria-label": `New PIN for ${p.name} on ${d.doorName}`, autocomplete: "off" });
     const save = h("button", { class: "btn btn-ink", type: "button" }, "Save PIN");
     const cancel = h("button", { class: "btn btn-quiet", type: "button" }, "Cancel");
     const editor = h("div", { class: "pin-edit" }, input, save, cancel);
+    const back = [...cell.childNodes];
     cell.replaceChildren(editor);
     input.focus();
-    cancel.addEventListener("click", () => renderPerson());
+    const close = () => { cell.replaceChildren(...back); pinBtn.focus(); };
+    cancel.addEventListener("click", close);
     const submit = async () => {
       await busy([save, cancel], async () => {
         toast(`Writing the new PIN to ${d.doorName}…`);
         try {
           await call("change_pin", d.lockId, d.userId, input.value);
           toast(`New PIN saved on ${d.doorName}.`);
-          await reloadPeople(p.key);
+          await reload();
         } catch (e) { toast(e.message, true); }
       });
     };
     save.addEventListener("click", submit);
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") renderPerson(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") close(); });
+  });
+  pauseBtn.addEventListener("click", async () => {
+    const ok = d.suspended
+      ? await confirmDialog(`Let ${p.name} into ${d.doorName} again?`,
+        "They get in on the schedule they had. The lock wakes, so it beeps.", "Resume")
+      : await confirmDialog(`Pause ${p.name} on ${d.doorName}?`,
+        "They can't open this door until you resume them. Their PIN, fingerprints and face stay on the lock, "
+        + "and other doors aren't affected. The lock wakes, so it beeps.", "Pause");
+    if (!ok) return;
+    await busy(all, async () => {
+      toast(`${d.suspended ? "Resuming" : "Pausing"} ${p.name} on ${d.doorName}…`);
+      try {
+        if (d.suspended) {
+          const r = await call("resume_person", d.lockId, d.userId);
+          toast(r.source === "cloud"
+            ? `${p.name} can open ${d.doorName} again. Their schedule was rebuilt from Lockly's record, as none was saved on this device: check it.`
+            : `${p.name} can open ${d.doorName} again.`, r.source === "cloud");
+        } else {
+          const r = await call("suspend_person", d.lockId, d.userId);
+          toast(r.kept ? `${p.name} is paused on ${d.doorName}.`
+            : `${p.name} is paused on ${d.doorName}, but the lock reports different fingerprints or faces for them now: check Details.`, !r.kept);
+        }
+        await reload();
+      } catch (e) { toast(e.message, true); }
+    });
   });
   removeBtn.addEventListener("click", async () => {
     const ok = await confirmDialog(`Remove ${p.name} from ${d.doorName}?`,
       "Their PIN, fingerprints and face on this door stop working. Other doors aren't affected.", "Remove from door");
     if (!ok) return;
-    await busy([removeBtn, pinBtn, detailsBtn], async () => {
+    await busy(all, async () => {
       toast(`Removing ${p.name} from ${d.doorName}…`);
       try {
-        await call("remove_from_door", d.lockId, d.userId);
+        // A Visage or Vision keeps people on the lock itself; other locks only have Lockly's record.
+        await call(d.doorAccessUsers ? "remove_from_door" : "delete_guest", d.lockId, d.userId);
         toast(`${p.name} removed from ${d.doorName}.`);
-        await reloadPeople(p.key);
+        await reload();
       } catch (e) { toast(e.message, true); }
     });
   });
   // The owner's PIN and membership belong to the Lockly app; only their
   // fingerprints and faces are managed here.
   if (d.doorRoute === "bluetooth") {           // no hub: nothing can reach this lock remotely
-    for (const b of [pinBtn, removeBtn]) { b.disabled = true; b.title = "This door has no hub, so it can only be changed over Bluetooth."; }
+    for (const b of [pinBtn, pauseBtn, removeBtn]) { b.disabled = true; b.title = "This door has no hub, so it can only be changed over Bluetooth."; }
+  } else if (!d.doorAccessUsers) {             // people aren't kept on this lock: no record there to change
+    pinBtn.disabled = true;
+    pinBtn.title = "This lock model's PINs can't be changed from here yet: remove the person and add them again.";
   }
-  cell.append(...(d.role === "owner" ? [detailsBtn] : [detailsBtn, pinBtn, removeBtn]));
+  cell.append(...(d.role === "owner" ? [detailsBtn]
+    : [detailsBtn, pinBtn, d.doorAccessUsers ? pauseBtn : null, removeBtn].filter(Boolean)));
   return cell;
 }
 
-async function toggleDetails(btn, p, d) {
+async function toggleDetails(btn, p, d, reload) {
   const tr = btn.closest("tr");
   const next = tr.nextElementSibling;
   if (next && next.classList.contains("detail-row")) {
@@ -1455,50 +1599,101 @@ async function toggleDetails(btn, p, d) {
           try {
             await call("remove_credential", d.lockId, d.userId, kind, c.crdntlId, c.code);
             toast(`${label.charAt(0).toUpperCase() + label.slice(1)} removed.`);
-            await reloadPeople(p.key);
+            await reload();
           } catch (e) { toast(e.message, true); }
         });
       });
       return h("li", {}, h("span", {}, c.name || label.charAt(0).toUpperCase() + label.slice(1), " ",
         h("span", { class: "muted" }, `${label}, slot ${c.slot ?? "?"}`)), rm);
     };
+    // The PIN as Lockly's record has it, shown only when asked for.
+    const pinItem = () => {
+      const val = h("span", { class: "pin-val" }, "hidden");
+      const show = h("button", { class: "btn btn-quiet", type: "button", "aria-pressed": "false" }, "Show");
+      show.addEventListener("click", () => {
+        const on = show.getAttribute("aria-pressed") !== "true";
+        show.setAttribute("aria-pressed", String(on));
+        show.textContent = on ? "Hide" : "Show";
+        val.textContent = on ? d.pin : "hidden";
+      });
+      return h("li", {}, h("span", {}, "PIN ", val), show);
+    };
     const items = [
+      d.pin ? pinItem() : null,
       ...det.fingerprints.map((c) => item("fingerprint", "fingerprint", c)),
       ...det.faces.map((c) => item("face", "face", c)),
       ...det.cards.map((c) => item("card", "card", c)),
-    ];
+    ].filter(Boolean);
     td.replaceChildren(items.length ? h("ul", { class: "cred-list" }, items)
       : h("p", { class: "muted" }, det.hasPin ? "Only a PIN on this door." : "No PIN, fingerprints, faces or cards on this door."));
   } catch (e) { td.replaceChildren(h("p", { class: "form-error" }, e.message)); }
 }
 
+// ── giving access: one form, in People (any door) and in a door's Access tab (that door) ──
+
 let newPersonMode = false;
+let grantFor = "people";              // where the form is now: "people" or "door"
+const HOURS_KEY = { 4: "4h", 24: "24h", 72: "72h", 168: "1w" };     // Api.add_guest's durations
+
 (() => {
   const box = $("grant-days");
   DAYS.forEach(([key, label], i) => box.append(
     h("label", {}, h("input", { type: "checkbox", name: "gday", value: key, checked: i < 5 }), h("span", {}, label))));
-  $("grant-kind").addEventListener("change", () => {
-    const k = $("grant-form").elements.kind.value;
-    $("grant-weekly").hidden = k !== "weekly";
-    $("grant-dates").hidden = k !== "dates";
-  });
+  $("grant-kind").addEventListener("change", syncGrant);
+  $("grant-form").elements.door.addEventListener("change", syncGrant);
 })();
+
+// Put the form where it's used now, set up for that place.
+function mountGrant(where) {
+  grantFor = where;
+  $(where === "door" ? "access-slot" : "grant-slot").append($("grant-form"));
+  if (where === "door") setupGrant(null);
+}
 
 function setupGrant(p) {
   const f = $("grant-form");
+  const forDoor = grantFor === "door";
   const have = new Set(p ? p.doors.map((d) => d.lockId) : []);
-  const options = locks.filter((l) => !have.has(l.id));
+  const options = forDoor ? [current()].filter(Boolean) : locks.filter((l) => !have.has(l.id));
   f.elements.door.replaceChildren(...options.map((l) => h("option", { value: l.id, disabled: l.route === "bluetooth" },
-    doorLabel(l) + (l.route === "bluetooth" ? " (no hub — Bluetooth only)" : ""))));
+    doorLabel(l) + (l.route === "bluetooth" ? " (no hub: Bluetooth only)" : ""))));
   const firstReachable = options.find((l) => l.route !== "bluetooth");
   if (firstReachable) f.elements.door.value = firstReachable.id;
-  $("grant-name-field").hidden = !newPersonMode;
-  $("grant-title").textContent = newPersonMode ? "Add a person" : "Give access to another door";
-  $("grant-submit").textContent = newPersonMode ? "Add person" : "Give access";
-  $("grant-submit").disabled = !options.length;
-  $("grant-error").textContent = options.length ? "" : "This person can already open every door.";
+  const naming = forDoor || newPersonMode;
+  $("grant-name-field").hidden = !naming;
+  $("grant-door-field").hidden = forDoor;
+  $("grant-title").textContent = forDoor ? "Give someone this door" : newPersonMode ? "Add a person" : "Give access to another door";
+  $("grant-submit").textContent = naming ? "Add person" : "Give access";
+  $("grant-submit").disabled = !firstReachable;
+  $("grant-error").textContent = firstReachable ? ""
+    : forDoor ? "This door has no hub, so people can only be added to it over Bluetooth."
+      : options.length ? "The doors left have no hub, so people can only be added to them over Bluetooth."
+        : "This person can already open every door.";
   const knownPin = p && (p.doors.find((d) => d.pin) || {}).pin;
   f.elements.pin.value = knownPin || "";
+  if (naming) f.elements.name.value = "";
+  syncGrant();
+}
+
+// A Visage or Vision keeps people on the lock itself and takes every kind of schedule.
+// Other locks only have Lockly's record: always, or for a while.
+function syncGrant() {
+  const f = $("grant-form");
+  const door = locks.find((l) => l.id === f.elements.door.value);
+  const onLock = !door || door.accessUsers;
+  for (const r of f.querySelectorAll("input[name=kind]")) {
+    const offered = onLock || r.value === "always" || r.value === "hours";
+    r.closest("label").hidden = !offered;
+    if (!offered && r.checked) f.querySelector("input[name=kind][value=always]").checked = true;
+  }
+  const k = f.elements.kind.value;
+  $("grant-hours").hidden = k !== "hours";
+  $("grant-weekly").hidden = k !== "weekly";
+  $("grant-dates").hidden = k !== "dates";
+  $("grant-fine").textContent = onLock
+    ? "The PIN is written to the lock straight away. Faces and fingerprints stay with the lock they were enrolled on; enrol them again at a new door."
+    : "This lock doesn't keep people on the lock itself: Lockly's cloud takes the PIN straight away, and whether the lock "
+      + "picks it up at once isn't confirmed, so try it at the door.";
 }
 
 $("add-person").addEventListener("click", () => {
@@ -1509,18 +1704,20 @@ $("add-person").addEventListener("click", () => {
   $("person-body").hidden = false;
   $("p-name").textContent = "New person";
   $("p-sub").textContent = "Choose a door and how they get in. You can add more doors afterwards.";
-  $("p-doors").replaceChildren();
-  document.querySelector(".access-table").hidden = true;
+  $("p-doors").hidden = true;
   $("p-merge").hidden = true;
+  mountGrant("people");
   setupGrant(null);
+  setPane("people-ws", "detail");
   $("grant-form").elements.name.focus();
 });
 
 $("grant-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.currentTarget;
-  const p = people.find((x) => x.key === personKey);
-  const name = newPersonMode ? f.elements.name.value.trim() : (p && p.name);
+  const forDoor = grantFor === "door";
+  const p = forDoor ? null : people.find((x) => x.key === personKey);
+  const name = forDoor || newPersonMode ? f.elements.name.value.trim() : (p && p.name);
   const kind = f.elements.kind.value;
   const access = { kind };
   if (kind === "weekly") {
@@ -1528,26 +1725,35 @@ $("grant-form").addEventListener("submit", async (ev) => {
     access.start = f.elements.start.value; access.end = f.elements.end.value;
   } else if (kind === "dates") {
     access.from = f.elements.from.value; access.to = f.elements.to.value;
+  } else if (kind === "hours") {
+    access.hours = Number(f.elements.hours.value);
   }
   const lockId = f.elements.door.value;
   const door = locks.find((l) => l.id === lockId);
+  const pin = f.elements.pin.value.trim();
   $("grant-error").textContent = "";
   if (!name) { $("grant-error").textContent = "Give the person a name."; return; }
-  const ok = await confirmDialog(`Give ${name} access to ${door ? doorLabel(door) : "this door"}?`,
-    f.elements.pin.value ? "The PIN starts working on that door as soon as the lock confirms it." : "They'll have no PIN on that door until you add one.",
+  if (!door) { $("grant-error").textContent = "Choose a door."; return; }
+  if (!door.accessUsers && !pin) { $("grant-error").textContent = "On this lock a person needs a PIN."; return; }
+  const ok = await confirmDialog(`Give ${name} access to ${doorLabel(door)}?`,
+    !door.accessUsers ? "Lockly's cloud takes the PIN straight away. Try it at the door."
+      : pin ? "The PIN starts working on that door as soon as the lock confirms it."
+        : "They'll have no PIN on that door until you add one.",
     "Give access");
   if (!ok) return;
   await busy($("grant-submit"), async () => {
-    toast(`Adding ${name} to ${door ? doorLabel(door) : "the door"}…`);
+    toast(`Adding ${name} to ${doorLabel(door)}…`);
     try {
-      await call("add_to_door", lockId, name, f.elements.pin.value, access);
-      toast(`${name} can now open ${door ? doorLabel(door) : "the door"}.`);
+      if (door.accessUsers) await call("add_to_door", lockId, name, pin, access);
+      else await call("add_guest", lockId, name, pin, kind === "always" ? "permanent" : HOURS_KEY[access.hours]);
+      toast(`${name} can now open ${doorLabel(door)}.`);
+      if (forDoor) { await doorAccessChanged(); return; }
       newPersonMode = false;
       $("p-merge").hidden = false;
-      const key = p ? p.key : `name:${name.toLowerCase()}`;
-      await reloadPeople(key);
+      await reloadPeople(p ? p.key : `name:${name.toLowerCase()}`);
     } catch (e) { $("grant-error").textContent = e.message; }
   });
 });
 
-boot();
+// A backend that can't even say what it can do: say so, rather than sit at "Signing in…".
+boot().catch((e) => { $("boot-msg").textContent = e.message; $("boot").removeAttribute("aria-busy"); });

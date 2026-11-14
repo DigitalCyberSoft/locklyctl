@@ -4,7 +4,7 @@ import pytest
 
 from locklyctl import config, features as F, commands
 from locklyctl.commands import UsageError
-from locklyctl.transport import LocklyClient
+from locklyctl.transport import LocklyClient, LocklyError
 
 LOCK = {"ID": "aa00112233445566778899bb", "mc": "12345678", "mod": "PGK728WRHK",
         "tz": "+8:00", "na": "Test Door"}
@@ -123,3 +123,13 @@ def test_resolve_user_by_name_and_id(monkeypatch, tmp_path):
         commands._resolve_user(c, LOCK, "Beta")                 # ambiguous
     with pytest.raises(UsageError):
         commands._resolve_user(c, LOCK, "Nobody")               # missing
+
+
+def test_a_second_suspend_is_refused(monkeypatch, tmp_path):
+    # it would save the far-future window as the person's schedule, and resume would restore that
+    c, pushes = _client(monkeypatch, tmp_path)
+    c.suspend_access_user(LOCK, 31)
+    with pytest.raises(LocklyError, match="already suspended"):
+        c.suspend_access_user(LOCK, 31)
+    assert len(pushes) == 1
+    assert config.get_suspended(LOCK["ID"], 31) == {"user_type": 0x42, "date": "7F000018000000000000"}

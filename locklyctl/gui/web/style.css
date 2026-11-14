@@ -1,4 +1,4 @@
-/* locklyctl GUI — door-number plates on a corridor wall.
+/* locklyctl GUI: door-number plates on a corridor wall.
    One family (Archivo, variable width + weight). The unit number is the one
    loud element; everything else stays quiet. */
 
@@ -131,12 +131,14 @@ h1, h2, p { margin: 0; }
 /* ── layout ───────────────────────────────────────────────────────── */
 .app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
 .topbar {
-  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  display: flex; align-items: center; gap: 1.75rem;
   padding: 0.6rem 1.25rem; border-bottom: 1px solid var(--rule);
 }
 .brand { font-size: var(--fs-lg); }
-.topbar-right { display: flex; gap: 0.6rem; align-items: center; font-size: var(--fs-sm); }
-.workspace { display: grid; grid-template-columns: minmax(18rem, 30rem) 1fr; min-height: 0; }
+/* The list keeps to 40 % of the window, so the item beside it has 480px even in the smallest window (860px). */
+.workspace { display: grid; grid-template-columns: minmax(16rem, min(30rem, 40%)) minmax(0, 1fr); min-height: 0; }
+.workspace.single { grid-template-columns: minmax(0, 1fr); }
+#maint-ws { grid-template-columns: minmax(20rem, 54%) minmax(0, 1fr); }   /* its list is a table */
 
 /* ── the cabinet of plates ────────────────────────────────────────── */
 .cabinet { overflow-y: auto; padding: 1.25rem; border-right: 1px solid var(--rule); }
@@ -208,16 +210,25 @@ h1, h2, p { margin: 0; }
 .fav-actions .btn { padding: 0.6rem 0.9rem; }
 .btn-open { border-color: var(--unlocked); color: var(--unlocked); }
 .btn-open:hover { background: color-mix(in srgb, var(--unlocked) 10%, transparent); }
-.fav-toggle { margin-left: auto; align-self: center; }
-/* Favorite and the door-list controls stay together at the right, and wrap as one. */
-.door-tools { margin-left: auto; align-self: center; display: flex; flex-wrap: wrap;
-  justify-content: flex-end; gap: 0.4rem; }
-.door-tools .fav-toggle { margin-left: 0; }
-.door-order { display: flex; gap: 0.25rem; }
-.door-order .btn { min-width: 2.25rem; }
-.show-hidden { width: 100%; margin-bottom: 0.75rem; }
-.plate.is-hidden { opacity: 0.55; border-style: dashed; }
-.fav-toggle .star { color: var(--brass); }
+
+/* Above the plates: checking every door, and editing the list. */
+.list-tools { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
+.list-tools #edit-list { margin-left: auto; }
+.list-note { grid-column: 1 / -1; font-size: var(--fs-sm); }
+/* Editing the list: every door a row with its tools (favorite, up, down, hide). */
+.plates.editing { grid-template-columns: minmax(0, 1fr); gap: 0.4rem; }
+.edit-row {
+  align-items: center; justify-content: space-between; gap: 0.5rem;
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 3px;
+  padding: 0.3rem 0.4rem 0.3rem 0.75rem;
+}
+.edit-row.is-hidden { border-style: dashed; }
+.edit-row.is-hidden .edit-name { color: var(--ink-soft); font-weight: 400; }
+.edit-name { font-weight: 800; font-stretch: 112%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edit-name .muted { font-weight: 400; font-stretch: 100%; font-size: var(--fs-sm); }
+.edit-tools { display: flex; gap: 0.25rem; flex: none; }
+.edit-tools .btn { min-width: 2.75rem; min-height: 2.75rem; padding: 0.4rem 0.6rem; }
+.edit-tools [data-tool="fav"][aria-pressed="true"] { color: var(--brass); }
 
 /* ── the selected door ────────────────────────────────────────────── */
 .door { overflow-y: auto; padding: 1.75rem 2.25rem 4rem; background: var(--surface); }
@@ -282,9 +293,6 @@ h1, h2, p { margin: 0; }
 .log td { padding: 0.45rem 0.75rem 0.45rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
 .log td:first-child { color: var(--ink-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
-.guest { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
-.guest-name { font-weight: 600; }
-.guest-meta { font-size: var(--fs-sm); color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 .inline-form { display: grid; gap: 0.85rem; padding-top: 0.5rem; }
 
 .caution { background: var(--caution-bg); padding: 0.75rem 0.9rem; border-left: 3px solid var(--brass); font-size: var(--fs-sm); max-width: 62ch; }
@@ -333,8 +341,8 @@ legend { font-size: var(--fs-sm); color: var(--ink-soft); margin-bottom: 0.35rem
 input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 
 /* ── views & people ───────────────────────────────────────────────── */
-.topbar-left { display: flex; align-items: center; gap: 1.75rem; }
-.views { display: flex; gap: 0.25rem; }
+.views { display: flex; gap: 0.25rem; flex: 1; }
+#view-settings { margin-left: auto; }
 .views button {
   font: inherit; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft);
   background: none; border: 0; border-bottom: 3px solid transparent; padding: 0.35rem 0.6rem; cursor: pointer;
@@ -357,6 +365,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .person-head h1 { font-size: 2.4rem; font-weight: 800; font-stretch: 112%; line-height: 1.05; letter-spacing: -0.01em; }
 .person-head p { margin-top: 0.35rem; }
 .access-table { width: 100%; border-collapse: collapse; margin-top: 1.75rem; font-size: var(--fs-sm); max-width: 60rem; }
+.panel .access-table { margin-top: 0; }
+.who { font-weight: 600; }
+.pin-val { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 .access-table th { text-align: left; font-weight: 600; color: var(--ink-soft); padding: 0 1rem 0.5rem 0; border-bottom: 1px solid var(--rule); }
 .access-table td { padding: 0.7rem 1rem 0.7rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
 .door-cell { display: flex; align-items: baseline; gap: 0.6rem; }
@@ -381,6 +392,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .pin-edit { display: flex; gap: 0.4rem; align-items: center; justify-content: flex-end; }
 .pin-edit input { width: 8.5rem; font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--ink); }
 .grant { margin-top: 2.25rem; max-width: 46rem; }
+.panel .grant { margin-top: 0.5rem; }
 #add-person { justify-self: start; }
 #grant-weekly { display: grid; gap: 0.85rem; }
 .cred-list .btn { padding: 0.3rem 0.6rem; font-size: var(--fs-xs); }
@@ -400,16 +412,87 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .confirm h2 { font-size: var(--fs-lg); margin-bottom: 0.5rem; }
 .confirm p { margin-bottom: 1.25rem; color: var(--ink-soft); }
 
-/* ── narrow windows ───────────────────────────────────────────────── */
+/* ── maintenance & settings ───────────────────────────────────────── */
+/* Every door's health as a table: one grid shared by the heading and each row. */
+.maint-head, .maint-row {
+  display: grid; grid-template-columns: minmax(6rem, 1.5fr) 6.5rem 3.6rem 6.5rem 4.6rem 4.6rem;
+  gap: 0.1rem 0.6rem; align-items: baseline;
+}
+.maint-head { margin: 0; padding: 0 0.4rem 0.4rem; border-bottom: 1px solid var(--rule); font-size: var(--fs-xs); font-weight: 600; color: var(--ink-soft); }
+.maint-rows { list-style: none; margin: 0; padding: 0; display: grid; }
+.maint-row {
+  width: 100%; text-align: left; font: inherit; font-size: var(--fs-sm); color: inherit; cursor: pointer;
+  background: none; border: 0; border-bottom: 1px solid var(--rule); padding: 0.6rem 0.4rem;
+}
+.maint-row:hover { background: var(--surface); }
+.maint-row[aria-current="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--brass); }
+.m-name { font-weight: 800; font-stretch: 112%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-name .muted { font-weight: 400; font-stretch: 100%; }
+.m-cell { font-variant-numeric: tabular-nums; }
+.m-cell.warn { color: var(--unlocked); font-weight: 600; }
+.m-cell.none { color: var(--ink-soft); }
+/* One job per section: what it does, then its button, then its result. */
+.job { display: grid; gap: 0.75rem; max-width: 46rem; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+.job h2 { font-size: var(--fs-lg); font-weight: 700; }
+.job #tz-box, .job #wifi-form { display: grid; gap: 0.75rem; }
+.job #wifi-form { max-width: 26rem; }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; }
+.back { display: none; }
+
+/* ── narrower windows: the maintenance table becomes a line per door ── */
+@media (max-width: 1100px) {
+  .maint-head { display: none; }
+  .maint-row { display: flex; flex-wrap: wrap; gap: 0.1rem 0.9rem; }
+  .m-name { flex-basis: 100%; }
+  .m-cell::before { content: attr(data-label) " "; color: var(--ink-soft); font-weight: 400; }
+  .m-cell.none { display: none; }
+}
+
+/* ── phones: one thing at a time ──────────────────────────────────── */
+/* The views are a bar at the bottom. A view shows its list or one item (data-pane,
+   set by app.js), with a way back. Lock and Hold to unlock stay at the bottom edge. */
 @media (max-width: 760px) {
-  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .cabinet { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 40vh; padding: 1rem; }
-  .door { padding: 1.25rem 1rem 3rem; }
-  :root { --door-num: 3.75rem; }
-  .topbar { padding: 0.6rem 1rem; }
-  .topbar-right #who { display: none; }
-  .topbar-left { gap: 0.75rem; }
-  .roster { border-right: 0; border-bottom: 1px solid var(--rule); max-height: 40vh; padding: 1rem; }
+  :root { --door-num: 3.75rem; --nav-h: 3.5rem; }
+  .app { grid-template-rows: minmax(0, 1fr) auto; }
+  .topbar { order: 2; gap: 0; padding: 0 0 env(safe-area-inset-bottom, 0px); border-bottom: 0; border-top: 1px solid var(--rule); }
+  .brand { display: none; }
+  .views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
+  .views button {
+    display: grid; justify-items: center; align-content: center; gap: 0.1rem; min-height: var(--nav-h);
+    padding: 0.3rem 0.2rem; font-size: var(--fs-xs); border-bottom: 0; border-top: 3px solid transparent;
+  }
+  .views button[aria-pressed="true"] { border-top-color: var(--brass); }
+  .views .i { margin: 0; width: 1.5em; height: 1.5em; }
+  #view-settings { margin-left: 0; }
+
+  .workspace, #maint-ws { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .workspace[data-pane="list"] > .door,
+  .workspace[data-pane="detail"] > .cabinet,
+  .workspace[data-pane="detail"] > .roster { display: none; }
+  .cabinet, .roster { border-right: 0; padding: 1rem; }
+  .door { padding: 1rem 1rem 3rem; }
+  .back {
+    display: inline-flex; align-items: center; gap: 0.35rem; min-height: 2.75rem;
+    margin: -0.5rem 0 0.25rem -0.5rem; padding: 0 0.75rem 0 0.5rem;
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft);
+    background: none; border: 0; cursor: pointer;
+  }
+  .back::before { content: "‹"; font-size: 1.5em; line-height: 1; }
+
+  #doors-ws .door { padding-bottom: 6.5rem; }               /* room for the pinned buttons */
+  #door-actions {
+    position: fixed; z-index: 2; left: 0; right: 0;
+    bottom: calc(var(--nav-h) + 1px + env(safe-area-inset-bottom, 0px));
+    flex-wrap: nowrap; padding: 0.6rem 1rem; background: var(--surface); border-top: 1px solid var(--rule);
+  }
+  #door-actions .btn { flex: 1 1 auto; padding: 0.8rem 0.75rem; }
+  #door-actions #btn-check { flex: none; }
+  #btn-check .btn-word { display: none; }                   /* its icon, with the name in aria-label */
+  #btn-check .i { margin: 0; }
+  #hold-hint { display: none; }                             /* the button says "Hold to unlock" */
+  .toast { bottom: calc(var(--nav-h) + 1.25rem); }
+  #doors-ws[data-pane="detail"] ~ .toast { bottom: calc(var(--nav-h) + 5.75rem); }
+
   .access-table thead { display: none; }
   .access-table tr { display: grid; grid-template-columns: 1fr 1fr; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
   .access-table td { border: 0; padding: 0.15rem 0.5rem 0.15rem 0; }
@@ -417,27 +500,25 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .access-table .row-actions { justify-content: flex-start; padding-top: 0.35rem; }
 }
 
-/* Phones. Tracks are minmax(0, …) so one wide child can't widen the page. */
+/* Small phones. Tracks are minmax(0, …) so one wide child can't widen the page. */
 @media (max-width: 560px) {
-  .workspace { grid-template-columns: minmax(0, 1fr); }
-  .topbar { flex-wrap: wrap; row-gap: 0.4rem; padding: 0.5rem 1rem; }
-  .topbar-right { margin-left: auto; }
-  .topbar .btn { padding: 0.4rem 0.7rem; }
-  .topbar-right .i { display: none; }     /* the words fit a phone; words plus icons don't */
-  .cabinet, .roster { max-height: 34vh; }
   .plates { grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr)); gap: 0.5rem; }
   .plate-word .i { display: none; }       /* a 7rem plate fits "Bluetooth only" or "Connecting…", not the icon too; the latch shows the state */
   :root { --plate-num: 1.75rem; --door-num: 3.25rem; }
   .tabs { gap: 1.1rem; overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
   .tabs [role="tab"] { flex: none; }
-  .actions .btn { flex: 1 1 auto; padding: 0.75rem 1rem; }
   .log td { padding-right: 0.5rem; }
   .person-head h1 { font-size: 1.9rem; }
-  .door-title { order: 1; flex-basis: 100%; }               /* Favorite sits beside the number */
-  .door-tools { flex: 1 1 0; min-width: 0; }                /* and its controls wrap beside it, not under it */
-  .cabinet:has(.favs:not([hidden])) { max-height: 50vh; }   /* room for the favorites */
   .favs { margin-bottom: 1rem; }
-  .fav-actions .btn { padding: 0.7rem 0.85rem; }             /* at least 44px tall to tap */
+}
+
+/* Fingers: everything that's tapped is at least 44px tall. */
+@media (max-width: 760px), (hover: none) and (pointer: coarse) {
+  .btn, .field input, .field select, .keep-hours { min-height: 2.75rem; }
+  .keep-chips .btn, .row-actions .btn, .cred-list .btn, #keep-note .btn { padding: 0.5rem 0.9rem; font-size: var(--fs-sm); }
+  .seg span, .days span { padding: 0.7rem 0.9rem; }
+  .tabs [role="tab"] { min-height: 2.75rem; }
+  .pin-edit input { min-height: 2.75rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

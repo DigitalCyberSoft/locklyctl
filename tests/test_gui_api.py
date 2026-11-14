@@ -90,6 +90,20 @@ class FakeClient:
     def delete_access_user(self, lock, *, user_acu_id, pwd_id, user_type):
         self._log("delete", user_acu_id, pwd_id, user_type)
 
+    def delete_guest(self, lock, user_acu_id):
+        self._log("cloud-delete", lock["ID"], user_acu_id)
+        return True
+
+    def suspend_access_user(self, lock, user_id, *, dry_run=False):
+        self._log("suspend", lock["ID"], user_id)
+        config.stash_suspended(lock["ID"], user_id, {"user_type": 0x42, "date": "7F000018000000000000"})
+        counts = {"faces": 1, "fingerprints": 0, "cards": 0}
+        return {"stash": {}, "before": counts, "after": dict(counts)}
+
+    def resume_access_user(self, lock, user_id, *, dry_run=False):
+        self._log("resume", lock["ID"], user_id)
+        return {"restore": config.pop_suspended(lock["ID"], user_id), "source": "stash", "after": {}}
+
     def _rest_ok(self, endpoint, req):
         self._log("rest", endpoint, req)
         return {}
@@ -822,3 +836,139 @@ def test_time_zone_from_the_page(api):
     assert door[B2]["timeZone"] == "not set" and door[B2]["computerTimeZone"].startswith("UTC")
     r = api.set_time_zone(B2)
     assert given == [B2] and r["ok"] and r["zone"] == "UTC+8" and r["lock"]["id"] == B2
+
+
+@_api_in_tmp_home
+def test_capabilities_and_what_a_door_has(api):
+    old = os.environ.pop("LOCKLYCTL_DEVICE", None)
+    try:
+        caps = api.capabilities()                       # needs no sign-in
+        assert caps["device"] == "computer" and caps["commandLine"] is True
+        assert isinstance(caps["bluetooth"], str) and caps["version"] and caps["logPath"].endswith("locklyctl.log")
+        os.environ["LOCKLYCTL_DEVICE"] = "phone"       # what the phone app sets
+        caps = api.capabilities()
+        assert caps["device"] == "phone" and caps["commandLine"] is False
+    finally:
+        os.environ.pop("LOCKLYCTL_DEVICE", None)
+        if old is not None:
+            os.environ["LOCKLYCTL_DEVICE"] = old
+    api.sign_in("a@b", "right", False)
+    touch, visage = (next(v for v in api.locks() if v["id"] == i) for i in (UUID, B2))
+    # a PGD7Y behind a hub: no Wi-Fi of its own, people only in Lockly's cloud
+    assert (touch["hasWifi"], touch["accessUsers"], touch["firmwareKind"]) == (False, False, F.FW_SINGLE)
+    assert (visage["hasWifi"], visage["accessUsers"], visage["firmwareKind"]) == (True, True, F.FW_MULTI_PART)
+
+
+@_api_in_tmp_home
+def test_door_access_and_pausing(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    rows = api.door_access(B2)
+    assert [r["person"] for r in rows] == ["Owner", "Dana R"]          # the owner first
+    dana = rows[1]
+    assert dana["userId"] == 5 and dana["doorAccessUsers"] and not dana["suspended"] and "_key" not in dana
+    assert not api.door_access(UUID)[0]["doorAccessUsers"]             # the PGD7Y
+    # pausing keeps the person's credentials; the page shows them as paused
+    assert api.suspend_person(B2, 5) == {"ok": True, "kept": True}
+    assert c.calls[-1] == ("suspend", B2, 5)
+    assert api.door_access(B2)[1]["suspended"]
+    dana_r = next(p for p in api.people()["people"] if p["name"] == "Dana R")
+    assert dana_r["doors"][0]["suspended"]
+    for bad in (lambda: api.suspend_person(B2, 5),                     # already paused
+                lambda: api.suspend_person(B2, 0),                     # the owner
+                lambda: api.suspend_person(UUID, 3)):                  # not a Visage or Vision
+        try:
+            bad()
+        except ValueError:
+            continue
+        raise AssertionError("paused")
+    assert c.calls[-1] == ("suspend", B2, 5)                           # none of those reached the lock
+    assert api.resume_person(B2, 5) == {"ok": True, "source": "stash"}
+    assert not api.door_access(B2)[1]["suspended"]
+
+
+@_api_in_tmp_home
+def test_a_pin_user_is_deleted_where_the_lock_keeps_them(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    # a Visage keeps people on the lock: its record goes first, then the cloud's
+    c.lock_user_table = lambda lock: [{"pwd_id": 6, "user_id": 5, "user_type": 0x12, "pin": "1357"}]
+    api.delete_guest(B2, 5)
+    assert c.calls[-1] == ("delete", 5, 6, 0x12)
+    # a PGD7Y only has the cloud's record
+    api.delete_guest(UUID, 3)
+    assert c.calls[-1] == ("cloud-delete", UUID, 3)
+
+
+@_api_in_tmp_home
+def test_access_for_a_while(api):
+    import locklyctl.gui.api as A
+    from datetime import datetime
+
+    class Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 1, 8, 0, 30, tzinfo=tz)
+    real, A.datetime = A.datetime, Now
+    try:
+        api.sign_in("a@b", "right", False)
+        api.add_to_door(B2, "Cleaner", "2468", {"kind": "hours", "hours": 60})
+        kw = api._client.calls[-1][2]
+        # from now (seconds dropped) to 60 hours on, as a dated guest
+        assert (kw["role"], kw["time_type"], kw["user_type"]) == ("GUEST", "MORE_LIMIT", F.UT_GUEST_PERIOD)
+        assert kw["date"] == "1A0B010800" + "1A0B031400"
+        for bad in (0, -3, 24 * 400, "12", True, None):
+            try:
+                api.add_to_door(B2, "X", "1234", {"kind": "hours", "hours": bad})
+            except ValueError:
+                continue
+            raise AssertionError(bad)
+    finally:
+        A.datetime = real
+
+
+@_api_in_tmp_home
+def test_welcome_hours_keep_a_running_keep_unlocked_window(api):
+    import locklyctl.gui.api as A
+    from datetime import datetime
+    from locklyctl import protocol as P
+
+    def sent(c):
+        return P.AES.new(P.derive_aes_key(MC, B2), P.AES.MODE_ECB).decrypt(bytes.fromhex(c.sent[-1][0])[6:-2]).hex().upper()
+
+    class Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2099, 1, 1, 14, 5, 30, tzinfo=tz)
+    real, A.datetime = A.datetime, Now
+    try:
+        api.sign_in("a@b", "right", False)
+        c = api._client
+        # no window running: the schedule goes as one slot, first entry (the Lockly app's default)
+        api.welcome(B2, None, "set", ["sat"], "09:00", "12:00", True)
+        assert "0301" + "08" + "2009000C00" + "00FFFFFFFF" * 7 + "00" + "01" in sent(c)
+        # "unlock by itself" sets that slot's entry bit
+        api.welcome(B2, None, "set", ["sat"], "09:00", "12:00", True, "auto")
+        assert "0301" + "08" + "2009000C00" + "00FFFFFFFF" * 7 + "01" + "01" in sent(c)
+        try:
+            api.welcome(B2, None, "set", ["sat"], "09:00", "12:00", False, "later")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown entry accepted")
+        # a keep-unlocked window is running: the lock holds its one-time slot (on, auto entry)
+        api.keep_unlocked(B2, 60)
+        c.welcome_table = "00040108" + "8007001500" + "800E050F05" + "00FFFFFFFF" * 6 + "02" + "02"
+        api.welcome(B2, None, "set", ["sat"], "09:00", "12:00", True)
+        # the new hours replace the door's own slot; the window's slot is written back, still on and auto
+        assert "0301" + "08" + "2009000C00" + "800E050F05" + "00FFFFFFFF" * 6 + "02" + "03" in sent(c)
+        assert api._view(api._lock(B2))["keepUnlockedUntil"] == "15:05"
+        # turning Welcome Mode off leaves the window too
+        api.welcome(B2, None, "off", [], "", "", True)
+        assert "0301" + "08" + "800E050F05" + "00FFFFFFFF" * 7 + "01" + "01" in sent(c)
+        # a preview asks the lock nothing
+        before = len(c.sent)
+        assert api.welcome(B2, None, "set", ["sat"], "09:00", "12:00", False)["sent"] is False and len(c.sent) == before
+    finally:
+        A.datetime = real
+

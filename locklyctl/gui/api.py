@@ -8,7 +8,9 @@ the same LocklyClient the CLI uses — this module only shapes data for the UI.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,6 +29,15 @@ from ..transport import LocklyClient, LocklyError
 _LOG = logging.getLogger("locklyctl.gui")
 _UNIT_RE = re.compile(r"^\s*(\d{1,4}[A-Za-z]?)\b\s*(.*)$")
 _DURATIONS_H = {"4h": 4, "24h": 24, "72h": 72, "1w": 168}
+
+
+def device_kind() -> str:
+    """"phone" in the Android and iOS apps, else "computer". The phone app says
+    so itself (LOCKLYCTL_DEVICE, mobile/locklyctl_app/app.py); sys.platform is
+    "android" or "ios" there too from Python 3.13."""
+    if os.environ.get("LOCKLYCTL_DEVICE") in ("phone", "computer"):
+        return os.environ["LOCKLYCTL_DEVICE"]
+    return "phone" if sys.platform in ("android", "ios") or hasattr(sys, "getandroidapilevel") else "computer"
 
 
 def split_unit(name: str) -> tuple[str, str]:
@@ -99,8 +110,10 @@ def describe_access(u: dict, tz: timezone | None = None) -> str:
     return tt.replace("_", " ").capitalize() if tt else "Unknown"
 
 
-def person_access(u: dict, door: dict, tz: timezone | None = None) -> dict:
-    """One person's access on one door, shaped for the People view."""
+def person_access(u: dict, door: dict, tz: timezone | None = None,
+                  suspended: frozenset | set = frozenset()) -> dict:
+    """One person's access on one door, shaped for the People view and a
+    door's Access tab. ``suspended`` is the config's suspended_users keys."""
     # Collapse runs of spaces so "Sam  Taylor" and "Sam Taylor " group together.
     name = re.sub(r"\s+", " ", " ".join(x for x in (u.get("name"), u.get("lastName")) if x)).strip()
     email = (u.get("email") or "").strip().lower()
@@ -109,7 +122,12 @@ def person_access(u: dict, door: dict, tz: timezone | None = None) -> dict:
         "person": name or email or "Unnamed",
         "lockId": door["id"], "doorName": door["name"], "doorUnit": door["unit"],
         "doorRest": door["rest"], "doorModel": door["model"], "doorRoute": door.get("route"),
+        # Access-user locks (Visage, Vision) keep people on the lock itself: PINs
+        # can be changed and people paused there. Other locks only have the cloud list.
+        "doorAccessUsers": bool(door.get("accessUsers")),
         "userId": u.get("userAcuId"),
+        # Paused from here (suspend_person): the lock holds a far-future window for them.
+        "suspended": config._suspended_key(door["id"], u.get("userAcuId")) in suspended,
         "role": _ROLES.get(str(u.get("type")), str(u.get("type") or "").lower()),
         "access": describe_access(u, tz),
         "timeType": u.get("timeType"),
@@ -156,8 +174,15 @@ def _access_spec(access: dict, tz) -> dict:
         return {"role": "GUEST", "time_type": "WEEK", "week": week, "start_ms": ms(begin),
                 "end_ms": ms(end), "user_type": F.UT_GUEST_WEEKLY,
                 "date": F.access_date_weekly(week, begin, end)}
-    if kind == "dates":
-        start, end = _parse_local(access.get("from"), tz), _parse_local(access.get("to"), tz)
+    if kind in ("dates", "hours"):
+        if kind == "hours":                  # from now, for that long
+            hours = access.get("hours")
+            if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 1 <= hours <= 24 * 366:
+                raise ValueError("Choose how long this person can get in.")
+            start = datetime.now(tz).replace(second=0, microsecond=0)
+            end = start + timedelta(hours=hours)
+        else:
+            start, end = _parse_local(access.get("from"), tz), _parse_local(access.get("to"), tz)
         if end <= start:
             raise ValueError("The end must be after the start.")
         return {"role": "GUEST", "time_type": "MORE_LIMIT", "start_ms": int(start.timestamp() * 1000),
@@ -276,6 +301,18 @@ class Api:
         be used on this computer ("" when it can be tried)."""
         return {"mode": config.connection_mode(config.load_config()), "bluetooth": BLE.available()}
 
+    def capabilities(self) -> dict:
+        """What this build and device can do, so the page offers only that:
+        ``device`` is "phone" or "computer"; ``bluetooth`` is why Bluetooth
+        can't be used here ("" when it can be tried); ``commandLine`` is
+        whether the ``locklyctl`` command comes with this install (not in the
+        packaged apps); plus the version and where the log is."""
+        from .. import __version__
+        device = device_kind()
+        return {"device": device, "bluetooth": BLE.available(),
+                "commandLine": device == "computer" and not getattr(sys, "frozen", False),
+                "version": __version__, "logPath": str(config._log_path())}
+
     def set_connection(self, mode: str) -> dict:
         """Save how commands reach a lock: "auto", "remote" or "bluetooth"."""
         if mode not in CONNECTIONS:
@@ -345,6 +382,12 @@ class Api:
             "checkedAt": e.get("ts"),
             "welcomeForm": F.welcome_form(lock),
             "route": F.remote_route(lock),
+            # What this model has, so the page leaves out what it can't do: its
+            # own Wi-Fi (set up over Bluetooth), people kept on the lock itself
+            # (Visage, Vision), and which firmware check it gets.
+            "hasWifi": F.has_wifi_setup(lock),
+            "accessUsers": F.is_access_user_lock(lock),
+            "firmwareKind": F.firmware_check_kind(lock),
             "eventLog": F.uses_event_log(lock),
             "faceCapable": F.supports_face(lock),
             "favorite": lock["ID"] in _favorite_ids(cfg),
@@ -459,16 +502,12 @@ class Api:
                  "who": ev.get("na") or ""}
                 for ev in sorted(events, key=lambda e: e.get("tm") or 0, reverse=True)]
 
-    def guests(self, lock_id: str) -> list[dict]:
-        lock = self._lock(lock_id)
-        gs = self._c().list_guests(lock)
-        if gs is None:
-            raise LocklyError("Lockly didn't return the guest list.")
-        return [{"id": g.get("userAcuId"), "name": g.get("name") or "",
-                 "pin": g.get("pw") or "", "start": _fmt_ms(g.get("startTime")),
-                 "end": _fmt_ms(g.get("endTime"))} for g in gs]
-
     def add_guest(self, lock_id: str, name: str, pin: str, duration: str) -> dict:
+        """A PIN for a while ("4h", "24h", "72h", "1w") or with no end
+        ("permanent"). The page uses this for locks that don't keep people on
+        the lock itself (anything but a Visage or Vision): Lockly's cloud takes
+        the PIN, and whether such a lock picks it up isn't confirmed. On a
+        Visage or Vision it is written to the lock, as add_to_door does."""
         lock = self._lock(lock_id)
         name, pin = (name or "").strip(), (pin or "").strip()
         if not name:
@@ -484,7 +523,13 @@ class Api:
         return {"ok": True, "id": (body or {}).get("userAcuId")}
 
     def delete_guest(self, lock_id: str, user_id: int) -> dict:
+        """Take a PIN user off a door. A Visage or Vision keeps people on the
+        lock itself, so there this is remove_from_door (the lock's record
+        first, then the cloud's): deleting only the cloud's record would leave
+        the PIN on the lock. Other locks only have the cloud's record."""
         lock = self._lock(lock_id)
+        if F.is_access_user_lock(lock):
+            return self.remove_from_door(lock_id, user_id)
         if not self._c().delete_guest(lock, int(user_id)):
             raise LocklyError("Lockly didn't delete that guest PIN.")
         return {"ok": True}
@@ -510,6 +555,7 @@ class Api:
 
         cfg = config.load_config()
         merges = cfg.get("people_merges") or {}
+        paused = frozenset(cfg.get("suspended_users") or {})
         people: dict[str, dict] = {}
         failed = []
         for lk, users in results:
@@ -518,7 +564,7 @@ class Api:
                 failed.append(door["name"])
                 continue
             for u in users:
-                entry = person_access(u, door, lock_tz(lk))
+                entry = person_access(u, door, lock_tz(lk), paused)
                 own_key = entry.pop("_key")
                 key = merges.get(own_key, own_key)
                 p = people.setdefault(key, {"key": key, "name": entry["person"],
@@ -536,6 +582,43 @@ class Api:
             p["doors"].sort(key=lambda d: d["doorName"].lower())
             p["isOwner"] = any(d["role"] == "owner" for d in p["doors"])
         return {"people": out, "failedDoors": failed}
+
+    def door_access(self, lock_id: str) -> list[dict]:
+        """Everyone on one door, each shaped like a row of the People view
+        (person_access), the owner first. Cloud only: the lock isn't woken."""
+        lock = self._lock(lock_id)
+        cfg = config.load_config()
+        door, tz = self._view(lock, cfg), lock_tz(lock)
+        paused = frozenset(cfg.get("suspended_users") or {})
+        rows = []
+        for u in self._c().list_users(lock):
+            row = person_access(u, door, tz, paused)
+            del row["_key"]
+            rows.append(row)
+        return sorted(rows, key=lambda r: (r["role"] != "owner", r["person"].lower()))
+
+    def suspend_person(self, lock_id: str, user_id: int) -> dict:
+        """Pause a person on one door without dropping their PIN, fingerprints
+        or face (LocklyClient.suspend_access_user: the lock gets a far-future
+        window for them and their schedule is kept here for resume_person).
+        Wakes the lock. ``kept`` is False if their credential counts changed."""
+        lock = self._lock(lock_id)
+        if not F.is_access_user_lock(lock):
+            raise ValueError("Pausing a person needs a Visage or Vision.")
+        if self._cloud_record(lock, user_id).get("type") == "OWNER":
+            raise ValueError("The owner can't be paused on their own lock.")
+        if config.get_suspended(lock["ID"], int(user_id)):
+            raise ValueError("This person is already paused on this door.")
+        r = self._c().suspend_access_user(lock, int(user_id))
+        return {"ok": True, "kept": r["after"] == r["before"]}
+
+    def resume_person(self, lock_id: str, user_id: int) -> dict:
+        """Undo suspend_person: the lock gets the person's saved schedule back
+        (``source`` "stash"), or one rebuilt from Lockly's record when none was
+        saved on this device (``source`` "cloud"). Wakes the lock."""
+        lock = self._lock(lock_id)
+        r = self._c().resume_access_user(lock, int(user_id))
+        return {"ok": True, "source": r["source"]}
 
     # -- editing a person's access on one door -------------------------------
 
@@ -721,19 +804,39 @@ class Api:
         ok, detail = self._c().send_built(lock, build, needs_nonce=needs_nonce)
         return {"ok": ok, "sent": True, "detail": detail}
 
+    def _kept_slots(self, lock: dict) -> list[dict]:
+        """The one-time slots of a "keep unlocked" window from here that is
+        still running, as the lock has them now (wakes it), so a new weekly
+        schedule can write them back. Nothing is asked when none is running."""
+        rec = (config.load_config().get("keep_unlocked") or {}).get(lock["ID"]) or {}
+        if not rec.get("slots") or (rec.get("until") or 0) <= time.time():
+            return []
+        return [s for s in self._welcome8_table(lock) if self._slot_key(s) in rec["slots"]]
+
     def welcome(self, lock_id: str, form: str | None, action: str, days: list[str],
-                start: str, end: str, send: bool) -> dict:
+                start: str, end: str, send: bool, entry: str = "first") -> dict:
+        """Welcome Mode: "set" hours on days, "off", "always" (single-slot locks)
+        or "query". On an 8-slot lock ``entry`` says how the hours start:
+        "first" (the Lockly app's default: the door stays locked until someone
+        opens it once) or "auto" (it unlocks by itself); a set or an off there
+        rewrites the lock's schedule but leaves a running "keep unlocked"
+        window in place."""
         lock = self._lock(lock_id)
         form = form or F.welcome_form(lock)
         if form not in (F.WELCOME_9B, F.WELCOME_46):
             raise ValueError("Choose which Welcome Mode this lock uses.")
+        if entry not in ("first", "auto"):
+            raise ValueError("Choose how the hours start.")
         week, begin, finish = 0, (0, 0), (0, 0)
         if action == "set":
             week = F.week_byte(list(days or []))
             begin, finish = F.parse_hhmm(start), F.parse_hhmm(end)
             if finish <= begin:
                 raise ValueError("The end time must be after the start time.")
-        _what, build, needs_nonce = F.welcome_plan(lock, form, action, week, begin, finish)
+        keep = self._kept_slots(lock) if send and form == F.WELCOME_9B and action in ("set", "off") else []
+        _what, build, needs_nonce = F.welcome_plan(
+            lock, form, action, week, begin, finish, keep=keep,
+            sync=F.SYNC_AUTO_ENTRY if entry == "auto" else F.SYNC_FIRST_ENTRY)
         return {**self._experimental(lock, build, needs_nonce, send), "form": form}
 
     def rain(self, lock_id: str, on: bool, send: bool) -> dict:

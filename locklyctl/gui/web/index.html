@@ -31,6 +31,7 @@
     <symbol id="i-signout" viewBox="-93.5 -95 190.1 190.1" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"><path d="M-12-64H-60Q-70-64-70-54V54Q-70 64-60 64H-12"/><path d="M-24 0H73M42-31 73 0 42 31"/></symbol>
     <symbol id="i-asleep" viewBox="-98.3 -94.8 190.1 190.1" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"><path d="M28-68A74 74 0 1 0 68 28 60 60 0 0 1 28-68Z"/></symbol>
     <symbol id="i-favorite-on" viewBox="-95 -99.5 190.1 190.1" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"><path d="M0-76 22-24 77-23 35 12 49 67 0 36-49 67-35 12-77-23-22-24Z" fill="currentColor"/></symbol>
+    <symbol id="i-pulse" viewBox="-95 -95 190.1 190.1" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"><path d="M-78 6H-44L-20-54 14 58 36 6H78"/></symbol>
   </svg>
   <!-- Starting up: silent sign-in with the saved login -->
   <main id="boot" class="screen boot" aria-busy="true">
@@ -61,35 +62,34 @@
     </form>
   </main>
 
-  <!-- Doors -->
+  <!-- The app: Doors and People for every day, Maintenance for the locks themselves, Settings for this app.
+       On a phone the views are a bar at the bottom, and each view shows its list or one item, not both. -->
   <div id="app" class="screen app" hidden>
     <header class="topbar">
-      <div class="topbar-left">
-        <p class="brand"><img class="logo" src="logo.svg" alt="">locklyctl</p>
-        <nav class="views" aria-label="View">
-          <button type="button" id="view-doors" aria-pressed="true"><svg class="i" aria-hidden="true"><use href="#i-doors"/></svg>Doors</button>
-          <button type="button" id="view-people" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-people"/></svg>People</button>
-        </nav>
-      </div>
-      <div class="topbar-right">
-        <span class="muted" id="who"></span>
-        <button class="btn btn-quiet" id="retry-asleep" type="button" hidden
-                title="Asks the doors that didn't answer again. Each one that wakes beeps.">Retry asleep</button>
-        <button class="btn btn-quiet" id="check-all" type="button"
-                title="Asks every lock for its live status. Each lock wakes and beeps."><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>Check all doors</button>
-        <button class="btn btn-quiet" id="sign-out" type="button"
-                title="Signs out and forgets the saved sign-in on this device."><svg class="i" aria-hidden="true"><use href="#i-signout"/></svg>Sign out</button>
-      </div>
+      <p class="brand"><img class="logo" src="logo.svg" alt="">locklyctl</p>
+      <nav class="views" aria-label="View">
+        <button type="button" id="view-doors" aria-pressed="true"><svg class="i" aria-hidden="true"><use href="#i-doors"/></svg>Doors</button>
+        <button type="button" id="view-people" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-people"/></svg>People</button>
+        <button type="button" id="view-maint" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-pulse"/></svg>Maintenance</button>
+        <button type="button" id="view-settings" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-device"/></svg>Settings</button>
+      </nav>
     </header>
 
-    <div class="workspace" id="doors-ws">
+    <!-- Doors -->
+    <div class="workspace" id="doors-ws" data-pane="list">
       <nav class="cabinet" aria-label="Doors">
+        <div class="list-tools">
+          <button class="btn btn-quiet" id="check-all" type="button"
+                  title="Asks every lock for its live status. Each lock wakes and beeps."><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>Check all</button>
+          <button class="btn btn-quiet" id="retry-asleep" type="button" hidden
+                  title="Asks the doors that didn't answer again. Each one that wakes beeps.">Retry asleep</button>
+          <button class="btn btn-quiet" id="edit-list" type="button" aria-pressed="false"
+                  title="Pin favorites, put the doors in your own order, and hide the ones you don't use.">Edit list</button>
+        </div>
         <section class="favs" id="favs" aria-labelledby="favs-title" hidden>
           <h2 class="favs-title" id="favs-title">Favorites</h2>
           <ul class="fav-list" id="fav-list"></ul>
         </section>
-        <button class="btn btn-quiet show-hidden" id="show-hidden" type="button" aria-pressed="false" hidden
-                title="Hidden doors are left out of this list. Showing them lets you put one back.">Show hidden doors</button>
         <ul id="plates" class="plates"></ul>
       </nav>
 
@@ -99,21 +99,12 @@
         </div>
 
         <div id="door-body" hidden>
+          <button class="back" type="button">Doors</button>
           <header class="door-head">
             <p class="door-unit" id="d-unit"></p>
             <div class="door-title">
               <h1 id="d-name"></h1>
               <p class="muted" id="d-model"></p>
-            </div>
-            <div class="door-tools">
-              <button class="btn btn-quiet fav-toggle" id="btn-fav" type="button" aria-pressed="false">Add to favorites</button>
-              <div class="door-order" role="group" aria-label="Place in the door list">
-                <button class="btn btn-quiet" id="btn-up" type="button" title="Move up in the door list"
-                        aria-label="Move up in the door list">&uarr;</button>
-                <button class="btn btn-quiet" id="btn-down" type="button" title="Move down in the door list"
-                        aria-label="Move down in the door list">&darr;</button>
-                <button class="btn btn-quiet" id="btn-hide" type="button" aria-pressed="false">Hide</button>
-              </div>
             </div>
           </header>
 
@@ -122,11 +113,12 @@
             <ul class="facts" id="d-facts"></ul>
           </div>
 
-          <div class="actions">
+          <div class="actions" id="door-actions">
             <button class="btn btn-ink" id="btn-lock" type="button"><svg class="i" aria-hidden="true"><use href="#i-locked"/></svg>Lock</button>
             <button class="btn btn-hold" id="btn-unlock" type="button"
                     aria-describedby="hold-hint"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label"><svg class="i" aria-hidden="true"><use href="#i-unlocked"/></svg>Hold to unlock</span></button>
-            <button class="btn btn-quiet" id="btn-check" type="button"><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>Check now</button>
+            <button class="btn btn-quiet" id="btn-check" type="button" title="Asks the lock for its status now. It wakes, so it beeps."
+                    aria-label="Check now"><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span class="btn-word">Check now</span></button>
           </div>
           <p class="fine" id="hold-hint">Press and hold Unlock<span class="kbd-only"> (or hold Space)</span> until it fills. Check now wakes the lock, so it beeps.</p>
 
@@ -138,42 +130,23 @@
 
           <div class="tabs" role="tablist" aria-label="Door details">
             <button role="tab" id="tab-activity" aria-controls="panel-activity" aria-selected="true"><svg class="i" aria-hidden="true"><use href="#i-activity"/></svg>Activity</button>
-            <button role="tab" id="tab-guests" aria-controls="panel-guests" aria-selected="false" tabindex="-1"><svg class="i" aria-hidden="true"><use href="#i-pins"/></svg>Guest PINs</button>
-            <button role="tab" id="tab-schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Schedules</button>
-            <button role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="false" tabindex="-1"><svg class="i" aria-hidden="true"><use href="#i-device"/></svg>Device</button>
+            <button role="tab" id="tab-access" aria-controls="panel-access" aria-selected="false" tabindex="-1"><svg class="i" aria-hidden="true"><use href="#i-people"/></svg>Access</button>
+            <button role="tab" id="tab-schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Schedule</button>
           </div>
 
           <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" class="panel"></div>
 
-          <div role="tabpanel" id="panel-guests" aria-labelledby="tab-guests" class="panel" hidden>
-            <div id="guest-list"></div>
-            <form id="guest-form" class="inline-form" novalidate>
-              <h2>Add a guest PIN</h2>
-              <div class="row">
-                <label class="field"><span>Name</span><input name="name" required maxlength="20"></label>
-                <label class="field field-short"><span>PIN</span><input name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required></label>
-                <label class="field field-short"><span>Works for</span>
-                  <select name="duration">
-                    <option value="4h">4 hours</option>
-                    <option value="24h" selected>24 hours</option>
-                    <option value="72h">3 days</option>
-                    <option value="1w">1 week</option>
-                    <option value="permanent">No end date</option>
-                  </select>
-                </label>
-              </div>
-              <p class="form-error" id="guest-error" role="alert"></p>
-              <button class="btn btn-ink" type="submit">Add guest PIN</button>
-              <p class="fine">Lockly saves the PIN in the cloud straight away. Whether the lock accepts it at once hasn't been confirmed, so try it at the door.</p>
-            </form>
+          <!-- Who can open this door. The form below is the People view's own (#grant-form), moved here. -->
+          <div role="tabpanel" id="panel-access" aria-labelledby="tab-access" class="panel" hidden>
+            <div id="access-list"></div>
+            <div id="access-slot"></div>
           </div>
 
           <div role="tabpanel" id="panel-schedules" aria-labelledby="tab-schedules" class="panel" hidden>
-            <p class="caution">Tested on a Visage: Welcome Mode (8-slot schedule) and Rain Mode. The single-schedule form used by Touch locks is checked against the Lockly app but hasn't been tried on a real lock yet. Read from lock only asks; Preview shows the command without sending it.</p>
-
             <form id="welcome-form" class="inline-form" novalidate>
               <h2>Welcome Mode</h2>
-              <p class="muted">Keeps the door unlocked during set hours, then locks it again. The lock runs the schedule itself.</p>
+              <p class="muted">Hours when the door stays unlocked, on the days you choose. The lock runs them itself and locks again at the end.</p>
+              <p class="caution" id="w-caution" hidden>Not tried on a lock yet: this lock uses the single-schedule form, which is checked against the Lockly app only. Read from lock only asks; Preview shows the command without sending it.</p>
               <div class="row" id="w-form-row"></div>
               <fieldset class="seg" id="w-action">
                 <legend>What to do</legend>
@@ -189,12 +162,17 @@
                   <label class="field field-short"><span>From</span><input name="start" type="time" value="08:00" required></label>
                   <label class="field field-short"><span>Until</span><input name="end" type="time" value="18:00" required></label>
                 </div>
+                <fieldset class="seg" id="w-entry">
+                  <legend>The door unlocks</legend>
+                  <label><input type="radio" name="entry" value="first" checked><span>When the first person opens it</span></label>
+                  <label><input type="radio" name="entry" value="auto"><span>By itself at the start</span></label>
+                </fieldset>
                 <p class="fine" id="w-slot-note"></p>
               </div>
               <p class="form-error" id="welcome-error" role="alert"></p>
               <div class="row">
                 <button class="btn btn-quiet" type="button" id="w-read">Read from lock</button>
-                <button class="btn btn-quiet" type="submit" value="preview">Preview</button>
+                <button class="btn btn-quiet" type="submit" value="preview" id="w-preview" hidden>Preview</button>
                 <button class="btn btn-ink" type="submit" value="send">Send to lock</button>
               </div>
               <pre class="output" id="welcome-out" hidden></pre>
@@ -211,58 +189,17 @@
               <p class="form-error" id="rain-error" role="alert"></p>
               <div class="row">
                 <button class="btn btn-quiet" type="button" id="r-read">Read from lock</button>
-                <button class="btn btn-quiet" type="submit" value="preview">Preview</button>
                 <button class="btn btn-ink" type="submit" value="send">Send to lock</button>
               </div>
               <pre class="output" id="rain-out" hidden></pre>
             </form>
           </div>
-
-          <div role="tabpanel" id="panel-connection" aria-labelledby="tab-connection" class="panel" hidden>
-            <h2>Connection</h2>
-            <p class="muted">How this computer reaches every door. Auto uses the hub or Lockly's server, and when a door doesn't answer a status check that way, tries it over Bluetooth from this computer. Only status checks go over Bluetooth so far.</p>
-            <fieldset class="seg" id="conn-mode">
-              <legend>Reach doors by</legend>
-              <label><input type="radio" name="conn" value="auto" checked><span>Auto</span></label>
-              <label><input type="radio" name="conn" value="remote"><span>Hub or Lockly's server</span></label>
-              <label><input type="radio" name="conn" value="bluetooth"><span>Bluetooth only</span></label>
-            </fieldset>
-            <p class="fine" id="conn-note"></p>
-            <p class="muted">Finds out which route reaches this lock: the hub relay, or Lockly's device channel. It wakes the lock.</p>
-            <div><button class="btn btn-ink" id="btn-diagnose" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Test connection</button></div>
-            <div id="diag-out"></div>
-            <h2>Bluetooth</h2>
-            <p class="muted">From this computer, when it's next to the door. A check over Bluetooth gives the lock the time, which it lets people on a schedule in by; it wakes the lock.</p>
-            <div><button class="btn btn-ink" id="btn-ble-time" type="button"><svg class="i" aria-hidden="true"><use href="#i-bluetooth"/></svg>Set its clock over Bluetooth</button></div>
-            <div id="ble-out"></div>
-            <div id="tz-box">
-              <h2>Time zone</h2>
-              <p class="muted">The lock keeps a time zone of its own, which the Lockly app gives it when it's set up and after a firmware update. This gives it the one in the Lockly account, then the time. It wakes the lock.</p>
-              <p class="fine" id="tz-note"></p>
-              <div><button class="btn btn-ink" id="btn-tz" type="button"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Give it its time zone</button></div>
-              <div id="tz-out"></div>
-            </div>
-            <h2>Wi-Fi</h2>
-            <p class="muted">Give the lock a Wi-Fi network over Bluetooth from this computer, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
-            <div><button class="btn btn-quiet" id="btn-wifi-scan" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Networks it sees</button></div>
-            <form id="wifi-form" hidden>
-              <label class="field"><span>Network</span><select name="ssid" required></select></label>
-              <label class="field"><span>Password</span><input name="password" type="password" autocomplete="off"></label>
-              <p class="fine" id="wifi-pw-note"></p>
-              <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button>
-                <button class="btn btn-quiet" id="wifi-forget" type="button" hidden>Forget the saved password</button></div>
-            </form>
-            <div id="wifi-out"></div>
-            <h2>Firmware</h2>
-            <p class="muted">Asks Lockly for newer firmware and the lock for what it runs. It wakes the lock.</p>
-            <div><button class="btn btn-ink" id="btn-firmware" type="button"><svg class="i" aria-hidden="true"><use href="#i-firmware"/></svg>Check for updates</button></div>
-            <div id="fw-out"></div>
-          </div>
         </div>
       </section>
     </div>
 
-    <div class="workspace" id="people-ws" hidden>
+    <!-- People -->
+    <div class="workspace" id="people-ws" data-pane="list" hidden>
       <nav class="roster" aria-label="People">
         <label class="field search">
           <span>Find a person</span>
@@ -275,42 +212,55 @@
       <section class="door person" aria-live="polite">
         <div class="door-empty" id="person-empty"><p>Choose a person.</p></div>
         <div id="person-body" hidden>
+          <button class="back" type="button">People</button>
           <header class="person-head">
             <h1 id="p-name"></h1>
             <p class="muted" id="p-sub"></p>
           </header>
-          <table class="access-table">
-            <thead><tr><th scope="col">Door</th><th scope="col">Role</th><th scope="col">When</th><th scope="col">Can unlock with</th><th scope="col"><span class="sr-only">Changes</span></th></tr></thead>
-            <tbody id="p-doors"></tbody>
-          </table>
-          <form class="inline-form grant" id="grant-form" novalidate>
-            <h2 id="grant-title">Give access to another door</h2>
-            <div class="row">
-              <label class="field" id="grant-name-field" hidden><span>Name</span><input name="name" maxlength="40" autocomplete="off"></label>
-              <label class="field"><span>Door</span><select name="door" required></select></label>
-              <label class="field field-short"><span>PIN (4–8 digits)</span><input name="pin" inputmode="numeric" maxlength="8" autocomplete="off"></label>
-            </div>
-            <fieldset class="seg" id="grant-kind">
-              <legend>When</legend>
-              <label><input type="radio" name="kind" value="always" checked><span>Always</span></label>
-              <label><input type="radio" name="kind" value="weekly"><span>Set hours</span></label>
-              <label><input type="radio" name="kind" value="dates"><span>Between dates</span></label>
-            </fieldset>
-            <div id="grant-weekly" hidden>
-              <fieldset class="days" id="grant-days"><legend>Days</legend></fieldset>
+          <div id="p-doors"></div>
+          <div id="grant-slot">
+            <!-- Gives a person a door. One form for both places it's used: here (any door), and a
+                 door's Access tab (that door), where app.js moves it. -->
+            <form class="inline-form grant" id="grant-form" novalidate>
+              <h2 id="grant-title">Give access to another door</h2>
               <div class="row">
-                <label class="field field-short"><span>From</span><input name="start" type="time" value="09:00"></label>
-                <label class="field field-short"><span>Until</span><input name="end" type="time" value="18:00"></label>
+                <label class="field" id="grant-name-field" hidden><span>Name</span><input name="name" maxlength="40" autocomplete="off"></label>
+                <label class="field" id="grant-door-field"><span>Door</span><select name="door" required></select></label>
+                <label class="field field-short"><span>PIN (4 to 8 digits)</span><input name="pin" inputmode="numeric" maxlength="8" autocomplete="off"></label>
               </div>
-            </div>
-            <div class="row" id="grant-dates" hidden>
-              <label class="field"><span>Starts</span><input name="from" type="datetime-local"></label>
-              <label class="field"><span>Ends</span><input name="to" type="datetime-local"></label>
-            </div>
-            <p class="form-error" id="grant-error" role="alert"></p>
-            <div class="row"><button class="btn btn-ink" type="submit" id="grant-submit">Give access</button></div>
-            <p class="fine">The PIN is written to the lock straight away. Faces and fingerprints stay with the lock they were enrolled on; enrol them again at the new door.</p>
-          </form>
+              <fieldset class="seg" id="grant-kind">
+                <legend>When</legend>
+                <label><input type="radio" name="kind" value="always" checked><span>Always</span></label>
+                <label><input type="radio" name="kind" value="hours"><span>For a while</span></label>
+                <label><input type="radio" name="kind" value="weekly"><span>Set hours</span></label>
+                <label><input type="radio" name="kind" value="dates"><span>Between dates</span></label>
+              </fieldset>
+              <div class="row" id="grant-hours" hidden>
+                <label class="field field-short"><span>Works for</span>
+                  <select name="hours">
+                    <option value="4">4 hours</option>
+                    <option value="24" selected>24 hours</option>
+                    <option value="72">3 days</option>
+                    <option value="168">1 week</option>
+                  </select>
+                </label>
+              </div>
+              <div id="grant-weekly" hidden>
+                <fieldset class="days" id="grant-days"><legend>Days</legend></fieldset>
+                <div class="row">
+                  <label class="field field-short"><span>From</span><input name="start" type="time" value="09:00"></label>
+                  <label class="field field-short"><span>Until</span><input name="end" type="time" value="18:00"></label>
+                </div>
+              </div>
+              <div class="row" id="grant-dates" hidden>
+                <label class="field"><span>Starts</span><input name="from" type="datetime-local"></label>
+                <label class="field"><span>Ends</span><input name="to" type="datetime-local"></label>
+              </div>
+              <p class="form-error" id="grant-error" role="alert"></p>
+              <div class="row"><button class="btn btn-ink" type="submit" id="grant-submit">Give access</button></div>
+              <p class="fine" id="grant-fine"></p>
+            </form>
+          </div>
 
           <section class="merge" id="p-merge">
             <h2>Same person?</h2>
@@ -319,6 +269,105 @@
             <div id="p-merged"></div>
           </section>
         </div>
+      </section>
+    </div>
+
+    <!-- Maintenance: what keeps a lock reachable, on time and current. Only what this door has, and
+         what this build can do, is offered (app.js: renderMaintDoor). -->
+    <div class="workspace" id="maint-ws" data-pane="list" hidden>
+      <nav class="roster" aria-label="Doors to maintain">
+        <p class="maint-head" aria-hidden="true"><span>Door</span><span>Reached</span><span>Battery</span><span>Clock</span><span>Time zone</span><span>Firmware</span></p>
+        <ul id="maint-rows" class="maint-rows"></ul>
+        <p class="fine">Battery and clock are from each door's last status check. Checking wakes a lock, so nothing here asks by itself.</p>
+        <p class="fine" id="maint-cli" hidden>From the command line: <code>locklyctl add</code> sets up a new or reset lock, and <code>locklyctl backup</code> and <code>restore</code> save and bring back the account's locks and people.</p>
+      </nav>
+
+      <section class="door maint" aria-live="polite">
+        <div class="door-empty" id="maint-empty"><p>Choose a door.</p></div>
+        <div id="maint-body" hidden>
+          <button class="back" type="button">Maintenance</button>
+          <header class="person-head">
+            <h1 id="m-name"></h1>
+            <p class="muted" id="m-sub"></p>
+          </header>
+
+          <section class="job" id="job-connection">
+            <h2>Connection</h2>
+            <p class="muted" id="diag-about">Finds out which route reaches this lock: the hub relay, or Lockly's device channel. It wakes the lock.</p>
+            <div id="diag-on"><button class="btn btn-quiet" id="btn-diagnose" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Test connection</button></div>
+            <p class="muted" id="diag-none" hidden>This door has no hub and no Wi-Fi of its own, so there's no route to test: it can only be reached over Bluetooth.</p>
+            <div id="diag-out"></div>
+          </section>
+
+          <section class="job" id="job-clock">
+            <h2>Clock and time zone</h2>
+            <p class="muted">The lock lets people on a schedule in by its own clock. Every status check gives it the time; a check over Bluetooth does too, when its Wi-Fi or hub is down.</p>
+            <div id="ble-on"><button class="btn btn-quiet" id="btn-ble-time" type="button"><svg class="i" aria-hidden="true"><use href="#i-bluetooth"/></svg>Set its clock over Bluetooth</button></div>
+            <p class="fine" id="ble-none" hidden></p>
+            <div id="ble-out"></div>
+            <div id="tz-box">
+              <p class="muted">The lock also keeps a time zone of its own, which the Lockly app gives it when it's set up and after a firmware update. This gives it the one in the Lockly account, then the time. It wakes the lock.</p>
+              <p class="fine" id="tz-note"></p>
+              <div><button class="btn btn-quiet" id="btn-tz" type="button"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Give it its time zone</button></div>
+              <div id="tz-out"></div>
+            </div>
+          </section>
+
+          <section class="job" id="job-wifi">
+            <h2>Wi-Fi</h2>
+            <p class="muted">Give the lock a Wi-Fi network over Bluetooth, next to the door, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
+            <div id="wifi-on"><button class="btn btn-quiet" id="btn-wifi-scan" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Networks it sees</button></div>
+            <p class="fine" id="wifi-none" hidden></p>
+            <form id="wifi-form" hidden>
+              <label class="field"><span>Network</span><select name="ssid" required></select></label>
+              <label class="field"><span>Password</span><input name="password" type="password" autocomplete="off"></label>
+              <p class="fine" id="wifi-pw-note"></p>
+              <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button>
+                <button class="btn btn-quiet" id="wifi-forget" type="button" hidden>Forget the saved password</button></div>
+            </form>
+            <div id="wifi-out"></div>
+          </section>
+
+          <section class="job" id="job-firmware">
+            <h2>Firmware</h2>
+            <p class="muted">Asks Lockly for newer firmware and the lock for what it runs. It wakes the lock.</p>
+            <div><button class="btn btn-quiet" id="btn-firmware" type="button"><svg class="i" aria-hidden="true"><use href="#i-firmware"/></svg>Check for updates</button></div>
+            <div id="fw-out"></div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <!-- Settings: what belongs to this app on this device, not to one door. -->
+    <div class="workspace single" id="settings-ws" hidden>
+      <section class="door settings">
+        <header class="person-head"><h1>Settings</h1></header>
+
+        <section class="job">
+          <h2>Account</h2>
+          <p>Signed in as <strong id="who"></strong>.</p>
+          <div><button class="btn btn-quiet" id="sign-out" type="button"
+                  title="Signs out and forgets the saved sign-in on this device."><svg class="i" aria-hidden="true"><use href="#i-signout"/></svg>Sign out</button></div>
+        </section>
+
+        <section class="job">
+          <h2>Connection</h2>
+          <p class="muted" id="conn-about"></p>
+          <fieldset class="seg" id="conn-mode">
+            <legend>Reach doors by</legend>
+            <label><input type="radio" name="conn" value="auto" checked><span>Auto</span></label>
+            <label><input type="radio" name="conn" value="remote"><span>Hub or Lockly's server</span></label>
+            <label><input type="radio" name="conn" value="bluetooth"><span>Bluetooth only</span></label>
+          </fieldset>
+          <p class="fine" id="conn-note"></p>
+        </section>
+
+        <section class="job">
+          <h2>About</h2>
+          <p id="about-version"></p>
+          <p class="fine" id="about-log"></p>
+          <p class="fine">Unofficial. Not affiliated with Lockly. Your sign-in and the keys made from it stay on this device.</p>
+        </section>
       </section>
     </div>
 

@@ -17,13 +17,16 @@ way the official app does.
   <img src="docs/screenshots/desktop-doors.png" alt="Desktop app: every door as a numbered plate with its state and battery; the selected door shows Lock, Hold to unlock and its access log" width="100%">
 </p>
 <p>
-  <img src="docs/screenshots/phone-doors.png" alt="Phone app: the door plates above the selected door's controls" width="32%">
-  <img src="docs/screenshots/phone-people.png" alt="Phone app, dark mode: one person's access across three doors, with their fingerprints and face" width="32%">
-  <img src="docs/screenshots/phone-door.png" alt="Phone app: a door's status and guest PINs" width="32%">
+  <img src="docs/screenshots/phone-doors.png" alt="Phone app: every door as a plate, favorites with Lock and Unlock above them, and the four views in a bar at the bottom" width="32%">
+  <img src="docs/screenshots/phone-people.png" alt="Phone app, dark mode: one person's access door by door, with Pause, Change PIN and Remove on each" width="32%">
+  <img src="docs/screenshots/phone-door.png" alt="Phone app: one door, with Lock and Hold to unlock pinned at the bottom, and its Access tab listing who can open it" width="32%">
 </p>
 <p>
   <img src="docs/screenshots/desktop-people.png" alt="People view: everyone with access, and for the selected person, every door they can open, when, and with what" width="49%">
   <img src="docs/screenshots/desktop-schedules.png" alt="Dark mode: a door's Welcome Mode schedule" width="49%">
+</p>
+<p>
+  <img src="docs/screenshots/desktop-maintenance.png" alt="Maintenance view: every door's route, battery, clock, time zone and firmware in one table, and the selected door's connection test, clock, Wi-Fi and firmware jobs" width="100%">
 </p>
 
 <sub>Screenshots use made-up sample data (`tests/gui/mock.js`). Rendered with
@@ -34,18 +37,19 @@ way the official app does.
 | Feature | Status |
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
-| Hide doors from the lists and put them in your own order: `hide`, `unhide`, `move`, `list --all`; in the desktop app Hide, ↑ and ↓ on a door, and "Show hidden doors" to bring one back | ✅ kept on this computer, per account; signed in to a private server (`--server`) the server keeps them, shared with its web console. Hiding only affects the lists: a command that names a door, and "Check all doors", still reach it. The desktop app lists doors by name until one is moved |
+| Hide doors from the lists and put them in your own order: `hide`, `unhide`, `move`, `list --all`; in the app, "Edit list" above the doors gives each door a favorite star, ↑, ↓ and Hide, and lists hidden doors so one can be brought back | ✅ kept on this computer, per account; signed in to a private server (`--server`) the server keeps them, shared with its web console. Hiding only affects the lists: a command that names a door, and "Check all doors", still reach it. The desktop app lists doors by name until one is moved |
 | The lock's own clock, from every live status check (each check also sends it the time, as the app's does) | ✅ warns when it's 2 minutes or more off, or not set: people on a schedule are let in by it. On a Visage (2026-11-13), a check carrying a time 5 minutes ahead moved its clock there before it replied, and the next ordinary check moved it back: every check that reaches it sets its clock. A reply that still shows a wrong clock gets a second check on the same route, and the result is shown, including "still wrong" |
-| The lock's own time zone (0x33), which the Lockly app gives a lock when it's set up and after a firmware update: `locklyctl timezone` shows each lock's zone in the Lockly account next to this computer's, and `--sync` (or "Give it its time zone" in the Device tab) gives a lock the account's zone, then the time | ✅ sent remotely to six locks on 2026-11-14 (`timezone ... --sync`): each acknowledged the zone, then the time. Two locks that were offline fell back to Bluetooth and were out of range. The frame matches the app's field by field (SetTimeZoneCmd). Whole hours only, as the app sends it. Only models the app sends it to by model alone (the Visage among them; not the PGD7Y or the Vision). The lock's own setting can't be read (the app never reads it), so it isn't compared. It isn't sent after locklyctl's firmware installs yet. Changing the zone in the Lockly account isn't built (the app sends the whole lock record for that) |
+| The lock's own time zone (0x33), which the Lockly app gives a lock when it's set up and after a firmware update: `locklyctl timezone` shows each lock's zone in the Lockly account next to this computer's, and `--sync` (or "Give it its time zone" under Maintenance) gives a lock the account's zone, then the time | ✅ sent remotely to six locks on 2026-11-14 (`timezone ... --sync`): each acknowledged the zone, then the time. Two locks that were offline fell back to Bluetooth and were out of range. The frame matches the app's field by field (SetTimeZoneCmd). Whole hours only, as the app sends it. Only models the app sends it to by model alone (the Visage among them; not the PGD7Y or the Vision). The lock's own setting can't be read (the app never reads it), so it isn't compared. It isn't sent after locklyctl's firmware installs yet. Changing the zone in the Lockly account isn't built (the app sends the whole lock record for that) |
 | Bluetooth straight from this computer to a lock next to it: status checks, which also set its clock, and reaching it after a firmware install if its Wi-Fi doesn't come back | ⚠️ run on a Visage (2026-11-13): found by name, connected in 6.4 s, answered status checks; with the Auto setting it reached a Visage whose Wi-Fi was offline in 21 s. Such a door is then asked over Bluetooth first for 5 minutes, and clicking it within a minute of a Bluetooth answer doesn't connect again (the lock drops an idle Bluetooth connection after 6-8 s, so every check is a new connection). Only status checks go over Bluetooth: commands that change the lock don't yet. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
-| Connection setting: Auto (hub or Lockly's server, then Bluetooth from this computer for a status check that got no answer), Remote only, or Bluetooth only (status checks only) | ✅ desktop app's Device tab, `--connection` on the command line; Auto is the default |
+| Connection setting: Auto (hub or Lockly's server, then Bluetooth from this computer for a status check that got no answer), Remote only, or Bluetooth only (status checks only) | ✅ the app's Settings, `--connection` on the command line; Auto is the default. An app with no Bluetooth (the packaged and phone apps) says so there instead of offering the choice |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
 | Access log (last 7 days), in the Lockly app's own words | ✅ Visages: from Lockly's event log, which the lock fills over its Wi-Fi, as the Lockly app reads it (checked against a lock's own log). Other locks: from Lockly's cloud log, which only has what was uploaded to it, so often empty; reading those locks' own logs isn't done yet |
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
-| Visage/Vision: add a person with a PIN (always, set hours, or between dates), change PIN, remove from a door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted |
+| Visage/Vision: add a person with a PIN (always, for a while, set hours, or between dates), change PIN, remove from a door: from People, or from a door's Access tab, which lists everyone on that door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted. "For a while" (4 hours to a week from now) is the between-dates record with now as its start. A person is removed from the lock first, then from Lockly's record, wherever it's done from: until 2026-11-15 the door's "Guest PINs" tab deleted only Lockly's record, which leaves the lock's own untouched |
+| Visage/Vision: pause a person on one door and resume them, keeping their PIN, fingerprints and face (`suspend`, `resume`; Pause and Resume in People and in a door's Access tab) | ✅ run on a Visage from the command line (2026-11-14): the lock took the pause (a window far in the future) and the resume, kept the person's PIN, fingerprints and face through both, and got their exact schedule back. The app's buttons call the same code; they're tested against a stand-in lock. A second pause is refused: it would save the pause itself as the schedule to restore |
 | Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |
-| Guest PIN codes: add, list, delete | ✅ on Visage/Vision written to the lock; PGD7Y unverified |
-| Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore). Set writes "first entry" slots: the door stays locked until someone opens it once |
+| Other locks (e.g. PGD7Y): a person with a PIN, always or for a while; remove | ⚠️ Lockly's cloud takes the record; whether such a lock picks it up isn't confirmed. These locks don't keep people the way a Visage does, so changing a PIN and pausing aren't offered for them |
+| Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore). Set asks how the hours start: when the first person opens the door (the Lockly app's default, and the one tested), or by itself at the start time (the entry bit a "keep unlocked" window uses, seen to work on one; not yet tried on a weekly schedule). A set or an off rewrites the lock's 8 slots but writes a running "keep unlocked" window back (tested against a stand-in lock) |
 | Keep a Visage/Vision unlocked for a while (one-time `0x9B` slot that unlocks by itself) | ✅ tested on a Visage: opened within ~20 s, relocked at the end, and the lock switched the slot off. Under 24 h: past midnight (lock time) a second slot from 00:00 takes over, and the lock was seen to run such a slot the next day. Not yet seen: whether the door locks for the minute between 23:59 and 00:00 |
 | Welcome Mode, single-slot `0x46` (PGD7Y and other Touch models) | ✅ read works; ⚠️ set/off checked against the app, not yet sent to a lock |
 | Rain Mode `0x56`: read, on, off | ✅ tested on a Visage (on, read back, off) |
@@ -67,18 +71,36 @@ but the desktop app doesn't check or control them yet.
 
 ## Desktop app
 
-Every door is a plate showing its state. Select one to lock it, *hold to
-unlock* (press and hold until the button fills, so a stray click can't open a
-door), and see its access log, guest PINs, Welcome/Rain Mode and a connection
-test. Star a door to pin it to **Favorites** at the top of the list, where
-Lock and Unlock are a single tap each, without the hold. **Keep unlocked for**
-1 to 23 hours (Visage, Vision) sets a one-time Welcome Mode window that the
-lock runs and ends by itself; a new one replaces the last. Doors that didn't
-answer can be asked again with **Retry asleep**. The **Device** tab tests the
-connection, checks for newer firmware and, on a Visage, installs it over
-Wi-Fi. The **People** view
-shows everyone who can get in, across every door, and lets you give, change
-and take away access.
+Four views. **Doors** and **People** are for every day; **Maintenance** is for
+the locks themselves; **Settings** is for the app.
+
+- **Doors.** Every door is a plate showing its state. Select one to lock it,
+  *hold to unlock* (press and hold until the button fills, so a stray click
+  can't open a door), and see its **Activity**, its **Access** (everyone who
+  can open it, with the same changes as People) and its **Schedule**
+  (Welcome Mode hours and Rain Mode). **Keep unlocked for** 1 to 23 hours
+  (Visage, Vision) sets a one-time Welcome Mode window that the lock runs and
+  ends by itself; a new one replaces the last. Above the plates, **Check
+  all** asks every door, **Retry asleep** asks again the ones that didn't
+  answer, and **Edit list** turns the plates into rows to star a door (it
+  joins **Favorites** at the top, where Lock and Unlock are a single tap
+  each, without the hold), move it or hide it.
+- **People.** Everyone who can get in, across every door: give access, change
+  a PIN, pause and resume, remove.
+- **Maintenance.** One table of every door's route, battery, clock, time zone
+  and firmware, from what's already known: opening it wakes no lock. For the
+  door you select: test the connection, set the clock over Bluetooth, give
+  it its time zone, give it a Wi-Fi network, check for newer firmware and
+  install it. A door is only offered what it has (no Wi-Fi setup for a lock
+  without Wi-Fi), and a job the app can't do where it runs (Bluetooth, in
+  the packaged apps) is explained in a line instead of offered as a button.
+- **Settings.** The account and sign out, how doors are reached, and the
+  version.
+
+What goes where: anything that needs Bluetooth or someone at the door, changes
+a lock's firmware, network or clock, or shows protocol detail is under
+Maintenance. A form not yet tried on a lock (the single-schedule Welcome Mode)
+carries a caution and a Preview where it appears.
 
 - **Windows / macOS:** download `locklyctl-windows.zip` or `locklyctl-macos.zip`
   from the latest [*Build apps*](../../actions/workflows/build.yml) run, or from
@@ -105,6 +127,12 @@ view.
   Sideloadly or AltStore (Windows or macOS), which sign it with your Apple ID.
   A free Apple ID works, but the app then has to be reinstalled every 7 days.
   No Mac needed; see [mobile/README.md](mobile/README.md).
+
+On a phone the four views are a bar at the bottom, and a view shows its list
+or one item at a time, with a way back. A door's Lock and Hold to unlock stay
+pinned at the bottom edge, and everything tapped is at least 44 px tall. The
+phone apps have no Bluetooth yet, so Maintenance there offers the jobs that
+go through a hub or Lockly's server and says so for the rest.
 
 Phones have no keyring, so a remembered sign-in is kept in the app's private
 storage, which other apps can't read.

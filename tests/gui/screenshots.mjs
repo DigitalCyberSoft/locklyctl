@@ -16,11 +16,12 @@ const out = new URL("../../docs/screenshots/", import.meta.url).pathname;
 const desktop = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false };
 const phone = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true };
 const shots = [
-  ["desktop-doors", desktop, "", "light"],
+  ["desktop-doors", desktop, "door", "light"],
   ["desktop-people", desktop, "person-detail", "light"],
   ["desktop-schedules", desktop, "schedules", "dark"],
+  ["desktop-maintenance", desktop, "firmware", "light"],
   ["phone-doors", phone, "", "light"],
-  ["phone-door", phone, "guests", "light"],
+  ["phone-door", phone, "access", "light"],
   ["phone-people", phone, "person-detail", "dark"],
 ];
 
@@ -30,7 +31,7 @@ const shots = [
 // neither scrollWidth nor innerWidth can be trusted: compare to the screen.
 const overflow = (width) => `JSON.stringify([...document.querySelectorAll("body *")].filter((e) => {
   if (!e.offsetParent || e.getBoundingClientRect().right <= ${width} + 1) return false;
-  return !e.closest(".tabs");
+  return !e.closest(".tabs") && !e.closest(".sr-only");
 }).slice(0, 6).map((e) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (e.className ? "." + String(e.className).split(" ")[0] : "")))`;
 
 // Plate status lines that run into the plate's padding, which the screen-edge
@@ -84,8 +85,9 @@ try {
     await s("Emulation.setDeviceMetricsOverride", view);
     if (view.mobile) await s("Emulation.setTouchEmulationEnabled", { enabled: true });
     await s("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: scheme }] });
-    await s("Page.navigate", { url: `${base}&scene=${scene}` });
-    await sleep(2500);                          // the mock's scripted clicks run at 700ms+
+    // Phone shots run as the phone app does: "this phone", and no Bluetooth.
+    await s("Page.navigate", { url: `${base}&scene=${scene}${view.mobile ? "&device=phone" : ""}` });
+    await sleep(4000);                          // the mock's scripted clicks run at 700ms+, and a chosen door is checked
     const { result } = await s("Runtime.evaluate", {
       expression: overflow(view.width), returnByValue: true });
     const wide = JSON.parse(result.value);

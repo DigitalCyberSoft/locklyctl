@@ -19,6 +19,7 @@ import toga
 class LocklyctlApp(toga.App):
     def startup(self) -> None:
         os.environ.setdefault("LOCKLYCTL_HOME", str(self.paths.data))
+        os.environ.setdefault("LOCKLYCTL_DEVICE", "phone")      # the page says "this phone" and lays itself out for one
         from locklyctl import config
         from locklyctl.gui.server import Bridge
 

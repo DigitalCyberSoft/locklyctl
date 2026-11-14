@@ -212,16 +212,25 @@ def welcome_form(lock: dict) -> str | None:
 
 
 def welcome_plan(lock: dict, form: str, action: str, week: int = 0,
-                 begin: tuple[int, int] = (0, 0), end: tuple[int, int] = (0, 0)):
+                 begin: tuple[int, int] = (0, 0), end: tuple[int, int] = (0, 0),
+                 *, sync: int = SYNC_FIRST_ENTRY, keep: tuple | list = ()):
     """(what, build, needs_nonce) for a Welcome Mode action: 'set', 'off',
     'query', or 'always' (0x46 only). Shared by the menu, the ``welcome``
-    command and the GUI. Every form carries the lock's nonce."""
+    command and the GUI. Every form carries the lock's nonce.
+
+    8-slot locks only: ``sync`` says how the schedule starts (SYNC_FIRST_ENTRY,
+    the Lockly app's default: locked until someone opens it once; or
+    SYNC_AUTO_ENTRY: unlocks by itself), and ``keep`` is slots already on the
+    lock to write back as they are (a running "keep unlocked" window), since a
+    set or an off rewrites all 8 slots."""
     if form == WELCOME_9B:
         if action == "always":
             raise ValueError("'always' is only available on single-slot (0x46) locks")
         if action == "query":
             return "Welcome Mode query", lambda n: build_welcome8_query(lock, n), True
-        sched = [] if action == "off" else [{"week": week, "begin": begin, "end": end}]
+        sched = [] if action == "off" else [{"week": week, "begin": begin, "end": end,
+                                             "enabled": True, "sync": sync}]
+        sched += list(keep)
         what = "Welcome Mode OFF" if action == "off" else "Welcome Mode schedule"
         return what, lambda n: build_welcome8_set(lock, n, sched, enable=action != "off"), True
     if action == "query":
@@ -602,6 +611,14 @@ ACCESS_USER_MODELS = {"PGK728WRHK", "PGK798HK"}
 # Locks with their own Wi-Fi (reached over Lockly's MQTT channel). Anything
 # else needs a hub; with no hub recorded it can only be reached over Bluetooth.
 WIFI_MODELS = {"PGK728WRHK", "PGK798HK"}
+
+
+def has_wifi_setup(lock: dict) -> bool:
+    """Whether this is a lock with its own Wi-Fi that the app sets up over
+    Bluetooth (0xAE scan, 0x99 save): the app's Wi-Fi low-energy models, the
+    list the multi-part firmware check uses. Only the Visage has been set up
+    this way from here (2026-11-13)."""
+    return str(lock.get("mod") or "").upper() in _MULTI_PART_MODELS
 
 
 def remote_route(lock: dict) -> str:
