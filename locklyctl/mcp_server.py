@@ -61,7 +61,9 @@ def _door(v: dict) -> dict:
             "connection": v.get("route") or "", "state": v["state"],
             "battery": v["battery"], "lowBattery": v["lowBattery"], "doorOpen": v["doorOpen"],
             "checkedAt": _when(v["checkedAt"]), "statusFromHubCache": v["cached"],
-            "favorite": bool(v.get("favorite"))}
+            "favorite": bool(v.get("favorite")),
+            # The owner hid it from the door lists; it can still be named and used.
+            "hidden": bool(v.get("hidden"))}
 
 
 class Doors:

@@ -18,6 +18,7 @@ from .. import config
 from .. import features as F
 from .. import guard as G
 from .. import protocol as P
+from .. import view as V
 from .. import wifi_passwords as W
 from ..const import CONNECTIONS
 from ..features import lock_tz  # noqa: F401  (re-exported for callers)
@@ -300,8 +301,9 @@ class Api:
                 return lk
         raise LocklyError("That lock is no longer on this account.")
 
-    def _view(self, lock: dict, cfg: dict | None = None) -> dict:
+    def _view(self, lock: dict, cfg: dict | None = None, hidden: set[str] | None = None) -> dict:
         cfg = config.load_config() if cfg is None else cfg
+        hidden = V.hidden_ids(self._c()) if hidden is None else hidden
         name = str(lock.get("na") or lock.get("blename") or lock.get("ID", "?"))
         unit, rest = split_unit(name)
         e = self._c().status_cache.get(lock["ID"]) or {}
@@ -346,17 +348,43 @@ class Api:
             "eventLog": F.uses_event_log(lock),
             "faceCapable": F.supports_face(lock),
             "favorite": lock["ID"] in _favorite_ids(cfg),
+            # Left out of the door list (still reached by "Check all doors").
+            "hidden": lock["ID"] in hidden,
             "keepUnlockedUntil": _keep_until(cfg, lock),
             "keepMaxMinutes": _keep_max_minutes(lock),
         }
 
     def locks(self) -> list[dict]:
-        """All locks, with the silent hub-cached status where a hub has one."""
+        """All locks in the door list's order, hidden ones included (marked),
+        with the silent hub-cached status where a hub has one. Until a door
+        is moved the order is by name, as the app has always shown it."""
         c = self._c()
         cfg = config.load_config()
         self._warm_up(_favorite_ids(cfg))
         c.prime_cached_status(c.locks)
-        return [self._view(lk, cfg) for lk in c.locks]
+        return self._views(V.ordered(c, V.NAME_ORDER), cfg)
+
+    def _views(self, locks: list[dict], cfg: dict | None = None) -> list[dict]:
+        cfg = config.load_config() if cfg is None else cfg
+        hidden = V.hidden_ids(self._c())
+        return [self._view(lk, cfg, hidden) for lk in locks]
+
+    # ── the door list: hide doors, and put them in your own order ──────
+
+    def set_hidden(self, lock_id: str, on: bool) -> dict:
+        """Leave a door out of the door list (or put it back). Signed in to
+        Lockly this is stored only in this device's config."""
+        lock = self._lock(lock_id)
+        V.set_hidden(self._c(), lock, bool(on))
+        return self._view(lock)
+
+    def move_lock(self, lock_id: str, by: int, include_hidden: bool = False) -> list[dict]:
+        """Move a door ``by`` places down the list (negative: up), past the
+        doors the list shows (``include_hidden``: hidden ones are shown too).
+        Returns every door in the new order."""
+        lock = self._lock(lock_id)
+        return self._views(V.move(self._c(), lock, by=int(by), include_hidden=bool(include_hidden),
+                                  default=V.NAME_ORDER))
 
     def check(self, lock_id: str) -> dict:
         """Live status for one lock (wakes it, and it beeps). The GUI asks

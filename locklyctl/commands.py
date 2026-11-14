@@ -1,7 +1,10 @@
 """Non-interactive subcommands, for scripts and cron.
 
     locklyctl gui
-    locklyctl list [--json]
+    locklyctl list [--all] [--json]
+    locklyctl hide LOCK ...
+    locklyctl unhide LOCK ...
+    locklyctl move LOCK (--up [N] | --down [N] | --top | --bottom | --to POSITION)
     locklyctl status LOCK [--live] [--json]
     locklyctl lock LOCK
     locklyctl unlock LOCK [--yes]
@@ -35,6 +38,7 @@ from . import ble as BLE
 from . import cli as C
 from . import features as F
 from . import guard as G
+from . import view as V
 from . import wifi_passwords as W
 from .transport import LocklyClient, LocklyError
 
@@ -75,7 +79,23 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
                    help="open it in your web browser instead (no 'gui' extra needed)")
 
     p = sub.add_parser("list", help="list locks with their silent hub-cached status")
+    p.add_argument("--all", action="store_true", help="include hidden locks (marked as hidden)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    hide_note = ("listings leave hidden locks out; commands that name a lock, and bulk "
+                 "actions, still reach it")
+    p = sub.add_parser("hide", help=f"leave locks out of listings ({hide_note})")
+    p.add_argument("lock", nargs="+")
+    p = sub.add_parser("unhide", help="show hidden locks in listings again")
+    p.add_argument("lock", nargs="+")
+    p = sub.add_parser("move", help="move a lock up or down in the listings (hidden locks keep their place)")
+    p.add_argument("lock")
+    where = p.add_mutually_exclusive_group(required=True)
+    where.add_argument("--up", type=int, nargs="?", const=1, metavar="N", help="up N places (default 1)")
+    where.add_argument("--down", type=int, nargs="?", const=1, metavar="N", help="down N places (default 1)")
+    where.add_argument("--top", action="store_true", help="first in the listing")
+    where.add_argument("--bottom", action="store_true", help="last in the listing")
+    where.add_argument("--to", type=int, metavar="POSITION", help="this place in the listing, from 1")
 
     p = sub.add_parser("status", help="a lock's status (silent hub cache by default)")
     p.add_argument("lock")
@@ -148,8 +168,8 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     for name, verb in (("suspend", "suspend"), ("resume", "restore")):
         p = sub.add_parser(name, help=f"{verb} an access user on a Visage without touching their PIN, "
-                                      "fingerprint or face (suspend expires their window; resume puts the "
-                                      "saved schedule back)")
+                                      "fingerprint or face (suspend moves their window into the far future; "
+                                      "resume puts the saved schedule back)")
         p.add_argument("lock")
         p.add_argument("user", help="the user's name (case-insensitive) or numeric id")
         p.add_argument("--dry-run", action="store_true", help="print the frame and the saved schedule, send nothing")
@@ -183,15 +203,54 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _list(client: LocklyClient, args) -> int:
-    client.prime_cached_status(client.locks)
+    shown = V.listed(client, include_hidden=args.all)
+    hidden = V.hidden_ids(client)
+    client.prime_cached_status(shown)
     if args.json:
         print(json.dumps([{"name": _name(lk), "id": lk.get("ID"), "model": lk.get("mod"),
-                           "hubid": lk.get("hubid") or None,
+                           "hubid": lk.get("hubid") or None, "hidden": lk.get("ID") in hidden,
                            "status": client.status_cache.get(lk["ID"])}
-                          for lk in client.locks], indent=2))
+                          for lk in shown], indent=2))
+        return EXIT_OK
+    for lk in shown:
+        mark = C.dim("  (hidden)") if lk.get("ID") in hidden else ""
+        print(f"{C.lock_label(client, lk)}  {C.dim(lk['ID'])}{mark}")
+    left_out = len(client.locks) - len(shown)
+    if left_out:                     # on stderr, so stdout stays one line per lock
+        print(C.dim(f"  {left_out} hidden: list --all shows {'it' if left_out == 1 else 'them'}, "
+                    "unhide LOCK brings one back"), file=sys.stderr)
+    return EXIT_OK
+
+
+def _hide(client: LocklyClient, args, hidden: bool = True) -> int:
+    for lk in [find_lock(client.locks, q) for q in args.lock]:
+        V.set_hidden(client, lk, hidden)
+        print(C.green(f"  {_name(lk)}: " + ("hidden from listings" if hidden else "shown in listings again")))
+    return EXIT_OK
+
+
+def _unhide(client: LocklyClient, args) -> int:
+    return _hide(client, args, hidden=False)
+
+
+def _move(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    for flag in ("up", "down", "to"):
+        n = getattr(args, flag)
+        if n is not None and n < 1:
+            raise UsageError(f"--{flag} needs a number from 1")
+    if args.top:
+        new = V.move(client, lock, to=1)
+    elif args.bottom:
+        new = V.move(client, lock, to=len(client.locks))
+    elif args.to is not None:
+        new = V.move(client, lock, to=args.to)
     else:
-        for lk in client.locks:
-            print(f"{C.lock_label(client, lk)}  {C.dim(lk['ID'])}")
+        new = V.move(client, lock, by=-args.up if args.up is not None else args.down)
+    hidden = V.hidden_ids(client)
+    listing = [lk for lk in new if lk.get("ID") == lock.get("ID") or lk.get("ID") not in hidden]
+    place = next(i for i, lk in enumerate(listing) if lk.get("ID") == lock.get("ID")) + 1
+    print(C.green(f"  {_name(lock)}: {place} of {len(listing)} in the listing"))
     return EXIT_OK
 
 
@@ -576,6 +635,7 @@ def _resume(client: LocklyClient, args) -> int:
     return EXIT_OK
 
 
-_HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
+_HANDLERS = {"list": _list, "hide": _hide, "unhide": _unhide, "move": _move,
+             "status": _status, "lock": _lock, "unlock": _unlock,
              "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
              "add": _add, "suspend": _suspend, "resume": _resume}

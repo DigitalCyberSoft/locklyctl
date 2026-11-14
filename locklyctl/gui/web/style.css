@@ -209,6 +209,14 @@ h1, h2, p { margin: 0; }
 .btn-open { border-color: var(--unlocked); color: var(--unlocked); }
 .btn-open:hover { background: color-mix(in srgb, var(--unlocked) 10%, transparent); }
 .fav-toggle { margin-left: auto; align-self: center; }
+/* Favorite and the door-list controls stay together at the right, and wrap as one. */
+.door-tools { margin-left: auto; align-self: center; display: flex; flex-wrap: wrap;
+  justify-content: flex-end; gap: 0.4rem; }
+.door-tools .fav-toggle { margin-left: 0; }
+.door-order { display: flex; gap: 0.25rem; }
+.door-order .btn { min-width: 2.25rem; }
+.show-hidden { width: 100%; margin-bottom: 0.75rem; }
+.plate.is-hidden { opacity: 0.55; border-style: dashed; }
 .fav-toggle .star { color: var(--brass); }
 
 /* ── the selected door ────────────────────────────────────────────── */
@@ -426,6 +434,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .log td { padding-right: 0.5rem; }
   .person-head h1 { font-size: 1.9rem; }
   .door-title { order: 1; flex-basis: 100%; }               /* Favorite sits beside the number */
+  .door-tools { flex: 1 1 0; min-width: 0; }                /* and its controls wrap beside it, not under it */
   .cabinet:has(.favs:not([hidden])) { max-height: 50vh; }   /* room for the favorites */
   .favs { margin-bottom: 1rem; }
   .fav-actions .btn { padding: 0.7rem 0.85rem; }             /* at least 44px tall to tap */

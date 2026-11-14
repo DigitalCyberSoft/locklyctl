@@ -88,6 +88,8 @@
           <h2 class="favs-title" id="favs-title">Favorites</h2>
           <ul class="fav-list" id="fav-list"></ul>
         </section>
+        <button class="btn btn-quiet show-hidden" id="show-hidden" type="button" aria-pressed="false" hidden
+                title="Hidden doors are left out of this list. Showing them lets you put one back.">Show hidden doors</button>
         <ul id="plates" class="plates"></ul>
       </nav>
 
@@ -103,7 +105,16 @@
               <h1 id="d-name"></h1>
               <p class="muted" id="d-model"></p>
             </div>
-            <button class="btn btn-quiet fav-toggle" id="btn-fav" type="button" aria-pressed="false">Add to favorites</button>
+            <div class="door-tools">
+              <button class="btn btn-quiet fav-toggle" id="btn-fav" type="button" aria-pressed="false">Add to favorites</button>
+              <div class="door-order" role="group" aria-label="Place in the door list">
+                <button class="btn btn-quiet" id="btn-up" type="button" title="Move up in the door list"
+                        aria-label="Move up in the door list">&uarr;</button>
+                <button class="btn btn-quiet" id="btn-down" type="button" title="Move down in the door list"
+                        aria-label="Move down in the door list">&darr;</button>
+                <button class="btn btn-quiet" id="btn-hide" type="button" aria-pressed="false">Hide</button>
+              </div>
+            </div>
           </header>
 
           <div class="door-state">

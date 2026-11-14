@@ -27,6 +27,7 @@ def _set_home(value):
 class FakeClient:
     def __init__(self, email):
         self.email = email
+        self.server = None                  # signed in to Lockly, as LocklyClient without --server
         self.pw_hash = None
         self.status_cache = {}
         self.sent = []
@@ -186,6 +187,29 @@ def test_session_and_sign_in(api):
     assert Api(client_factory=FakeClient).session()["signedIn"] is True   # saved login works
     api.sign_out()
     assert Api(client_factory=FakeClient).session()["signedIn"] is False
+
+
+@_api_in_tmp_home
+def test_door_list_hide_and_order(api):
+    api.sign_in("a@b", "right", False)
+    assert [v["id"] for v in api.locks()] == [UUID, B2]           # by name until moved: 2A before 1204
+    assert not any(v["hidden"] for v in api.locks())
+    assert api.set_hidden(B2, True)["hidden"] is True
+    assert {v["id"]: v["hidden"] for v in api.locks()} == {UUID: False, B2: True}   # still sent, marked
+    # with B2 hidden and hidden doors not shown, the list is UUID alone: nowhere to go
+    assert [v["id"] for v in api.move_lock(UUID, 1)] == [UUID, B2]
+    # with hidden doors shown, UUID steps past B2, and the order is saved
+    assert [v["id"] for v in api.move_lock(UUID, 1, True)] == [B2, UUID]
+    fresh = Api(client_factory=FakeClient)
+    fresh.sign_in("a@b", "right", False)
+    assert [v["id"] for v in fresh.locks()] == [B2, UUID]
+    assert fresh.set_hidden(B2, False)["hidden"] is False          # unhide
+    try:
+        api.set_hidden("nope", True)
+    except LocklyError:
+        pass
+    else:
+        raise AssertionError("unknown lock accepted")
 
 
 @_api_in_tmp_home

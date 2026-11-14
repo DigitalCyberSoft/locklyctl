@@ -1845,8 +1845,9 @@ class LocklyClient:
         return None
 
     def suspend_access_user(self, lock: dict, user_id: int, *, dry_run: bool = False) -> dict:
-        """Suspend a user: save their current schedule, then push an expired
-        window (type 0x12). Returns before/after credential counts (equal means
+        """Suspend a user: save their current schedule, then push a far-future
+        window that excludes now (type 0x12; the lock rejects a past window with
+        E3). Returns before/after credential counts (equal means
         nothing was dropped); a dry run returns the frame and the schedule it
         would save, and sends nothing."""
         rec = self._read_access_user(lock, user_id)

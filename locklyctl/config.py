@@ -93,8 +93,8 @@ def save_config(cfg: dict) -> None:
 
 # Suspended access users: a lock_id:user_id -> {"user_type", "date"} map in the
 # owner-only config, so `resume` can restore the exact schedule a `suspend`
-# replaced with an expired window. The date is a schedule, not a secret, but it
-# stays in the owner-only config all the same.
+# replaced with a far-future window. The date is a schedule, not a secret, but
+# it stays in the owner-only config all the same.
 def _suspended_key(lock_id: str, user_id: int) -> str:
     return f"{lock_id}:{user_id}"
 

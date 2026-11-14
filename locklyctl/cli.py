@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from . import features as F
 from . import protocol as P
 from . import config
+from . import view as V
 from .const import CONNECTIONS
 from .transport import LocklyClient, LocklyError
 
@@ -191,14 +192,25 @@ def choose_lock(client: LocklyClient) -> dict | None:
     if not client.locks:
         print(red("  no locks on this account"))
         return None
+    show_hidden = False
     while True:
-        opts = [(str(i), lock_label(client, lk)) for i, lk in enumerate(client.locks)]
+        hidden = V.hidden_ids(client)
+        shown = V.listed(client, include_hidden=show_hidden)
+        opts = [(str(i), lock_label(client, lk) + (dim("  (hidden)") if lk["ID"] in hidden else ""))
+                for i, lk in enumerate(shown)]
+        n_hidden = sum(1 for lk in client.locks if lk["ID"] in hidden)
+        if n_hidden:
+            what = f"{n_hidden} hidden lock{'' if n_hidden == 1 else 's'}"
+            opts.append(("hidden", dim(f"Stop showing the {what}" if show_hidden else f"Show {what}")))
         opts.append(("refresh", cyan("↻ Refresh all statuses")
                      + dim(" (wakes every lock — they beep)")))
         opts.append(("quit", "Quit"))
         pick = menu("Locks", opts)
         if pick in ("quit", ""):
             return None
+        if pick == "hidden":
+            show_hidden = not show_hidden
+            continue
         if pick == "refresh":
             n = len(client.locks)
             print(dim(f"  waking and querying {n} locks in parallel…"))
@@ -207,7 +219,7 @@ def choose_lock(client: LocklyClient) -> dict | None:
             print(dim(f"  {reachable}/{n} responded (the rest were asleep)"))
             continue
         if pick.isdigit():
-            return client.locks[int(pick)]
+            return shown[int(pick)]
 
 
 # ── actions ───────────────────────────────────────────────────────────────────
@@ -682,6 +694,7 @@ def do_face_probe(client: LocklyClient, lock: dict) -> None:
 def lock_menu(client: LocklyClient, lock: dict) -> None:
     while True:
         print(bold(f"\n  ▸ {lock.get('na') or lock['ID']}"))
+        hidden = V.is_hidden(client, lock)
         choice = menu("Action", [
             ("status", "Status"),
             ("diagnose", "Connection test (which transports work)"),
@@ -694,19 +707,31 @@ def lock_menu(client: LocklyClient, lock: dict) -> None:
             ("enrol", "Remote enrolment (add/list/delete users)"),
             ("welcome", "Welcome Mode schedule"),
             ("rain", "Rain Mode"),
+            ("hide", "Show in the lock list again" if hidden else "Hide from the lock list"),
+            ("up", "Move up in the lock list"),
+            ("down", "Move down in the lock list"),
             ("back", "Back to locks"),
         ])
         try:
             if choice in ("back", "quit"):
                 return
-            {
-                "status": do_status, "diagnose": do_diagnose,
-                "unlock": do_unlock, "lock": do_lock,
-                "history": do_history, "guests": do_list_guests,
-                "addguest": do_add_guest, "delguest": do_delete_guest,
-                "enrol": do_enrol,
-                "welcome": do_welcome_mode, "rain": do_rain_mode,
-            }[choice](client, lock)
+            if choice == "hide":
+                V.set_hidden(client, lock, not hidden)
+                print(green("  shown in the lock list again" if hidden else
+                            "  hidden from the lock list; commands still reach it, and the list's "
+                            "\"Show hidden\" entry brings it back"))
+            elif choice in ("up", "down"):
+                V.move(client, lock, by=-1 if choice == "up" else 1)
+                print(green(f"  moved {choice} in the lock list"))
+            else:
+                {
+                    "status": do_status, "diagnose": do_diagnose,
+                    "unlock": do_unlock, "lock": do_lock,
+                    "history": do_history, "guests": do_list_guests,
+                    "addguest": do_add_guest, "delguest": do_delete_guest,
+                    "enrol": do_enrol,
+                    "welcome": do_welcome_mode, "rain": do_rain_mode,
+                }[choice](client, lock)
         except LocklyError as e:
             print(red(f"  error: {e}"))
         except Exception as e:  # noqa: BLE001

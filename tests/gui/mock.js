@@ -11,7 +11,7 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
   route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", eventLog: model === "PGK728WRHK", favorite: false,
   keepUnlockedUntil: null, keepMaxMinutes: 1439, clockKnown: false, clockOffset: null,
-  timeZone: "UTC+8", computerTimeZone: "UTC+8", takesTimeZone: model === "PGK728WRHK", ...extra,
+  timeZone: "UTC+8", computerTimeZone: "UTC+8", takesTimeZone: model === "PGK728WRHK", hidden: false, ...extra,
 });
 
 const locks = [
@@ -31,6 +31,14 @@ const locks = [
 ];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = (id) => locks.find((l) => l.id === id);
+// The door list's order, as locklyctl/view.py keeps it: by name until a door is
+// moved, then the saved order (doors it doesn't know go last).
+let order = null;
+const ordered = () => {
+  if (!order) return [...locks].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const pos = (l) => { const i = order.indexOf(l.id); return i < 0 ? Infinity : i; };
+  return [...locks].sort((a, b) => pos(a) - pos(b));
+};
 let fwPolls = 0, fwParts = [];             // the mock firmware install's progress
 let connection = "auto";                   // Api.connection's saved setting
 
@@ -39,7 +47,20 @@ window.pywebview = {
     async session() { await wait(200); return scene === "signin" ? { signedIn: false, email: "owner@example.com" } : { signedIn: true, email: "owner@example.com" }; },
     async sign_in(email) { await wait(400); return { signedIn: true, email }; },
     async sign_out() { return { signedIn: false, email: "owner@example.com" }; },
-    async locks() { await wait(150); return locks.map((l) => ({ ...l })); },
+    async locks() { await wait(150); return ordered().map((l) => ({ ...l })); },
+    async set_hidden(id, on) { await wait(120); Object.assign(find(id), { hidden: !!on }); return { ...find(id) }; },
+    async move_lock(id, by, includeHidden) {        // view.move: step past the doors the list shows
+      await wait(120);
+      const full = ordered(), target = find(id);
+      const frame = full.filter((l) => includeHidden || !l.hidden || l === target);
+      const i = frame.indexOf(target), j = Math.max(0, Math.min(frame.length - 1, i + by));
+      if (j !== i) {
+        const rest = frame.filter((l) => l !== target), others = full.filter((l) => l !== target);
+        others.splice(j < rest.length ? others.indexOf(rest[j]) : others.indexOf(rest[rest.length - 1]) + 1, 0, target);
+        order = others.map((l) => l.id);
+      }
+      return ordered().map((l) => ({ ...l }));
+    },
     async check(id) {                      // doors answer at different speeds; some stay asleep
       const l = find(id), n = parseInt(id, 16);
       await wait(500 + (n % 7) * 350);

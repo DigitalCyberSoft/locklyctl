@@ -46,8 +46,12 @@ const stateWord = (v) => (stateOf(v) === "asleep" && v.offline ? "Offline" : STA
 const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
 
 let api = null;
-let locks = [];
+let locks = [];             // every door in the list's order (Api.locks), hidden ones included
 let currentId = null;
+// Whether the door list shows hidden doors too (dimmed), so one can be put back.
+let showHidden = false;
+try { showHidden = localStorage.getItem("showHidden") === "1"; } catch (_) { /* storage blocked */ }
+const shownLocks = () => locks.filter((v) => showHidden || !v.hidden);
 let activeTab = "activity";
 let toastTimer = null;
 
@@ -227,14 +231,15 @@ async function enterApp(email) {
     $("plates").replaceChildren(h("li", { class: "form-error" }, e.message));
     return;
   }
-  locks.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  // Api.locks returns them in the list's order: by name until a door is moved.
   renderFavs();
   if (!locks.length) {
     $("plates").replaceChildren(h("li", { class: "muted" }, "No locks on this account. Add them in the Lockly app first."));
     return;
   }
   renderPlates();
-  selectLock(current() ? currentId : locks[0].id);
+  const first = shownLocks()[0] || locks[0];
+  selectLock(current() ? currentId : first.id);
   // Installs still running from before this page was (re)loaded: follow them again.
   call("firmware_jobs").then((ids) => {
     for (const id of ids) {
@@ -271,9 +276,11 @@ $("sign-out").addEventListener("click", async () => {
 $("check-all").addEventListener("click", async (ev) => {
   const doors = locks.filter((v) => v.route !== "bluetooth");
   const left = locks.length - doors.length;
+  const hid = doors.filter((v) => v.hidden).length;     // hidden doors are still checked
   const ok = await confirmDialog(`Check all ${doors.length} doors?`,
     "Each lock wakes up to answer, and beeps. Locks that are asleep may not answer."
-    + (left ? ` ${left} ${left === 1 ? "door has no hub, so it's" : "doors have no hub, so they're"} left out.` : ""),
+    + (left ? ` ${left} ${left === 1 ? "door has no hub, so it's" : "doors have no hub, so they're"} left out.` : "")
+    + (hid ? ` ${hid} of them ${hid === 1 ? "is" : "are"} hidden from the door list.` : ""),
     "Check all doors");
   if (!ok) return;
   await busy(ev.currentTarget, async () => {
@@ -285,16 +292,29 @@ $("check-all").addEventListener("click", async (ev) => {
 // ── plates ─────────────────────────────────────────────────────────────
 
 function renderPlates() {
-  const items = locks.map((v) => {
+  const nHidden = locks.filter((v) => v.hidden).length;
+  const tog = $("show-hidden");
+  tog.hidden = !nHidden && !showHidden;
+  tog.setAttribute("aria-pressed", String(showHidden));
+  tog.textContent = `${showHidden ? "Hide" : "Show"} hidden doors (${nHidden})`;
+  const shown = shownLocks();
+  if (locks.length && !shown.length) {
+    $("plates").replaceChildren(h("li", { class: "muted" },
+      "Every door is hidden. Use “Show hidden doors” to bring one back."));
+    renderRetry();
+    return;
+  }
+  const items = shown.map((v) => {
     const num = v.unit || v.name;
     const batt = v.battery != null ? `${v.battery}%` : v.lowBattery ? "Low battery" : null;
     const doing = pending.get(v.id);
     const word = doing ? DOING_SHORT[doing] : stateWord(v);
     return h("li", {},
       h("button", {
-        class: "plate", type: "button", "data-state": stateOf(v), "aria-busy": doing ? "true" : null,
+        class: "plate" + (v.hidden ? " is-hidden" : ""), type: "button", "data-state": stateOf(v),
+        "aria-busy": doing ? "true" : null,
         "aria-current": v.id === currentId ? "true" : "false",
-        "aria-label": `${doorLabel(v)}, ${word}${v.favorite ? ", favorite" : ""}`,
+        "aria-label": `${doorLabel(v)}, ${word}${v.favorite ? ", favorite" : ""}${v.hidden ? ", hidden" : ""}`,
         onclick: () => selectLock(v.id, true),
       },
         h("span", { class: "plate-num" + (v.unit ? "" : " wordy") }, num),
@@ -370,7 +390,7 @@ const DOING = { lock: "Locking…", unlock: "Unlocking…", check: "Connecting�
 const DOING_SHORT = { ...DOING, keep: "Setting…", firmware: "Updating…" };   // short enough for a plate
 
 function renderFavs() {
-  const favs = locks.filter((v) => v.favorite);
+  const favs = locks.filter((v) => v.favorite && !v.hidden);     // hiding a door takes it off here too
   $("favs").hidden = !favs.length;
   $("fav-list").replaceChildren(...favs.map((v) => {
     const st = stateOf(v);
@@ -482,6 +502,17 @@ function renderDoor() {
   fav.replaceChildren(h("span", { class: "star" }, icon(v.favorite ? "favorite-on" : "favorite")), "Favorite");
   fav.disabled = noRoute && !v.favorite;     // a door with no hub can't be opened from a favorite
   fav.title = noRoute && !v.favorite ? "This door has no hub, so it can only be opened over Bluetooth." : "";
+  const hide = $("btn-hide");
+  hide.setAttribute("aria-pressed", String(!!v.hidden));
+  hide.textContent = v.hidden ? "Unhide" : "Hide";
+  hide.title = v.hidden ? "Put this door back in the door list."
+    : "Leave this door out of the door list. “Check all doors” still checks it.";
+  // The doors a move steps past: what the list shows, plus this door even if hidden
+  // (the same frame as view.move in Python).
+  const frame = locks.filter((l) => showHidden || !l.hidden || l.id === v.id);
+  const at = frame.findIndex((l) => l.id === v.id);
+  $("btn-up").disabled = at <= 0;
+  $("btn-down").disabled = at >= frame.length - 1;
 
   const st = $("d-state");
   const doing = pending.get(v.id);
@@ -594,6 +625,42 @@ $("btn-fav").addEventListener("click", async (ev) => {
     toast(view.favorite ? `${doorLabel(v)} is in your favorites.` : `${doorLabel(v)} removed from favorites.`);
   } catch (e) { toast(e.message, true); }
   finally { renderDoor(); }
+});
+
+// ── the door list: hide doors and put them in your own order ───────────
+
+$("btn-hide").addEventListener("click", async (ev) => {
+  const v = current();
+  if (!v) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const view = await call("set_hidden", v.id, !v.hidden);
+    updateLock(view);
+    toast(view.hidden ? `${doorLabel(v)} is hidden from the door list. “Show hidden doors” brings it back.`
+      : `${doorLabel(v)} is back in the door list.`);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; renderDoor(); }
+});
+
+async function moveDoor(by) {
+  const v = current();
+  if (!v) return;
+  try {
+    locks = await call("move_lock", v.id, by, showHidden);
+    renderPlates();
+    renderFavs();
+    renderDoor();
+  } catch (e) { toast(e.message, true); }
+}
+$("btn-up").addEventListener("click", () => moveDoor(-1));
+$("btn-down").addEventListener("click", () => moveDoor(1));
+
+$("show-hidden").addEventListener("click", () => {
+  showHidden = !showHidden;
+  try { localStorage.setItem("showHidden", showHidden ? "1" : "0"); } catch (_) { /* storage blocked */ }
+  renderPlates();
+  if (current()) renderDoor();
 });
 
 // Hold to unlock: nothing is sent unless the button is held for the full fill.
