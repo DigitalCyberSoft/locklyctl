@@ -35,6 +35,7 @@ way the official app does.
 |---|---|
 | Sign in, list doors, status (silent hub cache, or live) | ✅ |
 | The lock's own clock, from every live status check (each check also sends it the time, as the app's does) | ✅ warns when it's 2 minutes or more off, or not set: people on a schedule are let in by it. On a Visage (2026-11-13), a check carrying a time 5 minutes ahead moved its clock there before it replied, and the next ordinary check moved it back: every check that reaches it sets its clock. A reply that still shows a wrong clock gets a second check on the same route, and the result is shown, including "still wrong" |
+| The lock's own time zone (0x33), which the Lockly app gives a lock when it's set up and after a firmware update: `locklyctl timezone` shows each lock's zone in the Lockly account next to this computer's, and `--sync` (or "Give it its time zone" in the Device tab) gives a lock the account's zone, then the time | ⚠️ the frame is checked field by field against the app's (SetTimeZoneCmd), not yet sent to a lock. Whole hours only, as the app sends it. Only models the app sends it to by model alone (the Visage among them; not the PGD7Y or the Vision). The lock's own setting can't be read (the app never reads it), so it isn't compared. It isn't sent after locklyctl's firmware installs yet. Changing the zone in the Lockly account isn't built (the app sends the whole lock record for that) |
 | Bluetooth straight from this computer to a lock next to it: status checks, which also set its clock, and reaching it after a firmware install if its Wi-Fi doesn't come back | ⚠️ run on a Visage (2026-11-13): found by name, connected in 6.4 s, answered status checks; with the Auto setting it reached a Visage whose Wi-Fi was offline in 21 s. Such a door is then asked over Bluetooth first for 5 minutes, and clicking it within a minute of a Bluetooth answer doesn't connect again (the lock drops an idle Bluetooth connection after 6-8 s, so every check is a new connection). Only status checks go over Bluetooth: commands that change the lock don't yet. Needs `pip install 'locklyctl[bluetooth]'` and a Bluetooth adapter; not in the packaged apps yet |
 | Connection setting: Auto (hub or Lockly's server, then Bluetooth from this computer for a status check that got no answer), Remote only, or Bluetooth only (status checks only) | ✅ desktop app's Device tab, `--connection` on the command line; Auto is the default |
 | Lock / unlock | ✅ verified protocol (LocklyHA, real hardware) |
@@ -167,6 +168,8 @@ locklyctl firmware "Front" --bluetooth-chip  # the Bluetooth chip, over Bluetoot
 locklyctl wifi "Front"                  # Wi-Fi networks the lock sees (over Bluetooth)
 locklyctl wifi "Front" --ssid "Home"    # give it a network: the saved password, this computer's, or asks
 locklyctl wifi --ssid "Home" --forget   # forget the password saved for a network
+locklyctl timezone                      # each lock's time zone in the account, and this computer's
+locklyctl timezone "Front" --sync       # give it its time zone, then the time (wakes it)
 ```
 
 A door is named by its name (case-insensitive, a unique prefix is fine) or ID.

@@ -724,6 +724,41 @@ class LocklyClient:
             self._tl.ble = None
             link.close()
 
+    def set_time_zone(self, lock: dict) -> dict:
+        """Give the lock its time zone (0x33) after a status check, then check
+        its status again, which sets its clock in that zone: the app's
+        SetTimeZone.b, and HostSettingsFragment.Q6 after a change. The zone is
+        the lock's own from the account (what status checks set its clock by),
+        else this computer's (features.time_zone_hours). It goes the way status
+        checks do: the hub or Lockly's server, Bluetooth with connection
+        "bluetooth", or with "auto" when the remote route doesn't answer and
+        the lock is in range. Returns {"ok", "text", "hours", "source", "via"}.
+        Raises LocklyError for a model that doesn't take it, and
+        BLE.BluetoothError when Bluetooth was needed and failed."""
+        if not F.takes_time_zone(lock):
+            raise LocklyError(f"The {lock.get('mod') or 'lock'} doesn't take a time zone this way (the app "
+                              "sends it only to the models in features.TIME_ZONE_MODELS).", "unsupported")
+        hours, source = F.time_zone_hours(lock)
+
+        def give(nonce: str) -> tuple[bool, str]:
+            ok, detail = F.check_reply(self.exchange_frame(lock, F.build_time_zone_set(lock, nonce, hours)), lock)
+            if ok:
+                self.query_status(lock)                     # its clock, now in that zone
+            return ok, detail
+
+        done = lambda ok, text, via: {"ok": ok, "text": text, "hours": hours, "source": source,  # noqa: E731
+                                      "via": via}
+        if self.connection != "bluetooth":
+            with self._remote_only():
+                st = self.query_status(lock)
+                if st and st.get("ble_nonce"):
+                    return done(*give(st["ble_nonce"]), st.get("via") or "remote")
+            trail = self.last_transport_trail()
+            if self.connection == "remote" or not lock.get("blename") or BLE.available():
+                return done(False, f"the lock didn't answer: {trail}", None)
+        with self._bluetooth_session(lock) as (_link, st):
+            return done(*give(st["ble_nonce"]), "bluetooth")
+
     def refresh_all_status(self, locks: list[dict], max_workers: int = 6) -> dict:
         """Query every lock's live status in parallel, caching results. This
         WAKES each lock (they beep). Returns {lock_id: cache_entry}. Sleeping /

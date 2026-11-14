@@ -334,6 +334,11 @@ class Api:
             "lowBattery": bool(e.get("low_battery") or e.get("battery_invalid")),
             "doorOpen": e.get("door_sensor_open"),
             "firmware": e.get("firmware_version") or str(lock.get("fwv") or ""),
+            # Its time zone in the Lockly account ("UTC+8", "not set"), this
+            # computer's, and whether the model takes one (set_time_zone).
+            "timeZone": F.utc_offset_text(F.lock_utc_offset_minutes(lock)),
+            "computerTimeZone": F.utc_offset_text(F.computer_utc_offset_minutes()),
+            "takesTimeZone": F.takes_time_zone(lock),
             "cached": bool(e.get("cached")),
             "checkedAt": e.get("ts"),
             "welcomeForm": F.welcome_form(lock),
@@ -924,6 +929,18 @@ class Api:
         if st is None:
             raise LocklyError("The lock didn't answer over Bluetooth.", "bluetooth")
         return self._view(lock)
+
+    def set_time_zone(self, lock_id: str) -> dict:
+        """Give the lock its time zone (the account's, else this computer's),
+        then the time, the way status checks go (LocklyClient.set_time_zone):
+        {"ok", "text", "zone", "source", "via", "lock"}."""
+        lock = self._lock(lock_id)
+        try:
+            r = self._c().set_time_zone(lock)
+        except BLE.BluetoothError as e:
+            raise LocklyError(str(e), "bluetooth") from e
+        return {"ok": r["ok"], "text": r["text"], "zone": F.utc_offset_text(r["hours"] * 60),
+                "source": r["source"], "via": r["via"], "lock": self._view(lock)}
 
     # ── Wi-Fi, given to the lock over Bluetooth (the app's Wi-Fi setup) ──
 

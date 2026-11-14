@@ -224,6 +224,13 @@
             <p class="muted">From this computer, when it's next to the door. A check over Bluetooth gives the lock the time, which it lets people on a schedule in by; it wakes the lock.</p>
             <div><button class="btn btn-ink" id="btn-ble-time" type="button"><svg class="i" aria-hidden="true"><use href="#i-bluetooth"/></svg>Set its clock over Bluetooth</button></div>
             <div id="ble-out"></div>
+            <div id="tz-box">
+              <h2>Time zone</h2>
+              <p class="muted">The lock keeps a time zone of its own, which the Lockly app gives it when it's set up and after a firmware update. This gives it the one in the Lockly account, then the time. It wakes the lock.</p>
+              <p class="fine" id="tz-note"></p>
+              <div><button class="btn btn-ink" id="btn-tz" type="button"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Give it its time zone</button></div>
+              <div id="tz-out"></div>
+            </div>
             <h2>Wi-Fi</h2>
             <p class="muted">Give the lock a Wi-Fi network over Bluetooth from this computer, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
             <div><button class="btn btn-quiet" id="btn-wifi-scan" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Networks it sees</button></div>

@@ -508,6 +508,15 @@ function renderDoor() {
   if (v.firmware) facts.push(h("li", {}, `Firmware ${v.firmware}`));
   $("d-facts").replaceChildren(...facts);
   renderKeep(v);
+  renderTimeZone(v);
+}
+
+function renderTimeZone(v) {
+  $("tz-box").hidden = !v.takesTimeZone;
+  $("tz-note").textContent = v.timeZone === "not set"
+    ? `The Lockly account has no time zone for this lock, so it gets this computer's (${v.computerTimeZone}).`
+    : `In the Lockly account: ${v.timeZone}. This computer: ${v.computerTimeZone}.`
+      + (v.timeZone !== v.computerTimeZone ? " They differ: the lock gets the account's." : "");
 }
 
 // ── keep unlocked for a while: one-time Welcome Mode slots the lock runs ─
@@ -663,7 +672,9 @@ function loadTab(name) {
   if (name === "activity") loadActivity();
   else if (name === "guests") loadGuests();
   else if (name === "schedules") setupSchedules();
-  else if (name === "connection") { $("diag-out").replaceChildren(); $("ble-out").replaceChildren(); $("fw-out").replaceChildren(); }
+  else if (name === "connection") {
+    for (const id of ["diag-out", "ble-out", "tz-out", "fw-out"]) $(id).replaceChildren();
+  }
 }
 
 async function loadActivity() {
@@ -911,6 +922,23 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
         clock ? `Reached it over Bluetooth, but ${clock.charAt(0).toLowerCase()}${clock.slice(1)}.`
           : "Reached it over Bluetooth and gave it the time. Its clock is right."),
         fix ? h("p", { class: "fine" }, fix) : null);
+    } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  });
+});
+
+// ── time zone, given to the lock as the app does after setup or an update ─
+
+$("btn-tz").addEventListener("click", async (ev) => {
+  const v = current();
+  const out = $("tz-out");
+  out.replaceChildren(h("p", { class: "muted" }, "Giving the lock its time zone…"));
+  await busy(ev.currentTarget, async () => {
+    try {
+      const r = await call("set_time_zone", v.id);
+      updateLock(r.lock);
+      out.replaceChildren(h("p", { class: r.ok ? "ok" : "form-error" }, r.ok
+        ? `Gave it ${r.zone}${r.source === "computer" ? " (this computer's)" : ""}${r.via === "bluetooth" ? " over Bluetooth" : ""}, then the time.`
+        : `It didn't take it: ${r.text}.`));
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });

@@ -784,3 +784,17 @@ def test_not_signed_in():
     except LocklyError:
         return
     raise AssertionError("worked without signing in")
+
+
+@_api_in_tmp_home
+def test_time_zone_from_the_page(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    given = []
+    c.set_time_zone = lambda lock: given.append(lock["ID"]) or {
+        "ok": True, "text": "time zone set", "hours": 8, "source": "account", "via": "server"}
+    door = {v["id"]: v for v in api.locks()}
+    assert door[B2]["takesTimeZone"] and not door[UUID]["takesTimeZone"]       # a Visage; a PGD7Y doesn't
+    assert door[B2]["timeZone"] == "not set" and door[B2]["computerTimeZone"].startswith("UTC")
+    r = api.set_time_zone(B2)
+    assert given == [B2] and r["ok"] and r["zone"] == "UTC+8" and r["lock"]["id"] == B2

@@ -342,6 +342,8 @@ def check_reply(ack_hex: str | None, lock: dict) -> tuple[bool, str]:
             if users else "no user slots on this page")
     if cmd == "4B":
         return True, "PIN accepted for the slot"
+    if cmd == "33":                       # SetTimeZoneCmd.parseCmd: any reply that decrypts is success
+        return True, "time zone set"
     if cmd == "17":
         return True, "capture stopped"
     if cmd == "73":
@@ -811,6 +813,67 @@ def lock_now(lock: dict) -> _dt:
     zone when that's known, otherwise this computer's local time."""
     tz = lock_tz(lock)
     return _dt.now(tz).replace(tzinfo=None) if tz else _dt.now()
+
+
+# ── Time zone (0x33 SetTimeZoneCmd) ─────────────────────────────────────────
+# The app gives a lock its time zone after binding it, after a firmware update
+# reboots it (SetupTimeZone51CmdDataSource, with the phone's zone), and when
+# the zone is changed in the lock's settings, each time after a status check
+# (SetTimeZone.b). Models that take it by model alone, from
+# BluetoothBeanManager.isSupportTimeZoneCmd (app 3.3.4, :3270-3330), where each
+# isX() is a lock type (isPGK728WRHK: 105). Models it allows only from some
+# firmware version on are left out: those version checks aren't ported.
+TIME_ZONE_MODELS = {"PGD698L", "PGD698D", "PGD798D", "PGD698LL", "PGD698DL", "PGD898D", "PGD898S",
+                    "PGD679LZ", "PGD898X", "PGK7SWH", "PGK7SWHK", "PGK728WHK", "PGK728WRHK", "PGD897D"}
+
+
+def takes_time_zone(lock: dict) -> bool:
+    return str(lock.get("mod") or "").upper() in TIME_ZONE_MODELS
+
+
+def time_zone_hours(lock: dict) -> tuple[int, str]:
+    """The whole-hour UTC offset to give the lock, and where it's from:
+    "account" (the lock's ``tz`` in the Lockly account, which status checks
+    set its clock by) or "computer" (this computer's, when the account has
+    none). Rounded toward zero, as the app sends it (SetTimeZone.b), so +5:30
+    goes as +5."""
+    tz = lock_tz(lock)
+    offset = (tz or _dt.now().astimezone().tzinfo).utcoffset(None)
+    return int(offset.total_seconds() / 3600), "account" if tz else "computer"
+
+
+def computer_utc_offset_minutes() -> int:
+    return round(_dt.now().astimezone().utcoffset().total_seconds() / 60)
+
+
+def utc_offset_text(minutes: int | None) -> str:
+    """"UTC+8", "UTC-3:30", "UTC"; "not set" for None."""
+    if minutes is None:
+        return "not set"
+    if minutes == 0:
+        return "UTC"
+    h, m = divmod(abs(minutes), 60)
+    return f"UTC{'+' if minutes > 0 else '-'}{h}" + (f":{m:02d}" if m else "")
+
+
+def lock_utc_offset_minutes(lock: dict) -> int | None:
+    tz = lock_tz(lock)
+    return None if tz is None else round(tz.utcoffset(None).total_seconds() / 60)
+
+
+def time_zone_byte(hours: int) -> int:
+    """SetTimeZoneCmd.getZone: bits 10, a half-hour bit (the app never sets
+    it), a sign bit (1 at or east of UTC), then the whole hours in four bits.
+    +8 is 0x98, UTC 0x90, -5 0x85."""
+    return 0x80 | (0x10 if hours >= 0 else 0) | (abs(hours) & 0x0F)
+
+
+def build_time_zone_set(lock: dict, nonce: str, hours: int) -> str:
+    """0x33 SetTimeZoneCmd.getSetData (AES): mode 1 (set), the zone byte, then
+    the nonce from the status check just before."""
+    enc_mc, mc_len, key = _enc(lock)
+    raw = P._assemble_fields("33", mc_len, enc_mc, "1", f"{time_zone_byte(hours):02X}", (nonce or "").upper())
+    return P._aes_wrap(raw, key)
 
 
 # A status reply's clock this far from now is worth a warning: scheduled

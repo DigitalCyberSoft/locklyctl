@@ -1679,3 +1679,60 @@ if __name__ == "__main__":
             failed += 1; print("FAIL", fn.__name__); traceback.print_exc()
     print(f"\n{len(fns)-failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# -- time zone (0x33 SetTimeZoneCmd) ----------------------------------------------
+
+def test_time_zone_frame_matches_app():
+    n = "00112233445566778899AABBCCDDEEFF"
+    enc = P.encrypt_master_code(MC, UUID)
+    # SetTimeZoneCmd.getData, AES: 33, mc length, mc, mode 1 (set), getZone, nonce (LockerConfig.B)
+    assert _plain(F.build_time_zone_set(VISAGE, n, 8)).startswith(
+        "33" + f"{len(enc) // 2:02d}" + enc.upper() + "01" + "98" + n)
+    # getZone: 10, half-hour bit, sign bit (1 at or east of UTC), four bits of whole hours
+    assert [F.time_zone_byte(h) for h in (8, 0, -5, 14, -12)] == [0x98, 0x90, 0x85, 0x9E, 0x8C]
+    assert F.time_zone_hours({"tz": "+8:00"}) == (8, "account")
+    assert F.time_zone_hours({"tz": "+5:30"}) == (5, "account")         # the app drops the half hour
+    assert F.time_zone_hours({"tz": "-3:30"}) == (-3, "account")        # toward zero, as SetTimeZone.b
+    assert F.time_zone_hours({})[1] == "computer"
+    assert F.takes_time_zone(VISAGE)
+    assert not F.takes_time_zone({"mod": "PGD7Y"}) and not F.takes_time_zone({"mod": "PGK798HK"})
+    assert [F.utc_offset_text(m) for m in (480, 0, -210, None)] == ["UTC+8", "UTC", "UTC-3:30", "not set"]
+    assert F.check_reply(_reply("33", "00"), VISAGE) == (True, "time zone set")
+
+
+def _answering_time_zone(sent):
+    def exchange(lock, frame, directive=None):
+        sent.append(_plain(frame)[:2])
+        return _reply("33", "00") if sent[-1] == "33" else _status_now()
+    return exchange
+
+
+def test_time_zone_goes_after_a_status_check_then_the_time():
+    from locklyctl.transport import LocklyError
+    c, _ = _client("remote")
+    sent = []
+    c.exchange_frame = _answering_time_zone(sent)
+    r = c.set_time_zone(VISAGE)
+    assert r == {"ok": True, "text": "time zone set", "hours": 8, "source": "account", "via": "remote"}
+    assert sent == ["1E", "33", "1E"]           # the nonce, the zone, then the time in that zone
+    try:
+        c.set_time_zone({**VISAGE, "mod": "PGD7Y"})
+    except LocklyError as e:
+        assert "doesn't take a time zone" in str(e)
+    else:
+        raise AssertionError("gave a time zone to a model that doesn't take one")
+    c, ch = _client("remote")                   # Lockly's server: offline, and no Bluetooth wanted
+    r = c.set_time_zone(VISAGE)
+    assert not r["ok"] and "didn't answer" in r["text"] and r["via"] is None and len(ch.sent) == 1
+
+
+def test_time_zone_over_bluetooth_when_the_server_says_offline():
+    c, ch = _client("auto")
+    links, restore = _with_fake_bluetooth([_status_now(), _reply("33", "00"), _status_now()])
+    try:
+        r = c.set_time_zone(VISAGE)
+    finally:
+        restore()
+    assert r["ok"] and r["via"] == "bluetooth" and len(ch.sent) == 1        # one remote try, then Bluetooth
+    assert [_plain(f)[:2] for f in links[0].frames] == ["1E", "33", "1E"] and links[0].closed

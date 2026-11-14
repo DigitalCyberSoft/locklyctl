@@ -10,7 +10,8 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   doorOpen: null, firmware: "", cached: false, checkedAt: state === "unknown" ? null : now - 240,
   welcomeForm: model === "PGD7Y" ? "46" : "9B", faceCapable: model === "PGK728WRHK",
   route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", eventLog: model === "PGK728WRHK", favorite: false,
-  keepUnlockedUntil: null, keepMaxMinutes: 1439, clockKnown: false, clockOffset: null, ...extra,
+  keepUnlockedUntil: null, keepMaxMinutes: 1439, clockKnown: false, clockOffset: null,
+  timeZone: "UTC+8", computerTimeZone: "UTC+8", takesTimeZone: model === "PGK728WRHK", ...extra,
 });
 
 const locks = [
@@ -79,6 +80,7 @@ window.pywebview = {
     async connection() { return { mode: connection, bluetooth: "" }; },
     async set_connection(mode) { await wait(100); connection = mode; return { mode, bluetooth: "" }; },
     async bluetooth_check() { await wait(600); return { available: true, inRange: false, detail: "The lock isn't in Bluetooth range of this computer." }; },
+    async set_time_zone(id) { await wait(900); return { ok: true, text: "time zone set", zone: "UTC+8", source: "account", via: "server", lock: { ...find(id) } }; },
     async bluetooth_set_time(id) { await wait(900); Object.assign(find(id), { clockKnown: true, clockOffset: -1 }); return { ...find(id) }; },
     async bluetooth_chip_install(id) {
       await wait(400); fwPolls = 0;

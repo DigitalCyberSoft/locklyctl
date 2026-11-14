@@ -12,6 +12,8 @@
     locklyctl firmware LOCK [--install [--yes]] [--bluetooth-chip [--yes]]
     locklyctl wifi LOCK [--ssid NAME [--password-file F | --ask-password] [--yes]]
     locklyctl wifi --ssid NAME --forget
+    locklyctl timezone [LOCK ...]
+    locklyctl timezone LOCK ... --sync [--yes]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -112,6 +114,13 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--ask-password", action="store_true", help="type the password even if one is saved")
     p.add_argument("--forget", action="store_true", help="forget the password saved for --ssid, then stop")
     p.add_argument("--country", help="two-letter country code for Wi-Fi rules (default: this computer's)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    p = sub.add_parser("timezone", help="each lock's time zone in the Lockly account, next to this "
+                                        "computer's; --sync gives locks theirs, then the time")
+    p.add_argument("lock", nargs="*", help="locks to show (default: all) or to --sync")
+    p.add_argument("--sync", action="store_true",
+                   help="give each named lock its time zone (the account's, else this computer's), as the "
+                        "app does after setup and firmware updates, then the time (wakes it)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
                                         "runs (wakes it)")
@@ -397,5 +406,42 @@ def _wifi(client: LocklyClient, args) -> int:
     return EXIT_OK if ok else EXIT_FAIL
 
 
+def _timezone(client: LocklyClient, args) -> int:
+    locks = [find_lock(client.locks, q) for q in args.lock]
+    if not args.sync:
+        here = F.computer_utc_offset_minutes()
+        print(f"  this computer: {F.utc_offset_text(here)}")
+        for lk in locks or client.locks:
+            zone = F.lock_utc_offset_minutes(lk)
+            note = ("not set in the account: the lock gets this computer's" if zone is None
+                    else "differs from this computer's" if zone != here else "")
+            print(f"  {_name(lk):<18} {F.utc_offset_text(zone):<9}" + (C.yellow(f"  {note}") if note else "")
+                  + ("" if F.takes_time_zone(lk) else C.dim("  (its model doesn't take a time zone)")))
+        return EXIT_OK
+    if not locks:
+        raise UsageError("timezone --sync needs the locks to give their time zone to")
+    for lk in locks:
+        if not F.takes_time_zone(lk):
+            raise UsageError(f"{_name(lk)} ({lk.get('mod') or '?'}) doesn't take a time zone this way")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("timezone --sync needs --yes when it can't ask for confirmation")
+        zones = ", ".join(f"{_name(lk)} {F.utc_offset_text(F.time_zone_hours(lk)[0] * 60)}" for lk in locks)
+        if not C.confirm(f"  give {zones} (each wakes and beeps)?", default=False):
+            return EXIT_OK
+    failed = 0
+    for lk in locks:
+        try:
+            r = client.set_time_zone(lk)
+        except (BLE.BluetoothError, LocklyError) as e:          # this lock failed; the next may not
+            r = {"ok": False, "text": str(e), "hours": 0, "source": "", "via": None}
+        zone = F.utc_offset_text(r["hours"] * 60) + (" (this computer's)" if r["source"] == "computer" else "")
+        print(C.green(f"  {_name(lk)}: {zone}, then the time" + (" over Bluetooth" if r["via"] == "bluetooth"
+                                                                  else "") + " ✓")
+              if r["ok"] else C.red(f"  {_name(lk)}: {r['text']}"))
+        failed += not r["ok"]
+    return EXIT_FAIL if failed else EXIT_OK
+
+
 _HANDLERS = {"list": _list, "status": _status, "lock": _lock, "unlock": _unlock,
-             "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi}
+             "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone}
