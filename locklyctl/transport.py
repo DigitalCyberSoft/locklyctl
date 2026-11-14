@@ -301,8 +301,12 @@ class MqttChannel:
 class LocklyClient:
     """A logged-in Lockly session: locks, keys, and transport-agnostic commands."""
 
-    def __init__(self, email: str) -> None:
+    def __init__(self, email: str, server: str | None = None) -> None:
         self.email = email
+        # A private locklyctl-mqtt server (CONTRACT.md): when set, sign in and
+        # make REST calls against it in plain JSON with a bearer token, not
+        # Lockly's RSA/DES3 `para`, and route remote BLE through /api/senddata.
+        self.server = server.rstrip("/") if server else None
         self.jwt: str | None = None
         self.pw_hash: str | None = None
         self.des3_key: bytes | None = None
@@ -328,6 +332,9 @@ class LocklyClient:
             "User-Agent": API_USER_AGENT,
             "Accept-Encoding": "gzip",
         }
+        if self.server:                       # private server: /api/<endpoint>, ignore Lockly bases
+            base = self.server + "/api/"
+            endpoint = endpoint.lstrip("/")
         if auth:
             self._ensure_session()
         if auth and self.jwt:
@@ -340,10 +347,14 @@ class LocklyClient:
         return {"_resp": resp, **(data if isinstance(data, dict) else {})}
 
     def _post_para_rsa(self, endpoint: str, para_obj: dict, **kw) -> dict:
+        if self.server:                       # private server takes plain JSON, no `para`
+            return self._post(endpoint, para_obj, **kw)
         para = P.rsa_encrypt_para(json.dumps(para_obj, separators=(",", ":")))
         return self._post(endpoint, {**COMMON_BODY, "para": para}, **kw)
 
     def _post_para_des3(self, endpoint: str, para_obj: dict, **kw) -> dict:
+        if self.server:                       # private server takes plain JSON, no `para`
+            return self._post(endpoint, para_obj, **kw)
         assert self.des3_key is not None, "des3 key not available — call login() first"
         para = P.des3_encrypt(self.des3_key, json.dumps(para_obj, separators=(",", ":")))
         return self._post(endpoint, {**COMMON_BODY, "para": para}, **kw)
@@ -359,6 +370,14 @@ class LocklyClient:
         takes, and all a stored credential needs. This is how the app stays
         logged in: it keeps the credential and silently re-authenticates."""
         self.pw_hash = pw_hash
+        if self.server:                       # private server: plain /api/login, token in the body
+            body = self._post("login", {"email": self.email, "password": pw_hash}, auth=False)
+            if str(body.get("cod")) != "200":
+                raise LocklyError(f"login failed: {P.describe_cod(body.get('cod'))}", str(body.get("cod")))
+            self.jwt = body.get("token") or ""
+            if not self.jwt:
+                raise LocklyError("login succeeded but no token in the response")
+            return
         body = self._post_para_rsa(
             "login", {"acct": self.email, "pw": pw_hash}, auth=False
         )
@@ -399,6 +418,12 @@ class LocklyClient:
             self.jwt = jwt[7:]
 
     def load_devices(self) -> list[dict]:
+        if self.server:                       # private server: locks come back as a plain list
+            body = self._post("qrylknew", {})
+            if str(body.get("cod")) != "200":
+                raise LocklyError(f"qrylknew failed: {P.describe_cod(body.get('cod'))}", str(body.get("cod")))
+            self.locks = list(body.get("arr") or [])
+            return self.locks
         body = self._post_para_rsa("qrylknew", {"acct": self.email})
         if str(body.get("cod")) != "200":
             raise LocklyError(f"qrylknew failed: {P.describe_cod(body.get('cod'))}", str(body.get("cod")))
@@ -460,6 +485,17 @@ class LocklyClient:
             return None
         return body.get("ACK")
 
+    def _senddata_private(self, lock: dict, frame_hex: str) -> str | None:
+        """Relay a BLE frame through a private server (CONTRACT.md /api/senddata):
+        {deviceId, cmd} in, {ack} out. Returns the ACK hex, or None (logs cod)."""
+        body = self._post("senddata", {"deviceId": lock["ID"], "cmd": frame_hex}, timeout=SENDDATA_TIMEOUT)
+        cod = str(body.get("cod"))
+        if cod != "200":
+            _LOGGER.debug("private senddata cod=%s", cod)
+            self._tl.last_cod = cod
+            return None
+        return body.get("ack")
+
     @property
     def last_cod(self) -> str | None:
         """The senddata ``cod`` of this thread's last failed exchange."""
@@ -489,6 +525,12 @@ class LocklyClient:
             return ack
         if self.connection == "bluetooth":
             raise LocklyError(BLUETOOTH_ONLY_REFUSAL, "bluetooth")
+        if self.server:                       # private server relays the frame over its own MQTT
+            ack = self._senddata_private(lock, frame_hex)
+            trail.append("private senddata → "
+                         + ("ACK" if ack else f"cod={self.last_cod} ({P.describe_cod(self.last_cod)})"))
+            self._tl.via = "server" if ack else None
+            return ack
         has_hub = bool(lock.get("hubid")) and not self._is_matter(lock)
         if has_hub:
             ack = self._senddata(lock, frame_hex, directive)
@@ -1411,21 +1453,31 @@ class LocklyClient:
         return networks
 
     def bluetooth_wifi_setup(self, lock: dict, ssid: str, password: str, *, country: str,
-                             on_event: Callable[[dict], None]) -> dict:
+                             on_event: Callable[[dict], None],
+                             mqtt_host: str | None = None, mqtt_port: int | None = None) -> dict:
         """Give the lock a Wi-Fi network over Bluetooth, as the app's Wi-Fi setup
-        does: Lockly's server, port and heartbeat for this lock
-        (getHeartbeatTime), a scan for the network's router type, the 0x99 save,
-        then 0x99 queries until the lock says it connected, couldn't, or the
-        password is wrong. Returns {"code", "text"}; code 3 is connected. Raises
-        LocklyError or BLE.BluetoothError. The password is never logged."""
+        does: the server, port and heartbeat for this lock (getHeartbeatTime), a
+        scan for the network's router type, the 0x99 save, then 0x99 queries
+        until the lock says it connected, couldn't, or the password is wrong.
+        Returns {"code", "text"}; code 3 is connected. Raises LocklyError or
+        BLE.BluetoothError. The password is never logged.
+
+        ``mqtt_host`` / ``mqtt_port`` override the host and/or port written into
+        the lock, to aim it at a private server (CONTRACT.md). getHeartbeatTime
+        is still asked for the heartbeat; if it fails while both are overridden,
+        defaults are used instead of raising."""
         body = self._post_para_des3("getHeartbeatTime", {"deviceId": lock["ID"], "model": lock.get("mod") or ""})
-        if str(body.get("cod")) != "200":
-            raise LocklyError(f"Lockly didn't give the server settings: {P.describe_cod(body.get('cod'))}",
-                              str(body.get("cod")))
         mq = body.get("mqttConfigs") or {}                       # the app falls back to its defaults
-        host = str(mq.get("host") or MQTT_BROKER)
-        port = int(mq.get("port") or MQTT_PORT)
+        if str(body.get("cod")) != "200":
+            if not (mqtt_host and mqtt_port):                    # need the server settings we didn't override
+                raise LocklyError(f"the server settings weren't given: {P.describe_cod(body.get('cod'))}",
+                                  str(body.get("cod")))
+            mq = {}
+        host = mqtt_host or str(mq.get("host") or MQTT_BROKER)
+        port = int(mqtt_port) if mqtt_port else int(mq.get("port") or MQTT_PORT)
         heartbeat = int(body.get("heartbeat") or 0) // 60          # DateTimeUtils.w: seconds → minutes
+        if (mqtt_host or mqtt_port) and heartbeat == 0:            # keep a sane keepalive when overriding
+            heartbeat = 5
         with self._bluetooth_session(lock) as (link, st):
             nonce = st["ble_nonce"]
             on_event({"stage": "scan", "text": "Asking the lock which networks it sees"})

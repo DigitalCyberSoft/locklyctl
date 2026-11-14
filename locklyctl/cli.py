@@ -716,10 +716,12 @@ def lock_menu(client: LocklyClient, lock: dict) -> None:
 
 # ── top level ──────────────────────────────────────────────────────────────────
 
-def login_flow(*, prompt: bool = True, quiet: bool = False) -> LocklyClient | None:
+def login_flow(*, prompt: bool = True, quiet: bool = False,
+               server: str | None = None) -> LocklyClient | None:
     """Sign in: silently with the saved credential, else (if ``prompt``) by
     asking for the password. ``quiet`` sends status chatter to stderr so a
-    command's stdout stays clean for scripts."""
+    command's stdout stays clean for scripts. ``server`` signs in to a private
+    locklyctl-mqtt server instead of Lockly's services."""
     def say(msg: str) -> None:
         print(msg, file=sys.stderr if quiet else sys.stdout)
 
@@ -730,7 +732,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False) -> LocklyClient | No
     # 1) Stay logged in like the app: if we stored the credential, re-authenticate
     #    silently — no password prompt.
     if email and pw_hash:
-        client = LocklyClient(email)
+        client = LocklyClient(email, server=server)
         try:
             client.login_with_hash(pw_hash)
             client.load_devices()
@@ -751,7 +753,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False) -> LocklyClient | No
     # 2) Password login.
     email = ask("  Lockly email", email)
     password = getpass.getpass("  Lockly password: ")
-    client = LocklyClient(email)
+    client = LocklyClient(email, server=server)
     try:
         client.login(password)
         client.load_devices()
@@ -788,6 +790,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="how to reach locks: auto (hub or Lockly's server, then Bluetooth from "
                              "this computer for a status check that got no answer), remote, or "
                              "bluetooth (status checks only); default: the saved setting, else auto")
+    parser.add_argument("--server", metavar="URL",
+                        help="sign in to a private locklyctl-mqtt server at URL instead of Lockly's "
+                             "services (plain JSON over its REST API; remote commands relay through it)")
     parser.add_argument("--version", action="version", version=f"locklyctl {__version__}")
     commands.add_subcommands(parser)
     args = parser.parse_args(argv)
@@ -806,7 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     banner()
     print(dim(f"  log: {config._log_path()}\n"))
     try:
-        client = login_flow()
+        client = login_flow(server=args.server)
         if client is None:
             return 1
         if args.connection:

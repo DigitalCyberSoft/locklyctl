@@ -115,6 +115,10 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--ask-password", action="store_true", help="type the password even if one is saved")
     p.add_argument("--forget", action="store_true", help="forget the password saved for --ssid, then stop")
     p.add_argument("--country", help="two-letter country code for Wi-Fi rules (default: this computer's)")
+    p.add_argument("--mqtt-host", help="write this MQTT host into the lock instead of the one the server "
+                                       "returns (aim the lock at a private locklyctl-mqtt server)")
+    p.add_argument("--mqtt-port", type=int, help="write this MQTT port into the lock instead of the "
+                                                 "returned one")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p = sub.add_parser("timezone", help="each lock's time zone in the Lockly account, next to this "
                                         "computer's; --sync gives locks theirs, then the time")
@@ -146,7 +150,8 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "wifi" and getattr(args, "forget", False):
         return _forget_wifi(args)                   # no Lockly sign-in needed
     try:
-        client = C.login_flow(prompt=sys.stdin.isatty(), quiet=True)
+        client = C.login_flow(prompt=sys.stdin.isatty(), quiet=True,
+                              server=getattr(args, "server", None))
     except (EOFError, KeyboardInterrupt):
         return EXIT_FAIL
     if client is None:
@@ -406,7 +411,8 @@ def _wifi(client: LocklyClient, args) -> int:
             last[0] = event["text"]
             print(C.dim(f"    {event['text']}"), flush=True)
     r = client.bluetooth_wifi_setup(lock, args.ssid, password, country=(args.country or _country()).upper(),
-                                    on_event=progress)
+                                    on_event=progress, mqtt_host=getattr(args, "mqtt_host", None),
+                                    mqtt_port=getattr(args, "mqtt_port", None))
     ok = r["code"] == 3
     print((C.green if ok else C.red)(f"  {_name(lock)}: {r['text']}"))
     note = W.after_setup(args.ssid, password, source, r["code"])
