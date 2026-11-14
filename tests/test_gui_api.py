@@ -94,6 +94,8 @@ class FakeClient:
         self._log("cloud-delete", lock["ID"], user_acu_id)
         return True
 
+    remove_user = LocklyClient.remove_user          # the real "lock's record first, then the cloud's"
+
     def suspend_access_user(self, lock, user_id, *, dry_run=False):
         self._log("suspend", lock["ID"], user_id)
         config.stash_suspended(lock["ID"], user_id, {"user_type": 0x42, "date": "7F000018000000000000"})

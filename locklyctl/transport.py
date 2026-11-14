@@ -1789,6 +1789,32 @@ class LocklyClient:
             raise LocklyError(F.check_reply(ack, lock)[1])
         self._rest_ok("acu/delete", {"adminAcuId": 0, "dv": lock["ID"], "userAcuId": user_acu_id})
 
+    def remove_user(self, lock: dict, user_acu_id: int, *, on_lock: bool | None = None) -> str:
+        """Take a person off this lock, wherever it keeps them; the one way
+        the apps, the menus and the MCP server remove someone. A lock that
+        keeps people on itself (``on_lock``; by default a Visage or Vision)
+        gets its own record deleted first (0x73), then Lockly's: deleting only
+        Lockly's would leave their PIN, fingerprints and face on the lock. A
+        person the lock doesn't have (a draft only in Lockly's list) is removed
+        there. Other locks only have Lockly's record. Returns "lock" or
+        "cloud": where they were removed from. Wakes a lock that keeps people.
+        The owner is refused: their place on the lock belongs to the Lockly app."""
+        user_acu_id = int(user_acu_id)
+        mine = next((u for u in self.list_users(lock) if u.get("userAcuId") == user_acu_id), None)
+        if mine and mine.get("type") == "OWNER":
+            raise LocklyError("The owner can't be removed from their own lock.")
+        if F.is_access_user_lock(lock) if on_lock is None else on_lock:
+            rec = next((u for u in self.lock_user_table(lock) if u["user_id"] == user_acu_id & 0xFFFF), None)
+            if rec is None:
+                self._rest_ok("acu/delete", {"adminAcuId": 0, "dv": lock["ID"], "userAcuId": user_acu_id})
+                return "cloud"
+            self.delete_access_user(lock, user_acu_id=user_acu_id, pwd_id=rec["pwd_id"],
+                                    user_type=rec["user_type"])
+            return "lock"
+        if not self.delete_guest(lock, user_acu_id):
+            raise LocklyError("Lockly didn't delete that person.")
+        return "cloud"
+
     def user_detail(self, lock: dict, user_acu_id: int) -> dict:
         """One user's PIN, fingerprints, faces and cards with names and ids
         (acu/getAuInfoByDid — cloud, no lock wake)."""

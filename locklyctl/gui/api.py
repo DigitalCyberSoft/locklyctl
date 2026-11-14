@@ -238,6 +238,14 @@ class Api:
         self._fw_jobs: dict[str, dict] = {}     # lock id → firmware install in progress or done
         self._fw_lock = threading.Lock()
 
+    @classmethod
+    def for_client(cls, client: LocklyClient) -> "Api":
+        """An Api over a client that is already signed in: the command line's
+        way to the same people, activity and keep-unlocked windows the app shows."""
+        api = cls()
+        api._client = client
+        return api
+
     # ── session ──────────────────────────────────────────────────────────
 
     def session(self) -> dict:
@@ -740,13 +748,7 @@ class Api:
         cloud = self._cloud_record(lock, user_id)
         if cloud.get("type") == "OWNER":
             raise ValueError("The owner can't be removed from their own lock.")
-        rec = self._lock_record(lock, user_id)
-        if rec is None:                       # cloud-only draft: nothing on the lock
-            self._c()._rest_ok("acu/delete", {"adminAcuId": 0, "dv": lock["ID"],
-                                              "userAcuId": int(user_id)})
-        else:
-            self._c().delete_access_user(lock, user_acu_id=int(user_id), pwd_id=rec["pwd_id"],
-                                         user_type=rec["user_type"])
+        self._c().remove_user(lock, int(user_id), on_lock=True)
         return {"ok": True}
 
     def remove_credential(self, lock_id: str, user_id: int, kind: str, crdntl_id: int,

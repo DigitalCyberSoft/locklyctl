@@ -321,9 +321,9 @@ def do_list_guests(client: LocklyClient, lock: dict) -> None:
 
 def do_add_guest(client: LocklyClient, lock: dict) -> None:
     name = ask("  guest name")
-    pin = ask("  PIN (4–8 digits)")
+    pin = ask("  PIN (4 to 8 digits)")
     if not (pin.isdigit() and 4 <= len(pin) <= 8):
-        print(red("  PIN must be 4–8 digits"))
+        print(red("  PIN must be 4 to 8 digits"))
         return
     permanent = confirm("  permanent (no expiry)?", default=False)
     if permanent:
@@ -343,7 +343,9 @@ def do_add_guest(client: LocklyClient, lock: dict) -> None:
         print(red(f"  failed: {e}"))
         return
     print(green(f"  created guest '{name}' (userAcuId={body.get('userAcuId')})"))
-    print(yellow("  note: whether the PIN activates on the lock immediately is unverified; test it."))
+    if not F.is_access_user_lock(lock):       # a Visage or Vision had it written to the lock itself
+        print(yellow("  note: Lockly's cloud has the PIN; whether this lock picks it up at once is unverified. "
+                     "Try it at the door."))
 
 
 def do_delete_guest(client: LocklyClient, lock: dict) -> None:
@@ -355,10 +357,9 @@ def do_delete_guest(client: LocklyClient, lock: dict) -> None:
     raw = ask("  userAcuId to delete (q to cancel)")
     if not raw.isdigit():
         return
-    if client.delete_guest(lock, int(raw)):
-        print(green("  deleted ✓"))
-    else:
-        print(red("  delete failed"))
+    where = client.remove_user(lock, int(raw))      # the lock's own record first, where it keeps one
+    print(green("  removed from the lock, then from Lockly's record ✓" if where == "lock"
+                else "  removed from Lockly's record ✓"))
 
 
 def _run_experimental(client: LocklyClient, lock: dict, what: str, build,
@@ -419,10 +420,18 @@ def do_welcome_mode(client: LocklyClient, lock: dict) -> None:
                 "  end is not after start (overnight windows are untested) — continue?"):
             return
         if form == F.WELCOME_9B:
-            print(yellow("  note: this writes all 8 slots — any other schedules on the lock are cleared."))
-    what, build, needs_nonce = F.welcome_plan(lock, form, action, week, begin, end)
-    _run_experimental(client, lock, what, build, needs_nonce=needs_nonce,
-                      send=True if action == "query" else None)
+            print(yellow("  note: this replaces the lock's other weekly schedules; a running keep-unlocked window stays."))
+    sync = F.SYNC_FIRST_ENTRY
+    if action == "set" and form == F.WELCOME_9B and confirm(
+            "  unlock by itself at the start? (no = when the first person opens it, as the Lockly app does)"):
+        sync = F.SYNC_AUTO_ENTRY
+    send = True if action == "query" else None
+    if action in ("set", "off"):
+        send = confirm(f"  actually send Welcome Mode {action.upper()} to the lock? (no = show frame only)", default=False)
+    # A set or an off rewrites all 8 slots, so a running keep-unlocked window is read and written back.
+    keep = _api(client)._kept_slots(lock) if send and form == F.WELCOME_9B and action in ("set", "off") else []
+    what, build, needs_nonce = F.welcome_plan(lock, form, action, week, begin, end, sync=sync, keep=keep)
+    _run_experimental(client, lock, what, build, needs_nonce=needs_nonce, send=send)
 
 
 def do_rain_mode(client: LocklyClient, lock: dict) -> None:
@@ -576,8 +585,9 @@ def _user_action_menu(client: LocklyClient, lock: dict, user: dict) -> None:
                 print((green if ok else red)(f"  {detail}"))
             elif choice == "delete":
                 if confirm(f"  delete {user['name']}?", default=False):
-                    print(green("  deleted ✓") if client.delete_guest(lock, user["userAcuId"])
-                          else red("  delete failed"))
+                    where = client.remove_user(lock, user["userAcuId"])
+                    print(green("  removed from the lock, then from Lockly's record ✓" if where == "lock"
+                                else "  removed from Lockly's record ✓"))
                     return
         except LocklyError as e:
             print(red(f"  error: {e}"))
@@ -690,54 +700,124 @@ def do_face_probe(client: LocklyClient, lock: dict) -> None:
     print(dim("   0x7D binding fields and build the full 5-direction flow."))
 
 
-# ── per-lock submenu ───────────────────────────────────────────────────────────
+# ── per-lock menu, in the app's groups ─────────────────────────────────────────
+# What's used every day comes first; people, the schedule, maintenance and the
+# door list each open their own menu.
 
-def lock_menu(client: LocklyClient, lock: dict) -> None:
+def _api(client: LocklyClient):
+    """The app's own keep-unlocked windows, over this menu's signed-in client."""
+    from .gui.api import Api
+    return Api.for_client(client)
+
+
+def do_keep(client: LocklyClient, lock: dict) -> None:
+    """Keep the door unlocked from now for a while (a one-time Welcome Mode
+    window the lock ends by itself), or end a window that's running."""
+    api = _api(client)
+    until = api._view(lock)["keepUnlockedUntil"]
+    if until and confirm(f"  it's kept unlocked until {until}, lock time. end that now and lock the door?"):
+        r = api.end_keep_unlocked(lock["ID"])
+        print(green("  ended, and locked ✓") if r["ok"] else red(f"  not locked: {r['detail']}"))
+        return
+    raw = ask("  keep it unlocked for how many hours (1 to 23)", "2")
+    if not (raw.isdigit() and 1 <= int(raw) <= 23):
+        print(red("  hours must be a whole number from 1 to 23"))
+        return
+    if not confirm(f"  keep {bold(lock.get('na') or lock['ID'])} unlocked for {raw} h? it opens within about 20 seconds"):
+        return
+    try:
+        r = api.keep_unlocked(lock["ID"], int(raw) * 60)
+    except ValueError as e:
+        print(red(f"  {e}"))
+        return
+    print(green(f"  unlocked until {r['until']}, lock time ✓"))
+
+
+def _submenu(client: LocklyClient, lock: dict, title: str, options: list, actions: dict, note: str = "") -> None:
+    """One group's menu: run the chosen action, then come back to it, until Back."""
     while True:
-        print(bold(f"\n  ▸ {lock.get('na') or lock['ID']}"))
+        if note:
+            print(dim(f"\n  {note}"))
+        choice = menu(title, options + [("back", "Back")])
+        if choice in ("back", "quit"):
+            return
+        try:
+            actions[choice](client, lock)
+        except LocklyError as e:
+            print(red(f"  error: {e}"))
+        except Exception as e:  # noqa: BLE001
+            print(red(f"  unexpected error: {e}"))
+        if choice != "enrol":               # that one is a menu of its own
+            pause()
+
+
+def _door_list_menu(client: LocklyClient, lock: dict) -> None:
+    while True:
         hidden = V.is_hidden(client, lock)
-        choice = menu("Action", [
-            ("status", "Status"),
-            ("diagnose", "Connection test (which transports work)"),
-            ("unlock", "Unlock"),
-            ("lock", "Lock"),
-            ("history", "Access log (last 7 days)"),
-            ("guests", "List guest PINs"),
-            ("addguest", "Add guest PIN (remote)"),
-            ("delguest", "Delete guest PIN"),
-            ("enrol", "Remote enrolment (add/list/delete users)"),
-            ("welcome", "Welcome Mode schedule"),
-            ("rain", "Rain Mode"),
+        choice = menu("Door list", [
             ("hide", "Show in the lock list again" if hidden else "Hide from the lock list"),
             ("up", "Move up in the lock list"),
             ("down", "Move down in the lock list"),
-            ("back", "Back to locks"),
+            ("back", "Back"),
         ])
+        if choice in ("back", "quit"):
+            return
         try:
-            if choice in ("back", "quit"):
-                return
             if choice == "hide":
                 V.set_hidden(client, lock, not hidden)
                 print(green("  shown in the lock list again" if hidden else
                             "  hidden from the lock list; commands still reach it, and the list's "
                             "\"Show hidden\" entry brings it back"))
-            elif choice in ("up", "down"):
+            else:
                 V.move(client, lock, by=-1 if choice == "up" else 1)
                 print(green(f"  moved {choice} in the lock list"))
-            else:
-                {
-                    "status": do_status, "diagnose": do_diagnose,
-                    "unlock": do_unlock, "lock": do_lock,
-                    "history": do_history, "guests": do_list_guests,
-                    "addguest": do_add_guest, "delguest": do_delete_guest,
-                    "enrol": do_enrol,
-                    "welcome": do_welcome_mode, "rain": do_rain_mode,
-                }[choice](client, lock)
         except LocklyError as e:
             print(red(f"  error: {e}"))
-        except Exception as e:  # noqa: BLE001
-            print(red(f"  unexpected error: {e}"))
-        pause()
+
+
+def lock_menu(client: LocklyClient, lock: dict) -> None:
+    more = dim("  ▸")
+    while True:
+        print(bold(f"\n  ▸ {lock.get('na') or lock['ID']}"))
+        options = [("status", "Status"), ("unlock", "Unlock"), ("lock", "Lock")]
+        if F.welcome_form(lock) == F.WELCOME_9B and F.remote_route(lock) != "bluetooth":
+            options.append(("keep", "Keep unlocked for a while"))
+        options += [
+            ("history", "Activity (last 7 days)"),
+            ("people", "People and PINs" + more),
+            ("schedule", "Schedule: Welcome Mode, Rain Mode" + more),
+            ("maintenance", "Maintenance" + more),
+            ("list", "Door list: hide, move" + more),
+            ("back", "Back to locks"),
+        ]
+        choice = menu("Action", options)
+        if choice in ("back", "quit"):
+            return
+        if choice == "people":
+            _submenu(client, lock, "People and PINs", [
+                ("guests", "List people with a PIN"),
+                ("addguest", "Add a person with a PIN"),
+                ("delguest", "Remove a person"),
+                ("enrol", "Faces, fingerprints and lock slots " + yellow("(experimental)") + more),
+            ], {"guests": do_list_guests, "addguest": do_add_guest, "delguest": do_delete_guest, "enrol": do_enrol})
+        elif choice == "schedule":
+            _submenu(client, lock, "Schedule", [("welcome", "Welcome Mode hours"), ("rain", "Rain Mode")],
+                     {"welcome": do_welcome_mode, "rain": do_rain_mode})
+        elif choice == "maintenance":
+            _submenu(client, lock, "Maintenance", [("diagnose", "Connection test (which routes work)")],
+                     {"diagnose": do_diagnose},
+                     note="Firmware, Wi-Fi and the time zone are commands: locklyctl firmware, wifi, timezone.")
+        elif choice == "list":
+            _door_list_menu(client, lock)
+        else:
+            try:
+                {"status": do_status, "unlock": do_unlock, "lock": do_lock,
+                 "keep": do_keep, "history": do_history}[choice](client, lock)
+            except LocklyError as e:
+                print(red(f"  error: {e}"))
+            except Exception as e:  # noqa: BLE001
+                print(red(f"  unexpected error: {e}"))
+            pause()
 
 
 # ── top level ──────────────────────────────────────────────────────────────────

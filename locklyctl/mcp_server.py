@@ -306,12 +306,17 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
     @mcp.tool(annotations=RISKY)
     async def set_welcome_mode(door: str, action: Literal["set", "off", "always"],
                                days: list[str] | None = None, start: str | None = None,
-                               end: str | None = None) -> dict:
-        """Welcome Mode keeps a door unlocked on a schedule. "set" with days
-        (mon..sun) and start/end "HH:MM"; "off"; or "always" (never locks).
-        Only when the user explicitly asked for this door to stay unlocked."""
+                               end: str | None = None, unlock_by_itself: bool = False) -> dict:
+        """Welcome Mode: hours when a door stays unlocked. "set" with days
+        (mon..sun) and start/end "HH:MM"; "off"; or "always" (never locks; some
+        models only). On a Visage or Vision the door stays locked at the start
+        time until someone opens it once, then stays unlocked until the end
+        (the Lockly app's default); unlock_by_itself makes it unlock at the
+        start time with nobody there. Only when the user explicitly asked for
+        this door to stay unlocked."""
         v = await anyio.to_thread.run_sync(doors.remote, door)
-        r = await run(doors.api.welcome, v["id"], None, action, days or [], start or "", end or "", True)
+        r = await run(doors.api.welcome, v["id"], None, action, days or [], start or "", end or "", True,
+                      "auto" if unlock_by_itself else "first")
         return {"ok": r["ok"], "door": v["name"], "detail": r.get("detail")}
 
     @mcp.tool(annotations=RISKY)

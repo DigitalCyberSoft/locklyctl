@@ -207,7 +207,7 @@ more:
 |---|---|
 | `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `turn_off_welcome_mode`, `end_keep_unlocked`, `set_rain_mode` |
 | `--allow-unlock` | `unlock_door` |
-| both | `set_welcome_mode` and `keep_unlocked_for`, since both keep a door unlocked |
+| both | `set_welcome_mode` (with `unlock_by_itself` to choose how the hours start) and `keep_unlocked_for`, since both keep a door unlocked |
 
 Tools a flag doesn't allow aren't offered at all, so the assistant never sees
 them. Existing PINs are never returned; a PIN the server creates is returned
@@ -221,7 +221,10 @@ any flag: it's in the desktop app and the command line only.
 ```
 
 or `pip install -e '.[keyring]'` and run `locklyctl`. Requires Python 3.10+.
-Sign in, then pick a door and an action from the menus. If you stay signed in,
+Sign in, then pick a door and an action from the menus. A door's menu follows
+the app's groups: Status, Unlock, Lock, Keep unlocked and Activity first, then
+People and PINs, Schedule, Maintenance and Door list as menus of their own.
+If you stay signed in,
 the credential goes to the OS keyring (with the `keyring` extra), otherwise to
 `~/.locklyctl/config.json` (owner-only). It's equivalent to your password, so
 use `--logout` on shared machines. `--debug` prints protocol logging.
@@ -229,31 +232,48 @@ use `--logout` on shared machines. `--debug` prints protocol logging.
 for one run. With an [app lock](#app-lock) set, the passcode is asked for
 first, or read from `--passcode-file FILE`.
 
-Once a login is saved, single actions run without the menus:
+Once a login is saved, single actions run without the menus. `locklyctl --help`
+lists them in the same groups:
 
 ```bash
+# Doors
 locklyctl list [--json]                 # doors + silent hub-cached status
 locklyctl list --all                    # hidden doors too, marked
-locklyctl hide "Office"                 # leave it out of the lists; commands still reach it
-locklyctl unhide "Office"
-locklyctl move "Office" --up            # or --down [N], --top, --bottom, --to 3
 locklyctl status "Office" [--live] [--json]
 locklyctl lock "Office"
 locklyctl unlock "Office" --yes         # --yes required when nothing can ask
+locklyctl keep "Front" 2 --yes          # unlocked for 2 hours; the lock ends it by itself
+locklyctl keep "Front" --end            # end that now, and lock
+locklyctl activity "Front" [--json]     # the last 7 days, newest first
 locklyctl welcome "Front" set --days weekdays --start 08:00 --end 18:00 --send
+locklyctl welcome "Front" set --days sat --start 09:00 --end 12:00 --entry auto --send
 locklyctl welcome "Front" off --send
 locklyctl rain "Office" on --send
-locklyctl firmware "Front" [--install] # newer firmware; --install sends it over Wi-Fi
-locklyctl firmware "Front" --bluetooth-chip  # the Bluetooth chip, over Bluetooth from here
+
+# People
+locklyctl people                        # everyone, door by door (PINs are never printed)
+locklyctl people "Front" [--json]       # who can open one door
+locklyctl suspend "Front" "Dana" --yes  # pause a person: their PIN, fingerprints and face stay
+locklyctl resume "Front" "Dana" --yes   # their schedule back, as it was
+
+# Maintenance
+locklyctl timezone                      # each lock's time zone in the account, and this computer's
+locklyctl timezone "Front" --sync       # give it its time zone, then the time (wakes it)
 locklyctl wifi "Front"                  # Wi-Fi networks the lock sees (over Bluetooth)
 locklyctl wifi "Front" --ssid "Home"    # give it a network: the saved password, this computer's, or asks
 locklyctl wifi --ssid "Home" --forget   # forget the password saved for a network
-locklyctl timezone                      # each lock's time zone in the account, and this computer's
-locklyctl timezone "Front" --sync       # give it its time zone, then the time (wakes it)
+locklyctl firmware "Front" [--install] # newer firmware; --install sends it over Wi-Fi
+locklyctl firmware "Front" --bluetooth-chip  # the Bluetooth chip, over Bluetooth from here
 locklyctl add                           # locks in Bluetooth range that aren't on your account
 locklyctl add PGK728WRHK004321          # set that one up: asks for the card's code, a name, a PIN
 locklyctl backup doors.backup           # locks + people (keys and PINs) to a file sealed with a passphrase
 locklyctl --server https://lock.example.com restore doors.backup   # into a private server; merged
+
+# This computer
+locklyctl gui                           # the desktop app
+locklyctl hide "Office"                 # leave it out of the lists; commands still reach it
+locklyctl unhide "Office"
+locklyctl move "Office" --up            # or --down [N], --top, --bottom, --to 3
 ```
 
 ### Backups and moving to a private server
@@ -281,7 +301,10 @@ into a new one: the second then held exactly what the first did); the reading
 from a Visage is tested against a stand-in lock, not yet run on one.
 
 A door is named by its name (case-insensitive, a unique prefix is fine) or ID.
-`welcome` and `rain` only print the frame unless `--send` is given.
+`welcome` and `rain` only print the frame unless `--send` is given. `welcome
+set --entry first` (the default, as the Lockly app) keeps the door locked at
+the start time until someone opens it once; `--entry auto` unlocks it by
+itself. `keep` opens a door, so like `unlock` it asks first or needs `--yes`.
 `firmware --install` asks first (or needs `--yes`), refuses at 30 % battery
 or less as the Lockly app does, downloads and checks every file before it
 sends anything, follows the lock's progress, then waits up to 5 minutes for

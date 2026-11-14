@@ -1,33 +1,42 @@
-"""Non-interactive subcommands, for scripts and cron.
+"""Non-interactive subcommands, for scripts and cron, in the app's own groups
+(GROUPS, which --help lists them by).
 
-    locklyctl gui
+  Doors
     locklyctl list [--all] [--json]
-    locklyctl hide LOCK ...
-    locklyctl unhide LOCK ...
-    locklyctl move LOCK (--up [N] | --down [N] | --top | --bottom | --to POSITION)
     locklyctl status LOCK [--live] [--json]
     locklyctl lock LOCK
     locklyctl unlock LOCK [--yes]
-    locklyctl welcome LOCK set --days weekdays --start 08:00 --end 18:00 [--send]
+    locklyctl keep LOCK HOURS [--yes]
+    locklyctl keep LOCK --end
+    locklyctl activity LOCK [--json]
+    locklyctl welcome LOCK set --days weekdays --start 08:00 --end 18:00 [--entry first|auto] [--send]
     locklyctl welcome LOCK off|always [--send]
     locklyctl welcome LOCK query
     locklyctl rain LOCK query|on|off [--send]
-    locklyctl firmware LOCK [--install [--yes]] [--bluetooth-chip [--yes]]
-    locklyctl wifi LOCK [--ssid NAME [--password-file F | --ask-password] [--yes]]
-    locklyctl wifi --ssid NAME --forget
-    locklyctl timezone [LOCK ...]
-    locklyctl timezone LOCK ... --sync [--yes]
-    locklyctl add [BLUETOOTH_NAME --code CODE --name NAME [--pin-file F] [--yes]]
+  People
+    locklyctl people [LOCK] [--json]
     locklyctl suspend LOCK USER [--dry-run] [--yes]
     locklyctl resume LOCK USER [--dry-run] [--yes]
+  Maintenance
+    locklyctl timezone [LOCK ...]
+    locklyctl timezone LOCK ... --sync [--yes]
+    locklyctl wifi LOCK [--ssid NAME [--password-file F | --ask-password] [--yes]]
+    locklyctl wifi --ssid NAME --forget
+    locklyctl firmware LOCK [--install [--yes]] [--bluetooth-chip [--yes]]
+    locklyctl add [BLUETOOTH_NAME --code CODE --name NAME [--pin-file F] [--yes]]
     locklyctl backup FILE [--no-encrypt] [--passphrase-file F] [--yes]
     locklyctl --server URL restore FILE [--replace] [--passphrase-file F] [--yes]
+  This computer
+    locklyctl gui
+    locklyctl hide LOCK ...
+    locklyctl unhide LOCK ...
+    locklyctl move LOCK (--up [N] | --down [N] | --top | --bottom | --to POSITION)
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
 commands (welcome, rain) are dry runs that print the frame unless --send is
-given. Unlock and firmware --install ask for confirmation, or need --yes when
-nothing can be asked.
+given. Unlock, keep and firmware --install ask for confirmation, or need --yes
+when nothing can be asked.
 Exit status: 0 ok, 1 the lock or cloud failed, 2 usage error.
 """
 from __future__ import annotations
@@ -35,7 +44,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
+import textwrap
 
 from . import backup as B
 from . import ble as BLE
@@ -74,25 +85,58 @@ def find_lock(locks: list[dict], query: str) -> dict:
                      + ", ".join(sorted(_name(lk) for lk in matches)))
 
 
-def add_subcommands(parser: argparse.ArgumentParser) -> None:
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND",
-                                help="run one action and exit (omit for the menus)")
+# The commands as --help lists them: the app's groups. Doors and People are for
+# every day, Maintenance is for the locks themselves (anything that needs
+# Bluetooth or someone at the door, or changes a lock's firmware, network or
+# clock), and the last group belongs to this computer, not to a lock.
+GROUPS = (
+    ("Doors", ("list", "status", "lock", "unlock", "keep", "activity", "welcome", "rain")),
+    ("People", ("people", "suspend", "resume")),
+    ("Maintenance", ("timezone", "wifi", "firmware", "add", "backup", "restore")),
+    ("This computer", ("gui", "hide", "unhide", "move")),
+)
 
-    g = sub.add_parser("gui", help="open the desktop app (needs the 'gui' extra)")
+
+def grouped_help(helps: dict[str, str], width: int) -> str:
+    """The commands under their group, each with its help, wrapped to ``width``."""
+    assert sorted(helps) == sorted(n for _, names in GROUPS for n in names), "a command is in no group, or in two"
+    pad = max(map(len, helps)) + 2
+    lines = []
+    for title, names in GROUPS:
+        lines.append(f"{title}:")
+        for name in names:
+            lines.append(textwrap.fill(helps[name], width=width, initial_indent=f"  {name:<{pad}}",
+                                       subsequent_indent=" " * (pad + 2)))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def add_subcommands(parser: argparse.ArgumentParser) -> None:
+    # No per-command help on the subparsers themselves: argparse would list them
+    # flat, in the order written. They're listed by group in the epilog instead.
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND",
+                                help="run one action and exit (omit for the menus); the commands are listed below")
+    helps: dict[str, str] = {}
+
+    def cmd(name: str, help: str, **kw) -> argparse.ArgumentParser:
+        helps[name] = help
+        return sub.add_parser(name, description=help[:1].upper() + help[1:] + ".", **kw)
+
+    g = cmd("gui", "open the desktop app (needs the 'gui' extra)")
     g.add_argument("--browser", action="store_true",
                    help="open it in your web browser instead (no 'gui' extra needed)")
 
-    p = sub.add_parser("list", help="list locks with their silent hub-cached status")
+    p = cmd("list", "list locks with their silent hub-cached status")
     p.add_argument("--all", action="store_true", help="include hidden locks (marked as hidden)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
 
     hide_note = ("listings leave hidden locks out; commands that name a lock, and bulk "
                  "actions, still reach it")
-    p = sub.add_parser("hide", help=f"leave locks out of listings ({hide_note})")
+    p = cmd("hide", f"leave locks out of listings ({hide_note})")
     p.add_argument("lock", nargs="+")
-    p = sub.add_parser("unhide", help="show hidden locks in listings again")
+    p = cmd("unhide", "show hidden locks in listings again")
     p.add_argument("lock", nargs="+")
-    p = sub.add_parser("move", help="move a lock up or down in the listings (hidden locks keep their place)")
+    p = cmd("move", "move a lock up or down in the listings (hidden locks keep their place)")
     p.add_argument("lock")
     where = p.add_mutually_exclusive_group(required=True)
     where.add_argument("--up", type=int, nargs="?", const=1, metavar="N", help="up N places (default 1)")
@@ -101,22 +145,41 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     where.add_argument("--bottom", action="store_true", help="last in the listing")
     where.add_argument("--to", type=int, metavar="POSITION", help="this place in the listing, from 1")
 
-    p = sub.add_parser("status", help="a lock's status (silent hub cache by default)")
+    p = cmd("status", "a lock's status (silent hub cache by default)")
     p.add_argument("lock")
     p.add_argument("--live", action="store_true",
                    help="query the lock itself (wakes it — it beeps)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
 
-    p = sub.add_parser("lock", help="lock a lock")
+    p = cmd("lock", "lock a lock")
     p.add_argument("lock")
 
-    p = sub.add_parser("unlock", help="unlock a lock")
+    p = cmd("unlock", "unlock a lock")
     p.add_argument("lock")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
-    p = sub.add_parser("welcome", help="Welcome Mode schedule (experimental)")
+    p = cmd("keep", "keep a Visage or Vision unlocked from now for under 24 hours (a one-time Welcome Mode "
+                    "window the lock ends by itself), or end one early with --end")
+    p.add_argument("lock")
+    p.add_argument("hours", nargs="?", type=float, help="how long, in hours")
+    p.add_argument("--end", action="store_true", help="end the window now and lock the door")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+
+    p = cmd("activity", "a lock's access log for the last 7 days, newest first")
+    p.add_argument("lock")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    p = cmd("people", "who can open a lock, or with no lock named, everyone across all of them "
+                      "(from Lockly's records: no lock is woken)")
+    p.add_argument("lock", nargs="?")
+    p.add_argument("--json", action="store_true", help="machine-readable output (PINs are left out)")
+
+    p = cmd("welcome", "Welcome Mode schedule (experimental)")
     p.add_argument("lock")
     p.add_argument("action", choices=["query", "set", "off", "always"])
+    p.add_argument("--entry", choices=["first", "auto"], default="first",
+                   help="8-slot locks: how the hours start. first (default, as the Lockly app): the door "
+                        "stays locked until someone opens it once; auto: it unlocks by itself")
     p.add_argument("--days", default="daily",
                    help="daily, weekdays, once, or e.g. mon,wed,fri (default: daily)")
     p.add_argument("--start", default="08:00", help="HH:MM, lock's local time")
@@ -126,13 +189,13 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--send", action="store_true",
                    help="actually transmit (default: print the frame only)")
 
-    p = sub.add_parser("rain", help="Rain Mode (experimental)")
+    p = cmd("rain", "Rain Mode (experimental)")
     p.add_argument("lock")
     p.add_argument("state", choices=["query", "on", "off"])
     p.add_argument("--send", action="store_true",
                    help="actually transmit (default: print the frame only)")
 
-    p = sub.add_parser("wifi", help="the lock's Wi-Fi over Bluetooth from this computer: see the networks "
+    p = cmd("wifi", "the lock's Wi-Fi over Bluetooth from this computer: see the networks "
                                      "it sees, or give it one (as the app's Wi-Fi setup does)")
     p.add_argument("lock", nargs="?")
     p.add_argument("--ssid", help="the network to give the lock; without it, list what the lock sees")
@@ -146,14 +209,14 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--mqtt-port", type=int, help="write this MQTT port into the lock instead of the "
                                                  "returned one")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
-    p = sub.add_parser("timezone", help="each lock's time zone in the Lockly account, next to this "
+    p = cmd("timezone", "each lock's time zone in the Lockly account, next to this "
                                         "computer's; --sync gives locks theirs, then the time")
     p.add_argument("lock", nargs="*", help="locks to show (default: all) or to --sync")
     p.add_argument("--sync", action="store_true",
                    help="give each named lock its time zone (the account's, else this computer's), as the "
                         "app does after setup and firmware updates, then the time (wakes it)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
-    p = sub.add_parser("add", help="set up a new or reset lock over Bluetooth from this computer and put it "
+    p = cmd("add", "set up a new or reset lock over Bluetooth from this computer and put it "
                                    "on your account, as the app does; without a name, list the locks nearby "
                                    "that aren't on it")
     p.add_argument("ble_name", nargs="?", metavar="BLUETOOTH_NAME", help="the lock's Bluetooth name, from the list")
@@ -161,7 +224,7 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
     p.add_argument("--name", help="the door's name on your account; asked if left out")
     p.add_argument("--pin-file", help="read the admin PIN (6 or more digits) from this file; asked if left out")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
-    p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
+    p = cmd("firmware", "newer firmware Lockly offers, next to what the lock "
                                         "runs (wakes it)")
     p.add_argument("lock")
     p.add_argument("--bluetooth-chip", action="store_true",
@@ -171,7 +234,7 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
                    help="install it over Wi-Fi (multi-part locks such as the Visage), then confirm it")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     for name, verb in (("suspend", "suspend"), ("resume", "restore")):
-        p = sub.add_parser(name, help=f"{verb} an access user on a Visage without touching their PIN, "
+        p = cmd(name, f"{verb} an access user on a Visage without touching their PIN, "
                                       "fingerprint or face (suspend moves their window into the far future; "
                                       "resume puts the saved schedule back)")
         p.add_argument("lock")
@@ -179,20 +242,24 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
         p.add_argument("--dry-run", action="store_true", help="print the frame and the saved schedule, send nothing")
         p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
-    p = sub.add_parser("backup", help="write this account's locks (with their master codes) and the people on "
+    p = cmd("backup", "write this account's locks (with their master codes) and the people on "
                                       "them (with their PINs) to FILE, sealed with a passphrase. Signed in to "
                                       "Lockly, each Visage's people are read from the lock itself (it wakes)")
     p.add_argument("file")
     p.add_argument("--no-encrypt", action="store_true", help="write it unencrypted (it holds master codes and PINs)")
     p.add_argument("--passphrase-file", help="read the passphrase from this file (else it's asked for)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask before waking the locks")
-    p = sub.add_parser("restore", help="bring a backup into the private server signed in with --server: merged "
+    p = cmd("restore", "bring a backup into the private server signed in with --server: merged "
                                        "by default, so nothing there is deleted; nothing is sent to the locks")
     p.add_argument("file")
     p.add_argument("--replace", action="store_true", help="make the account exactly the backup's: locks and "
                                                           "people that aren't in it are deleted from the server")
     p.add_argument("--passphrase-file", help="read the passphrase from this file (else it's asked for)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask before --replace")
+
+    width = max(60, min(shutil.get_terminal_size().columns, 100) - 2)
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser.epilog = grouped_help(helps, width) + textwrap.fill(parser.epilog or "", width=width)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -316,21 +383,110 @@ def _welcome(client: LocklyClient, args) -> int:
         raise UsageError(f"don't know which Welcome Mode {lock.get('mod') or 'this lock'} "
                          "uses — pass --form 9B or --form 46")
     week, begin, end = 0, (0, 0), (0, 0)
+    send = True if args.action == "query" else args.send
     try:
         if args.action == "set":
             week = F.week_byte(args.days.split(","))
             begin, end = F.parse_hhmm(args.start), F.parse_hhmm(args.end)
             if end <= begin:
                 raise UsageError("--end must be after --start (overnight windows are untested)")
-        what, build, needs_nonce = C.welcome_plan(lock, form, args.action, week, begin, end)
+        # A set or an off rewrites the lock's 8 slots: a "keep unlocked" window
+        # that's running is read from the lock and written back (as the app does).
+        keep = (_api(client)._kept_slots(lock)
+                if send and form == F.WELCOME_9B and args.action in ("set", "off") else [])
+        what, build, needs_nonce = F.welcome_plan(
+            lock, form, args.action, week, begin, end, keep=keep,
+            sync=F.SYNC_AUTO_ENTRY if args.entry == "auto" else F.SYNC_FIRST_ENTRY)
     except ValueError as e:
         raise UsageError(str(e)) from e
     if args.action == "set" and form == F.WELCOME_9B:
-        print(C.yellow("  note: this writes all 8 slots — other schedules on the lock are cleared."),
-              file=sys.stderr)
-    ok = C._run_experimental(client, lock, what, build, needs_nonce=needs_nonce,
-                             send=True if args.action == "query" else args.send)
+        print(C.yellow("  note: this replaces the lock's other weekly schedules; a running keep-unlocked "
+                       "window stays."), file=sys.stderr)
+    ok = C._run_experimental(client, lock, what, build, needs_nonce=needs_nonce, send=send)
     return EXIT_OK if ok else EXIT_FAIL
+
+
+def _api(client: LocklyClient):
+    """The app's own shaping of people, activity and keep-unlocked windows,
+    over this command's signed-in client."""
+    from .gui.api import Api
+    return Api.for_client(client)
+
+
+def _keep(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    api = _api(client)
+    if args.end:
+        if args.hours is not None:
+            raise UsageError("keep takes HOURS or --end, not both")
+        r = api.end_keep_unlocked(lock["ID"])
+        print(C.green(f"  {_name(lock)}: window ended, locked ✓") if r["ok"] else C.red(f"  not locked: {r['detail']}"))
+        return EXIT_OK if r["ok"] else EXIT_FAIL
+    if args.hours is None:
+        raise UsageError("keep needs HOURS (or --end)")
+    if not args.yes:                    # it opens a door, as unlock does
+        if not sys.stdin.isatty():
+            raise UsageError("keep needs --yes when it can't ask for confirmation")
+        if not C.confirm(f"  keep {C.bold(_name(lock))} unlocked for {args.hours:g} h? "
+                         "it opens within about 20 seconds", default=False):
+            return EXIT_OK
+    try:
+        r = api.keep_unlocked(lock["ID"], round(args.hours * 60))
+    except ValueError as e:             # not an 8-slot lock, no hub, or too long
+        raise UsageError(str(e)) from e
+    print(C.green(f"  {_name(lock)}: unlocked until {r['until']}, lock time ✓"))
+    return EXIT_OK
+
+
+def _activity(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    events = _api(client).activity(lock["ID"])
+    if args.json:
+        print(json.dumps(events, indent=2))
+    elif not events:
+        print(C.dim("  nothing in the last 7 days (for locks other than a Visage, Lockly's log only has what "
+                    "was uploaded to it)"))
+    else:
+        for ev in events:
+            print(f"  {ev['time']}  {ev['what']:<26} {ev['who']}")
+    return EXIT_OK
+
+
+# What a person's row never shows on the command line: their PIN, and fields only the app's page uses.
+_ROW_PRIVATE = ("pin", "recordKey", "weekData", "startTime", "endTime", "timeType", "status",
+                "doorUnit", "doorRest", "doorRoute", "doorAccessUsers")
+
+
+def _row_text(row: dict) -> str:
+    creds = [n for n, has in (("PIN", row["hasPin"]), (f"{row['fingerprints']} fingerprint(s)", row["fingerprints"]),
+                              (f"{row['faces']} face(s)", row["faces"]), (f"{row['cards']} card(s)", row["cards"])) if has]
+    state = C.red("  paused") if row["suspended"] else ""
+    return f"{row['role']:<7} {row['access']}{state}  {C.dim(', '.join(creds) or 'no credentials')}"
+
+
+def _people(client: LocklyClient, args) -> int:
+    api = _api(client)
+    clean = lambda row: {k: v for k, v in row.items() if k not in _ROW_PRIVATE}
+    if args.lock:
+        rows = api.door_access(find_lock(client.locks, args.lock)["ID"])
+        if args.json:
+            print(json.dumps([clean(r) for r in rows], indent=2))
+        else:
+            for r in rows:
+                print(f"  {r['person']:<22} {_row_text(r)}")
+        return EXIT_OK
+    out = api.people()
+    if args.json:
+        print(json.dumps([{"name": p["name"], "email": p["email"], "doors": [clean(d) for d in p["doors"]]}
+                          for p in out["people"]], indent=2))
+    else:
+        for p in out["people"]:
+            print(C.bold(f"  {p['name']}") + (C.dim(f"  {p['email']}") if p["email"] else ""))
+            for d in p["doors"]:
+                print(f"    {d['doorName']:<20} {_row_text(d)}")
+    for name in out["failedDoors"]:
+        print(C.red(f"  couldn't read the people on {name}"), file=sys.stderr)
+    return EXIT_FAIL if out["failedDoors"] else EXIT_OK
 
 
 def _rain(client: LocklyClient, args) -> int:
@@ -733,6 +889,7 @@ def _restore(client: LocklyClient, args) -> int:
 
 
 _HANDLERS = {"list": _list, "hide": _hide, "unhide": _unhide, "move": _move,
+             "keep": _keep, "activity": _activity, "people": _people,
              "backup": _backup, "restore": _restore,
              "status": _status, "lock": _lock, "unlock": _unlock,
              "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
