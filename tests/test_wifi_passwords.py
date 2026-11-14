@@ -27,6 +27,10 @@ elif a[:3] == ["--escape", "no", "-g"] and a[3] == "802-11-wireless.ssid":
 elif a[:4] == ["--escape", "no", "-s", "-g"]:
     n = next(n for n in nets if n["uuid"] == a[-1])
     print(n["key_mgmt"]); print(n["psk"] if n["shares"] else "")
+elif a == ["-t", "--escape", "no", "-f", "ACTIVE,SSID", "device", "wifi", "list", "--rescan", "no"]:
+    for n in nets:
+        if n["type"] == "802-11-wireless" or n.get("visible"):
+            print(("yes" if n.get("active") else "no") + ":" + n["ssid"])
 else:
     sys.exit(2)
 '''
@@ -277,5 +281,79 @@ def test_windows_profiles():
             folders = f.read().split()
         assert folders and not any(os.path.exists(d) for d in folders)    # files with keys in clear are gone
         assert W.source_text("system") == "saved on this computer (Windows)"
+    finally:
+        undo()
+
+
+
+def test_order_saved_then_this_computers_then_signal():
+    """The lock sees Cafe, Neighbor, Building, Upstairs (strongest first). This
+    computer has Building and Home 5G saved and is on Home 5G, which the lock
+    (2.4 GHz only) doesn't see; locklyctl has nothing saved yet."""
+    nets = [{"uuid": "a", "type": "802-11-wireless", "ssid": "Building", "key_mgmt": "wpa-psk", "psk": "b-pw",
+             "shares": True},
+            {"uuid": "b", "type": "802-11-wireless", "ssid": "Home 5G", "key_mgmt": "wpa-psk", "psk": "h-pw",
+             "shares": True, "active": True}]
+    seen = ["Cafe", "Neighbor", "Building", "Upstairs"]
+    undo = _setup(nets=nets)
+    try:
+        assert W.connected() == {"Home 5G"}
+        o = W.order(seen)
+        assert [x["ssid"] for x in o] == ["Building", "Cafe", "Neighbor", "Upstairs"]
+        assert not any(x["suggested"] for x in o)                  # only saved-on-this-computer: you choose
+        assert o[0]["known"] == "system" and not any(x["connected"] for x in o)
+    finally:
+        undo()
+    nets[1]["active"] = False
+    nets.append({"uuid": "c", "type": "802-11-wireless", "ssid": "Upstairs", "key_mgmt": "wpa-psk", "psk": "u",
+                 "shares": True, "active": True})
+    undo = _setup(nets=nets)
+    try:
+        o = W.order(seen)                                          # on a network the lock sees too: suggested
+        assert [(x["ssid"], x["connected"], x["suggested"]) for x in o] == [
+            ("Upstairs", True, True), ("Building", False, False), ("Cafe", False, False), ("Neighbor", False, False)]
+        W.save("Neighbor", "n-pw")                                 # a lock joined Neighbor with this password
+        o = W.order(seen)
+        assert [(x["ssid"], x["known"], x["suggested"]) for x in o] == [
+            ("Neighbor", "saved", True), ("Upstairs", "system", False), ("Building", "system", False),
+            ("Cafe", "", False)]
+    finally:
+        undo()
+
+
+FAKE_NETWORKSETUP = r"""
+import json, os, sys
+data = json.load(open(os.environ["LOCKLYCTL_FAKE_DATA"]))
+a = sys.argv[1:]
+if a == ["-listallhardwareports"]:
+    print("\nHardware Port: Ethernet\nDevice: en1\nEthernet Address: 00:00:00:00:00:01\n")
+    print("Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 00:00:00:00:00:02\n")
+elif a == ["-getairportnetwork", "en0"]:
+    print(data["answer"])
+else:
+    sys.exit(2)
+"""
+
+
+def test_which_network_this_computer_is_on_macos_and_windows():
+    for answer, want in (("Current Wi-Fi Network: Home Net", {"Home Net"}),
+                         ("You are not associated with an AirPort network.", set()),     # macOS 15 when hidden
+                         ("Current Wi-Fi Network: <redacted>", set())):
+        undo, _ = _fake_tool("darwin", "NETWORKSETUP", FAKE_NETWORKSETUP, {"answer": answer})
+        try:
+            assert W.connected() == want, answer
+        finally:
+            undo()
+    show = r"""
+import sys
+if sys.argv[1:] != ["wlan", "show", "interfaces"]:
+    sys.exit(1)
+print("\nThere is 1 interface on the system:\n\n    Name                   : Wi-Fi\n"
+      "    State                  : connected\n    SSID                   : Office & Co\n"
+      "    BSSID                  : 00:11:22:33:44:55\n    Signal                 : 90%\n")
+"""
+    undo, _ = _fake_tool("win32", "NETSH", show, {})
+    try:
+        assert W.connected() == {"Office & Co"}                        # not the BSSID line
     finally:
         undo()

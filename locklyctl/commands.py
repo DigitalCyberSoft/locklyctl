@@ -362,11 +362,16 @@ def _wifi(client: LocklyClient, args) -> int:
         raise UsageError("wifi needs a lock (or --ssid NAME --forget)")
     lock = find_lock(client.locks, args.lock)
     if not args.ssid:
-        nets = sorted(client.bluetooth_wifi_scan(lock), key=lambda n: n["rssi"])
-        known = W.known([n["ssid"] for n in nets])
-        for n in nets:
-            mark = {"saved": "  (password saved)", "system": "  (saved on this computer)"}.get(known[n["ssid"]], "")
-            print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}{mark}")
+        best: dict[str, dict] = {}
+        for n in sorted(client.bluetooth_wifi_scan(lock), key=lambda n: n["rssi"]):
+            if n["ssid"]:
+                best.setdefault(n["ssid"], n)                  # strongest of each name
+        for o in W.order(list(best)):                          # saved, this computer's, then signal
+            n = best[o["ssid"]]
+            marks = [{"saved": "password saved", "system": "saved on this computer"}.get(o["known"], ""),
+                     "this computer is on it" if o["connected"] else "", "suggested" if o["suggested"] else ""]
+            mark = ", ".join(m for m in marks if m)
+            print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}" + (f"  ({mark})" if mark else ""))
         return EXIT_OK
     password, source = _wifi_password(args.ssid, args)
     if not args.yes:

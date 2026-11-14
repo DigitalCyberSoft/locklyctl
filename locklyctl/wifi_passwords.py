@@ -19,6 +19,15 @@ A network's password is looked for, in order:
      in clear only when Windows allows it for this user; otherwise none.
    Phones have no such access.
 
+order() puts the networks a lock sees in the order to offer them: those
+locklyctl saved a password for (a lock has joined each), the one this computer
+is connected to (connected()), others this computer has saved, then the rest,
+each group strongest first. It suggests only the first of the first two kinds.
+Only networks from the lock's own scan are offered: its Wi-Fi chip (a Renesas
+DA16200 on the Visage) has a 2.4 GHz radio only, so each of them broadcasts
+on 2.4 GHz. A 5 GHz-only network this computer is on never appears, so it's
+never offered either.
+
 A password is saved once a lock has joined the network with it (the lock's
 result 3), and a saved one the lock calls wrong (result 4) is forgotten
 (after_setup). Passwords are never logged, printed, or sent to the GUI's page.
@@ -39,7 +48,7 @@ from . import config
 _LOG = logging.getLogger("locklyctl")
 _KEYRING_SERVICE = "locklyctl-wifi"
 PLATFORM = sys.platform                 # which system store from_system asks; tests set it
-NMCLI, SECURITY, NETSH = "nmcli", "security", "netsh"
+NMCLI, SECURITY, NETSH, NETWORKSETUP = "nmcli", "security", "netsh", "networksetup"
 TIMEOUT_S = {"darwin": 120.0, "win32": 30.0}    # macOS waits while an administrator's password is typed
 TIMEOUT_DEFAULT_S = 10.0
 _SYSTEM_ERRORS = (OSError, subprocess.SubprocessError, ET.ParseError)
@@ -112,7 +121,9 @@ def _run(args: list[str], timeout: float | None = None) -> subprocess.CompletedP
     """A system tool, without a shell or (Windows) a console window. On Windows
     the arguments are joined as written: netsh wants name="..." quoting, which
     subprocess's own quoting would escape."""
-    return subprocess.run(" ".join(args) if os.name == "nt" else args, capture_output=True, text=True,
+    windows = os.name == "nt"
+    return subprocess.run(" ".join(args) if windows else args, capture_output=True, text=True,
+                          encoding="oem" if windows else None, errors="replace",    # console output's code page
                           timeout=timeout or TIMEOUT_S.get(PLATFORM, TIMEOUT_DEFAULT_S),
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
@@ -276,6 +287,70 @@ def known(ssids: list[str]) -> dict[str, str]:
         _LOG.info("%s couldn't be asked for saved networks: %s", system_name(), type(e).__name__)
         system = set()
     return {s: "saved" if s in mine else "system" if s in system else "" for s in ssids}
+
+
+def _nm_connected() -> set[str]:
+    if shutil.which(NMCLI) is None:
+        return set()
+    rows = _checked([NMCLI, "-t", "--escape", "no", "-f", "ACTIVE,SSID", "device", "wifi", "list", "--rescan", "no"])
+    return {ssid for active, _, ssid in (r.partition(":") for r in rows.splitlines()) if active == "yes" and ssid}
+
+
+def _mac_connected() -> set[str]:
+    """macOS 15 and later reportedly hide the network's name from programs
+    without location access (community reports, not checked here); anything
+    but a "Current Wi-Fi Network: NAME" line counts as not known."""
+    if shutil.which(NETWORKSETUP) is None:
+        return set()
+    ports = _checked([NETWORKSETUP, "-listallhardwareports"]).splitlines()
+    devices = [ports[i + 1].split(":", 1)[1].strip() for i, line in enumerate(ports[:-1])
+               if line.strip() in ("Hardware Port: Wi-Fi", "Hardware Port: AirPort")
+               and ports[i + 1].startswith("Device:")]
+    out = set()
+    for device in devices:
+        line = _run([NETWORKSETUP, "-getairportnetwork", device], TIMEOUT_DEFAULT_S).stdout.strip()
+        prefix = "Current Wi-Fi Network: "
+        if line.startswith(prefix) and line[len(prefix):] not in ("", "<redacted>"):
+            out.add(line[len(prefix):])
+    return out
+
+
+def _win_connected() -> set[str]:
+    if shutil.which(NETSH) is None:
+        return set()
+    out = set()
+    for line in _checked([NETSH, "wlan", "show", "interfaces"]).splitlines():
+        label, sep, value = line.partition(":")
+        if sep and label.strip() == "SSID" and value.strip():          # not "BSSID"; shown only when connected
+            out.add(value.strip())
+    return out
+
+
+def connected() -> set[str]:
+    """The Wi-Fi network(s) this computer is connected to, as far as it says."""
+    try:
+        if PLATFORM == "darwin":
+            return _mac_connected()
+        if PLATFORM == "win32":
+            return _win_connected()
+        return _nm_connected()
+    except _SYSTEM_ERRORS as e:
+        _LOG.info("%s couldn't say which network this computer is on: %s", system_name(), type(e).__name__)
+        return set()
+
+
+def order(ssids: list[str]) -> list[dict]:
+    """``ssids`` (the networks a lock sees, strongest first) in the order to
+    offer them: [{"ssid", "known", "connected", "suggested"}]. First the
+    networks locklyctl saved a password for (a lock joined each), then the one
+    this computer is connected to, then others it has saved, then the rest;
+    each group keeps signal order. Only a network of the first two kinds is
+    suggested, and only the first one."""
+    knowns, here = known(ssids), connected()
+    tier = lambda s: 0 if knowns[s] == "saved" else 1 if s in here else 2 if knowns[s] == "system" else 3  # noqa: E731
+    ranked = sorted(ssids, key=tier)
+    first = ranked[0] if ranked and tier(ranked[0]) <= 1 else None
+    return [{"ssid": s, "known": knowns[s], "connected": s in here, "suggested": s == first} for s in ranked]
 
 
 def resolve(ssid: str) -> tuple[str | None, str, str]:

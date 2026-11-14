@@ -64,7 +64,11 @@ window.pywebview = {
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
-    async bluetooth_wifi_scan() { await wait(800); return [{ ssid: "Building Wi-Fi", rssi: -51, routerType: 3, known: "system" }, { ssid: "Guest", rssi: -62, routerType: 3, known: "" }]; },
+    async bluetooth_wifi_scan() {
+      await wait(800);
+      return [{ ssid: "Building Wi-Fi", rssi: -51, routerType: 3, known: "system", connected: true, suggested: true },
+        { ssid: "Guest", rssi: -62, routerType: 3, known: "", connected: false, suggested: false }];
+    },
     async bluetooth_wifi_setup(id, ssid, password) {
       await wait(1500);
       return { ok: true, text: "connected", note: password ? `Saved the password for ${ssid} in the keyring.` : "",

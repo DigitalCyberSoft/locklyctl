@@ -592,8 +592,9 @@ def test_bluetooth_wifi_scan_and_setup(api):
     BLE.available = lambda: ""
     W.NMCLI = "/nonexistent/nmcli"                         # not this computer's NetworkManager
     try:
-        assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3, "known": ""},
-                                              {"ssid": "Guest", "rssi": -70, "routerType": 3, "known": ""}]
+        none = {"known": "", "connected": False, "suggested": False}
+        assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3, **none},
+                                              {"ssid": "Guest", "rssi": -70, "routerType": 3, **none}]
         try:
             api.bluetooth_wifi_setup(B2, "Net A", "", "ph")             # nothing saved, nothing typed
         except ValueError as e:
@@ -604,7 +605,8 @@ def test_bluetooth_wifi_scan_and_setup(api):
         assert r["ok"] and given == [("Net A", "pw-1", "PH")]
         assert r["known"] == "saved" and "Saved the password for Net A" in r["note"]   # joined: kept
         assert "pw-1" not in json.dumps(r)                              # never back to the page
-        assert api.bluetooth_wifi_scan(B2)[0]["known"] == "saved"
+        assert [(n["ssid"], n["known"], n["suggested"]) for n in api.bluetooth_wifi_scan(B2)] == [
+            ("Net A", "saved", True), ("Guest", "", False)]                 # joined before: suggested
         r = api.bluetooth_wifi_setup(B2, "Net A", "", "ph")             # empty: the saved one
         assert r["ok"] and given[-1] == ("Net A", "pw-1", "PH") and r["note"] == ""
         codes[0] = 4                                                    # the network's password changed

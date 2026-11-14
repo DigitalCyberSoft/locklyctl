@@ -918,15 +918,23 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
 // ── Wi-Fi, given to the lock over Bluetooth ────────────────────────────
 
 // Per network: "saved" (locklyctl has its password), "system" (this computer
-// has the network saved) or "". Passwords themselves never reach the page.
-let wifiKnown = {};
-const WIFI_MARK = { saved: " · password saved", system: " · saved on this computer" };
+// has the network saved) or "", and whether this computer is on it. Passwords
+// themselves never reach the page.
+let wifiKnown = {}, wifiHere = {};
+const WIFI_MARK = { saved: "password saved", system: "saved on this computer" };
+
+function wifiLabel(o) {
+  if (!o.value) return o.dataset.label;
+  const marks = [WIFI_MARK[wifiKnown[o.value]], wifiHere[o.value] ? "this computer is on it" : ""].filter(Boolean);
+  return o.dataset.label + marks.map((m) => ` · ${m}`).join("");
+}
 
 function showWifiPassword() {
   const f = $("wifi-form"), k = wifiKnown[f.ssid.value] || "";
-  for (const o of f.ssid.options) o.textContent = o.dataset.label + (WIFI_MARK[wifiKnown[o.value]] || "");
+  for (const o of f.ssid.options) o.textContent = wifiLabel(o);
   f.password.placeholder = k ? "Leave empty to use the saved password" : "";
-  $("wifi-pw-note").textContent = k === "saved" ? "locklyctl has this network's password saved."
+  $("wifi-pw-note").textContent = !f.ssid.value ? "Networks a lock has joined before, and the one this computer is on, come first."
+    : k === "saved" ? "locklyctl has this network's password saved."
     : k === "system" ? "This computer has this network saved: leave the password empty to use it "
       + "(on a Mac, macOS asks for an administrator's password first)."
       : "The password is saved once the lock has joined the network with it.";
@@ -953,9 +961,16 @@ $("btn-wifi-scan").addEventListener("click", async (ev) => {
   form.hidden = true;
   await busy(ev.currentTarget, async () => {
     try {
+      // In the order to offer them (saved, this computer's, then signal); one
+      // is preselected only when suggested, else the user picks.
       const nets = await call("bluetooth_wifi_scan", v.id);
       wifiKnown = Object.fromEntries(nets.map((n) => [n.ssid, n.known || ""]));
-      form.ssid.replaceChildren(...nets.map((n) => h("option", { value: n.ssid, "data-label": `${n.ssid} (${n.rssi} dBm)` })));
+      wifiHere = Object.fromEntries(nets.map((n) => [n.ssid, !!n.connected]));
+      const pick = nets.find((n) => n.suggested);
+      form.ssid.replaceChildren(
+        ...(pick ? [] : [h("option", { value: "", disabled: true, "data-label": "Choose a network" })]),
+        ...nets.map((n) => h("option", { value: n.ssid, "data-label": `${n.ssid} (${n.rssi} dBm)` })));
+      form.ssid.value = pick ? pick.ssid : "";
       form.hidden = !nets.length;
       showWifiPassword();
       out.replaceChildren(h("p", { class: "muted" }, nets.length ? "" : "The lock sees no networks."));
