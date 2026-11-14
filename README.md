@@ -178,7 +178,33 @@ locklyctl timezone                      # each lock's time zone in the account, 
 locklyctl timezone "Front" --sync       # give it its time zone, then the time (wakes it)
 locklyctl add                           # locks in Bluetooth range that aren't on your account
 locklyctl add PGK728WRHK004321          # set that one up: asks for the card's code, a name, a PIN
+locklyctl backup doors.backup           # locks + people (keys and PINs) to a file sealed with a passphrase
+locklyctl --server https://lock.example.com restore doors.backup   # into a private server; merged
 ```
+
+### Backups and moving to a private server
+
+`backup FILE` writes the account's locks, with their master codes, and the
+people on them, with their PINs, to one file sealed with a passphrase (scrypt,
+then AES-256-CTR and HMAC-SHA256; `--no-encrypt` writes plain JSON and says
+so). It never overwrites a file and writes it owner-only. Signed in to Lockly,
+each Visage's people are read from the lock itself, which wakes it: the slot,
+PIN and exact schedule (weekly hours included), named from Lockly's cloud.
+Lockly's own list has no reliable slot numbers. A person `suspend` switched off
+comes back with their saved schedule, still switched off. Other models are
+carried as locks only, since a server pushes only Visage-style (0x73) records.
+Fingerprints and faces stay on the lock. Signed in to a private server
+(`--server`), the backup comes from the server, with its locks' MQTT logins.
+
+`restore FILE` (needs `--server`) brings a backup into that server, merged by
+lock: nothing there is deleted, and a lock another account on the server has is
+left alone and reported. `--replace` makes the account exactly the backup's,
+deleting the rest, after asking. Nothing is sent to the locks: they already
+hold these records. The format is the one locklyctl-mqtt's own `export` and
+`import` use (its CONTRACT.md, section 4), so a backup moves either way.
+✅ run end to end against two locklyctl-mqtt servers (backup from one, restore
+into a new one: the second then held exactly what the first did); the reading
+from a Visage is tested against a stand-in lock, not yet run on one.
 
 A door is named by its name (case-insensitive, a unique prefix is fine) or ID.
 `welcome` and `rain` only print the frame unless `--send` is given.

@@ -1784,7 +1784,8 @@ class LocklyClient:
     # -- suspend / resume an access user (credential-preserving) ---------------
     # Proven on a Visage (2026-11-14): re-pushing a user's 0x73 record with a
     # changed type/window keeps their PIN, fingerprints and face. Suspend swaps
-    # the window for one entirely in the past (the lock then refuses them);
+    # the window for one far in the future (the lock then refuses them; it
+    # rejects a past window with E3);
     # resume restores the exact original type + 10-byte date, which suspend
     # stashed in the owner-only config. The PIN is read from the lock and passed
     # straight back so it is never dropped, and never logged.

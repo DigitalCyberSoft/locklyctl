@@ -20,6 +20,8 @@
     locklyctl add [BLUETOOTH_NAME --code CODE --name NAME [--pin-file F] [--yes]]
     locklyctl suspend LOCK USER [--dry-run] [--yes]
     locklyctl resume LOCK USER [--dry-run] [--yes]
+    locklyctl backup FILE [--no-encrypt] [--passphrase-file F] [--yes]
+    locklyctl --server URL restore FILE [--replace] [--passphrase-file F] [--yes]
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -32,8 +34,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
+from . import backup as B
 from . import ble as BLE
 from . import cli as C
 from . import features as F
@@ -175,6 +179,21 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
         p.add_argument("--dry-run", action="store_true", help="print the frame and the saved schedule, send nothing")
         p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
+    p = sub.add_parser("backup", help="write this account's locks (with their master codes) and the people on "
+                                      "them (with their PINs) to FILE, sealed with a passphrase. Signed in to "
+                                      "Lockly, each Visage's people are read from the lock itself (it wakes)")
+    p.add_argument("file")
+    p.add_argument("--no-encrypt", action="store_true", help="write it unencrypted (it holds master codes and PINs)")
+    p.add_argument("--passphrase-file", help="read the passphrase from this file (else it's asked for)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask before waking the locks")
+    p = sub.add_parser("restore", help="bring a backup into the private server signed in with --server: merged "
+                                       "by default, so nothing there is deleted; nothing is sent to the locks")
+    p.add_argument("file")
+    p.add_argument("--replace", action="store_true", help="make the account exactly the backup's: locks and "
+                                                          "people that aren't in it are deleted from the server")
+    p.add_argument("--passphrase-file", help="read the passphrase from this file (else it's asked for)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask before --replace")
+
 
 def run(args: argparse.Namespace) -> int:
     if args.command == "wifi" and getattr(args, "forget", False):
@@ -193,7 +212,7 @@ def run(args: argparse.Namespace) -> int:
     except UsageError as e:
         print(f"locklyctl: {e}", file=sys.stderr)
         return EXIT_USAGE
-    except LocklyError as e:
+    except (LocklyError, B.BackupError) as e:
         print(C.red(f"  error: {e}"))
         return EXIT_FAIL
     except (EOFError, KeyboardInterrupt):
@@ -635,7 +654,85 @@ def _resume(client: LocklyClient, args) -> int:
     return EXIT_OK
 
 
+def _passphrase(args, *, confirm: bool) -> str:
+    if args.passphrase_file:
+        with open(args.passphrase_file, encoding="utf-8") as f:
+            phrase = f.read().rstrip("\r\n")
+        if not phrase:
+            raise UsageError("the passphrase file is empty")
+        return phrase
+    if not sys.stdin.isatty():
+        raise UsageError("needs --passphrase-file when it can't ask for the passphrase")
+    import getpass
+    phrase = getpass.getpass("  Backup passphrase: ")
+    if not phrase:
+        raise UsageError("the passphrase is empty")
+    if confirm and getpass.getpass("  The same passphrase again: ") != phrase:
+        raise UsageError("the two passphrases differ")
+    return phrase
+
+
+def _backup(client: LocklyClient, args) -> int:
+    if os.path.exists(args.file):
+        raise UsageError(f"{args.file} already exists: choose another name")
+    # Asked first, so nothing is woken if the passphrase step is abandoned.
+    phrase = None if args.no_encrypt else _passphrase(args, confirm=True)
+    if client.server:
+        doc, notes = B.from_server(client), []
+    else:
+        visages = [lk for lk in client.locks if str(lk.get("mod") or "").upper() in F.ACCESS_USER_MODELS]
+        if visages and not args.yes:
+            if not sys.stdin.isatty():
+                raise UsageError("backup needs --yes when it can't ask (it wakes each Visage to read its people)")
+            if not C.confirm(f"  read the people on {len(visages)} lock(s) from the locks themselves? "
+                             "Each one wakes and beeps.", default=True):
+                return EXIT_OK
+        doc, notes = B.from_lockly(client, progress=lambda name: print(C.dim(f"  reading {name}…"), flush=True))
+    data = B.plain(doc) if args.no_encrypt else B.seal(doc, phrase)
+    try:
+        B.write_new(args.file, data)
+    except FileExistsError:
+        raise UsageError(f"{args.file} already exists: choose another name") from None
+    people = sum(len(lk.get("people") or []) for lk in doc["locks"])
+    print(C.green(f"  {len(doc['locks'])} lock(s) and {people} person(s) written to {args.file}"
+                  + ("" if args.no_encrypt else ", encrypted")))
+    if args.no_encrypt:
+        print(C.yellow("  It isn't encrypted and holds master codes and PINs: keep it private and out of "
+                       "version control."))
+    for missing, text in notes:
+        print((C.yellow if missing else C.dim)(f"  {text}"))
+    return EXIT_FAIL if any(missing for missing, _ in notes) else EXIT_OK
+
+
+def _restore(client: LocklyClient, args) -> int:
+    if not client.server:
+        raise UsageError("restore brings a backup into a private server: add --server URL (Lockly's own "
+                         "service can't take one)")
+    with open(args.file, "rb") as f:
+        data = f.read()
+    doc = B.open_backup(data, _passphrase(args, confirm=False) if B.is_encrypted(data) else None)
+    if args.replace and not args.yes:
+        if not sys.stdin.isatty():
+            raise UsageError("restore --replace needs --yes when it can't ask")
+        if not C.confirm("  make this account exactly the backup's? Locks and people that aren't in it are "
+                         "deleted from the server.", default=False):
+            return EXIT_OK
+    r = B.restore_to_server(client, doc, replace=args.replace)
+    print(C.green(f"  locks: {r['locksAdded']} added, {r['locksUpdated']} updated, {r['locksRemoved']} removed; "
+                  f"people: {r['peopleAdded']} added, {r['peopleUpdated']} updated, {r['peopleRemoved']} removed"))
+    for dev in r["conflicts"]:
+        print(C.yellow(f"  skipped lock {dev}: another account on that server has it"))
+    no_login = sum(1 for lk in doc["locks"] if not lk.get("mqtt"))
+    if no_login:
+        why = " (Lockly doesn't hand those out)" if (doc.get("source") or {}).get("kind") == "lockly" else ""
+        print(C.dim(f"  {no_login} lock(s) came without an MQTT login{why}: the server needs one for each "
+                    "before that lock can connect to it."))
+    print(C.dim("  Nothing was sent to the locks: they already hold these records."))
+    return EXIT_FAIL if r["conflicts"] else EXIT_OK
+
+
 _HANDLERS = {"list": _list, "hide": _hide, "unhide": _unhide, "move": _move,
+             "backup": _backup, "restore": _restore,
              "status": _status, "lock": _lock, "unlock": _unlock,
              "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
              "add": _add, "suspend": _suspend, "resume": _resume}
