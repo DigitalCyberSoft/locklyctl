@@ -23,10 +23,13 @@ def _client(monkeypatch, tmp_path):
     return c, pushes
 
 
-def test_expired_window_bytes():
-    assert F.access_date_expired() == "00010100000001010001"
-    # a period in the past: 2000-01-01 00:00 .. 00:01
-    assert F.access_date_expired() == F.access_date_period_raw("0001010000", "0001010001")
+def test_suspended_window_bytes():
+    # A future (pending) window, not a past one: the lock rejects a year-2000
+    # window with 0x73 error E3 (proven live), while a future window denies and
+    # is accepted even when the lock's clock runs slow.
+    assert F.access_date_suspended() == "63010100006301010001"
+    # a period in 2099: 2099-01-01 00:00 .. 00:01 (decimal yyMMddHHmm, hex-packed)
+    assert F.access_date_suspended() == F.access_date_period_raw("9901010000", "9901010001")
 
 
 def test_config_stash_round_trip(monkeypatch, tmp_path):
@@ -45,7 +48,7 @@ def test_suspend_expires_window_keeps_pin_and_counts(monkeypatch, tmp_path):
     assert len(pushes) == 1
     p = pushes[0]
     assert p["user_type"] == F.UT_GUEST_PERIOD        # 0x12
-    assert p["date"] == F.access_date_expired()
+    assert p["date"] == F.access_date_suspended()
     assert p["pwd_id"] == 8
     assert p["pin"] == "4455"                          # PIN passed through, not emptied
     assert p["multi_verify"] == 0

@@ -575,12 +575,18 @@ def access_date_weekly(week: int, begin: tuple[int, int], end: tuple[int, int]) 
     return f"{week & 0x7F:02X}{begin[0]:02X}{begin[1]:02X}{eh:02X}{em:02X}" + "00" * 5
 
 
-def access_date_expired() -> str:
-    """A period window entirely in the past (2000-01-01 00:00 to 00:01), used
-    with user type 0x12 to suspend a user: the lock refuses them without
-    touching their PIN, fingerprint or face. Fixed so a suspend is recognisable
-    and idempotent."""
-    return access_date_period_raw("0001010000", "0001010001")
+def access_date_suspended() -> str:
+    """A validity window far in the future (2099-01-01 00:00 to 00:01), used
+    with user type 0x12 to suspend a user: the lock treats them as not yet valid
+    and refuses them, without touching their PIN, fingerprint or face. Fixed so
+    a suspend is recognisable and idempotent.
+
+    A past window is deliberately not used. Proven live on a PGK728WRHK
+    (2026-11-14): the lock rejects a year-2000 window with 0x73 error E3, while a
+    future window is accepted. A future (pending) window also stays "denied" when
+    the lock's clock runs slow, which these locks tend to do, whereas a recent
+    past window would wrongly grant on a slow clock."""
+    return access_date_period_raw("9901010000", "9901010001")
 
 
 def access_date_period_raw(start_yymmddhhmm: str, end_yymmddhhmm: str) -> str:

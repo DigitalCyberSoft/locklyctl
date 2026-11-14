@@ -1855,12 +1855,12 @@ class LocklyClient:
         if dry_run:
             frame = F.build_access_user_set(
                 lock, self._dry_run_nonce(), user_type=F.UT_GUEST_PERIOD, pwd_id=rec["pwd_id"],
-                user_id=user_id, date=F.access_date_expired(), pin=rec["pin"],
+                user_id=user_id, date=F.access_date_suspended(), pin=rec["pin"],
                 multi_verify=rec["multi_verify"])
             return {"dry_run": True, "frame": frame, "stash": stash, "before": before}
         config.stash_suspended(lock["ID"], user_id, stash)
         self._push_access_user(lock, user_type=F.UT_GUEST_PERIOD, pwd_id=rec["pwd_id"], user_id=user_id,
-                               date=F.access_date_expired(), pin=rec["pin"], multi_verify=rec["multi_verify"])
+                               date=F.access_date_suspended(), pin=rec["pin"], multi_verify=rec["multi_verify"])
         return {"stash": stash, "before": before, "after": self._user_counts(lock, user_id)}
 
     def resume_access_user(self, lock: dict, user_id: int, *, dry_run: bool = False) -> dict:
