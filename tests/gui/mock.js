@@ -72,19 +72,22 @@ window.pywebview = {
     async bluetooth_set_time(id) { await wait(900); Object.assign(find(id), { clockKnown: true, clockOffset: -1 }); return { ...find(id) }; },
     async bluetooth_chip_install(id) {
       await wait(400); fwPolls = 0;
-      fwParts = [{ part: "ble", name: "Bluetooth chip", version: "1.14.28", current: "1.14.24", state: "sending", now: "" }];
+      fwParts = [{ part: "ble", name: "Bluetooth chip", version: "1.14.28", current: "1.14.24", state: "files", now: "" }];
       return this.firmware_install_status(id);
     },
     async firmware_install(id, parts) {
       await wait(400); fwPolls = 0;
-      fwParts = parts.map((p) => ({ part: p.part, name: p.name, version: p.version, current: p.current, state: "sending", now: "" }));
+      fwParts = parts.map((p) => ({ part: p.part, name: p.name, version: p.version, current: p.current, state: "files", now: "" }));
       return this.firmware_install_status(id);
     },
-    async firmware_install_status() {      // sending, restarting, one part in and one not yet, then done
+    async firmware_jobs() { return []; },
+    async installing() { return []; },
+    async firmware_install_status() {      // files, sending, restarting, one part in and one not yet, then done
       await wait(150);
       const all = (state, now) => fwParts.map((p) => ({ ...p, state, now: now ? now(p) : "" }));
-      const base = { running: true, ok: null, away: null, error: "", versions: {}, clockKnown: false, clockOffset: null };
+      const base = { running: true, ok: null, away: null, error: "", warning: "", versions: {}, clockKnown: false, clockOffset: null };
       const steps = [
+        { stage: "download", progress: null, text: "front 1.00.95: downloaded and checked (88348 bytes)", parts: all("files") },
         { stage: "download", progress: 40, text: "Downloading 40 %", parts: all("sending") },
         { stage: "install", progress: 70, text: "Installing 70 %", parts: all("sending") },
         { stage: "verify", progress: null, away: 20, text: "Waiting for the lock to come back online (0 min so far)", parts: all("restarting") },

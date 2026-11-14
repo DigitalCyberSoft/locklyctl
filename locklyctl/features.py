@@ -10,6 +10,7 @@ primitives as unlock, so the framing is sound; what is unproven is the field
 from __future__ import annotations
 
 import calendar
+import hashlib
 import re
 import zlib
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -692,6 +693,42 @@ def firmware_reply_parts(reply: dict) -> tuple[list[dict], list[str]]:
         parts.append({"part": part, "version": str(ver), "name": str(name), "size": int(size),
                       "crc": reply.get(prefix + "Crc"), "md5": reply.get(prefix + "Md5")})
     return parts, problems
+
+
+# Each file's size in Lockly's offer is in KB, rounded up: the four Visage
+# files of release 1.14.34 (88348, 35288, 1208320 and 286388 bytes) were
+# offered on 2026-11-14 as 87, 35, 1180 and 280. The offer's "Crc" texts are
+# not one checksum of the file (the back board's is its 24-bit byte sum, the
+# front board's is not; the Wi-Fi module's 32 hex digits aren't its MD5), so
+# they aren't checked.
+_SAFE_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def firmware_file_name_ok(name: str) -> bool:
+    """Whether a file name from Lockly's offer is safe to save under here."""
+    return bool(_SAFE_FILE_NAME.fullmatch(name)) and ".." not in name
+
+
+def md5_hex(data: bytes) -> str:
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()
+
+
+def etag_md5(etag: str | None) -> str | None:
+    """The MD5 in an S3 ETag: a file uploaded in one piece has its MD5 as
+    ETag (the 1.14.34 files did); a multi-part upload's ETag isn't one."""
+    tag = (etag or "").strip().strip('"').lower()
+    return tag if re.fullmatch(r"[0-9a-f]{32}", tag) else None
+
+
+def firmware_file_problems(data: bytes, size_kb: int | None, md5: str | None) -> list[str]:
+    """What's wrong with a downloaded firmware file: its length against the
+    offer's size in KB, and its MD5 against the server's (etag_md5), when given."""
+    problems = []
+    if size_kb is not None and -(-len(data) // 1024) != size_kb:
+        problems.append(f"it is {len(data)} bytes, and Lockly's offer says {size_kb} KB")
+    if md5 and md5_hex(data) != md5.lower():
+        problems.append("it doesn't match the checksum the server gives for it")
+    return problems
 
 
 def firmware_versions_on_lock(status: dict) -> dict:

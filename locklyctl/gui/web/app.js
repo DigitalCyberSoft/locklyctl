@@ -20,6 +20,11 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+// el.replaceChildren with h's rule for kids: the DOM's own turns null into the text "null".
+function fill(el, ...kids) {
+  el.replaceChildren(...kids.flat().filter((kid) => kid != null && kid !== false));
+}
+
 // An icon from the sprite at the top of index.html; decorative, so screen readers skip it.
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -230,13 +235,34 @@ async function enterApp(email) {
   }
   renderPlates();
   selectLock(current() ? currentId : locks[0].id);
+  // Installs still running from before this page was (re)loaded: follow them again.
+  call("firmware_jobs").then((ids) => {
+    for (const id of ids) {
+      const v = locks.find((l) => l.id === id);
+      if (v && pending.get(id) !== "firmware") followInstall(v, () => call("firmware_install_status", id));
+    }
+  }, (e) => toast(e.message, true));
 }
+
+// The window asked to close while an install runs (gui/app.py keeps it open).
+window.closeRefused = (running) => {
+  toast(`locklyctl stays open until the firmware install has finished: ${running.join("; ")}.`, true);
+};
+window.addEventListener("beforeunload", (ev) => {
+  if ([...pending.values()].includes("firmware")) { ev.preventDefault(); ev.returnValue = ""; }
+});
 
 $("sign-out").addEventListener("click", async () => {
   const ok = await confirmDialog("Sign out?",
     "This also forgets the saved sign-in, so you'll need your Lockly password next time.", "Sign out");
   if (!ok) return;
-  const s = await call("sign_out");
+  let s;
+  try {
+    s = await call("sign_out");
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
   locks = []; currentId = null;
   renderFavs();
   showSignin(s.email);
@@ -949,7 +975,7 @@ $("btn-firmware").addEventListener("click", async (ev) => {
       const install = r.install;
       const byPhone = r.parts.filter((p) => p.newer && p.byPhone && !p.byBluetooth).map((p) => p.name);
       const chip = r.parts.find((p) => p.newer && p.byBluetooth);
-      out.replaceChildren(
+      fill(out,
         h("p", {}, `Lockly offers ${r.kind === "multi" ? "release " : "firmware "}${r.release}`
           + (r.answered ? "." : ". The lock didn't answer, so its own versions are missing.")),
         h("table", { class: "log fw-table" },
@@ -973,10 +999,11 @@ $("btn-firmware").addEventListener("click", async (ev) => {
   });
 });
 
-// Each part's row. The lock's progress messages don't say which part it's on,
-// so every part reads "Sending" until it restarts and reports its versions.
-const FW_PART_STATE = { sending: "Sending", restarting: "Waiting for the lock", done: "Installed",
-  behind: "Not installed", unconfirmed: "Not confirmed" };
+// Each part's row. Its files are downloaded and checked here first; then, as
+// the lock's progress messages don't say which part it's on, every part reads
+// "Sending" until it restarts and reports its versions.
+const FW_PART_STATE = { files: "Getting the files", sending: "Sending", restarting: "Waiting for the lock",
+  done: "Installed", behind: "Not installed", unconfirmed: "Not confirmed", notSent: "Not sent" };
 
 async function installFirmware(v, install, btn) {
   const list = install.parts.map((p) => `${p.name} ${p.current || "?"} → ${p.version}`).join(", ");
@@ -1018,7 +1045,7 @@ async function followInstall(v, start) {
   const show = (st) => {
     if (v.id !== currentId || activeTab !== "connection") return;
     const clock = st.clockKnown ? clockText(true, st.clockOffset) : null;
-    $("fw-out").replaceChildren(
+    fill($("fw-out"),
       h("p", {}, `${doorLabel(v)}:`),
       h("ul", { class: "fw-parts" }, st.parts.map((p) =>
         h("li", { "data-state": p.state },
@@ -1028,6 +1055,10 @@ async function followInstall(v, start) {
             p.state === "behind" && p.now ? ` (still ${p.now})` : null)))),
       h("p", { class: st.ok === false ? "form-error" : (st.ok ? "ok" : "muted") },
         st.ok === false ? st.error : (st.ok ? "Installed, and the lock reports the new versions." : st.text)),
+      st.warning ? h("p", { class: "form-error" }, st.warning) : null,
+      st.running && !st.parts.some((p) => p.state === "files")
+        ? h("p", { class: "muted" }, "Started: locklyctl stays open and nothing else goes to this door "
+          + "until it has finished.") : null,
       st.clockKnown ? h("p", { class: clock ? "form-error" : "ok" },
         clock ? `${clock}: people on a schedule may not get in until it's set.` : "The lock's clock is right.") : null);
   };

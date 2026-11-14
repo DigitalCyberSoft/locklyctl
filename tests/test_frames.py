@@ -1,5 +1,5 @@
 """Offline structural tests for frame builders — no network, no lock."""
-import sys, os
+import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from locklyctl import protocol as P
@@ -572,6 +572,47 @@ FW_REPLY = {   # fwver/msh/new, made-up files; the screen entry has no URL, so i
     "screenVer": "1.00.01", "screenName": "s.bin", "screenSize": "9"}
 
 
+class _Files:
+    """An HTTP session serving made-up firmware files, as S3 does: an ETag that
+    is the file's MD5. ``down`` makes every request fail as if offline."""
+
+    def __init__(self, files):
+        import hashlib
+        self.files, self.down, self.gets = dict(files), False, []
+        self.md5 = lambda b: hashlib.md5(b).hexdigest()
+
+    def _answer(self, url, body):
+        import requests
+        if self.down:
+            raise requests.ConnectionError("offline")
+        if url not in self.files:
+            r = type("R", (), {"status_code": 404, "headers": {}, "content": b""})()
+            def fail(_self=r):
+                raise requests.HTTPError(f"404 for {url}")
+            r.raise_for_status = fail
+            return r
+        data = self.files[url]
+        r = type("R", (), {"status_code": 200, "headers": {"ETag": f'"{self.md5(data)}"'},
+                           "content": data if body else b""})()
+        r.raise_for_status = lambda: None
+        return r
+
+    def head(self, url, timeout=None, allow_redirects=True):
+        return self._answer(url, False)
+
+    def get(self, url, timeout=None):
+        self.gets.append(url)
+        return self._answer(url, True)
+
+
+def _offer_files(reply=None):
+    """FW_REPLY's files at the address the request gives the lock, each as long as its size in KB."""
+    reply = reply or FW_REPLY
+    base = reply["downloadUrl"].rstrip("/")
+    return {f"{base}/{reply[k + 'Name']}": bytes([n]) * (int(reply[k + "Size"]) * 1024)
+            for n, k in enumerate(("hub", "ble", "front", "back"), 1) if reply.get(k + "Url")}
+
+
 def test_firmware_install_request():
     parts, problems = F.firmware_reply_parts(FW_REPLY)
     assert [p["part"] for p in parts] == ["wifi", "ble", "front", "back"] and problems == []   # app's order
@@ -855,6 +896,8 @@ def test_firmware_install_falls_back_to_bluetooth():
     c = LocklyClient("a@b")
     c.FW_SETTLE_S = c.FW_BLE_AFTER_S = c.FW_VERIFY_EVERY_S = 0
     c._mqtt_channel = lambda: Channel()
+    c._session = _Files(_offer_files())                          # the files are checked first
+    _set_home(tempfile.mkdtemp())
     c.query_status = lambda lk: None                             # its Wi-Fi isn't back
     asked = []
     c.bluetooth_status = lambda lk: asked.append(lk["ID"]) or after
@@ -870,6 +913,8 @@ def test_firmware_install_falls_back_to_bluetooth():
         assert "hasn't come back online" in str(e) and asked == [UUID]
     else:
         raise AssertionError("a lock that never answered was reported installed")
+    finally:
+        _set_home(None)
 
 
 
@@ -1129,12 +1174,16 @@ def test_firmware_needs_wifi():
     c.connection = "auto"
     c.FW_SETTLE_S = c.FW_VERIFY_S = c.FW_VERIFY_EVERY_S = 0
     c._mqtt_channel = lambda: Channel()
+    c._session = _Files(_offer_files())                               # the files are checked first
+    _set_home(tempfile.mkdtemp())
     remote_only = []
     c.query_status = lambda lk: remote_only.append(getattr(c._tl, "remote_only", False))
     try:
         c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
     except LocklyError:
         pass                                                          # never answered: expected
+    finally:
+        _set_home(None)
     assert remote_only == [True] and getattr(c._tl, "remote_only", False) is False
 
 
@@ -1250,7 +1299,8 @@ def test_bluetooth_chip_update_checks_then_confirms():
                {"lock_type": 105, "ble_version": "1.14.28", "battery_percent": 90, "clock_offset_s": -1}]
     c.bluetooth_status = lambda lk: answers[0] if len(answers) == 2 else answers[-1]
     c._firmware_reply = lambda lk, lt=None: {"cod": "200", "bleVer": "1.14.28", "bleUrl": "https://x/b.img"}
-    c._session.get = lambda url, timeout: type("R", (), {"content": image, "raise_for_status": lambda s: None})()
+    c._session = _Files({"https://x/b.img": image})
+    _set_home(tempfile.mkdtemp())
     sent = []
     real = BLE.suota_update
 
@@ -1285,8 +1335,263 @@ def test_bluetooth_chip_update_checks_then_confirms():
             raise AssertionError("an up-to-date chip was flashed again")
     finally:
         BLE.suota_update = real
+        _set_home(None)
 
 
+
+
+# -- firmware: files first, then an install that's hard to stop -----------------
+
+class _Awake:
+    """guard._KeepAwake without touching this computer."""
+    made = 0
+
+    def __init__(self):
+        type(self).made += 1
+        self.warning = ""
+
+    def release(self):
+        pass
+
+
+def _quiet_guard():
+    from locklyctl import guard as G
+    real = G._KeepAwake
+    G._KeepAwake = _Awake
+    return lambda: setattr(G, "_KeepAwake", real)
+
+
+def _install_client(files):
+    """A client whose install gets as far as Lockly's channel, recording what it sends."""
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.FW_SETTLE_S = c.FW_VERIFY_EVERY_S = 0
+    c._session = _Files(files)
+    sent = []
+
+    class Channel:
+        def follow_firmware_upgrade(self, payload, progress, idle_timeout):
+            sent.append(payload)
+            progress({"stage": "final", "progress": 100})
+            return {"stage": "final"}
+    c._mqtt_channel = lambda: Channel()
+    c.query_status = lambda lk: {"firmware_version": "1.00.95", "sub_version": "1.00.76",
+                                 "wifi_version": "2.02.72", "ble_version": "1.14.21"}
+    return c, sent
+
+
+def test_firmware_files_are_checked_before_anything_is_sent():
+    from locklyctl.transport import LocklyError
+    parts, _ = F.firmware_reply_parts(FW_REPLY)
+    send = F.firmware_parts_to_install(parts, {"front": "1.00.87", "back": "1.00.72", "wifi": "1.02.70"}, True)
+    good = _offer_files()
+    url = lambda name: FW_REPLY["downloadUrl"] + name                       # noqa: E731
+    restore = _quiet_guard()
+    home = tempfile.mkdtemp()
+    _set_home(home)
+    try:
+        for files, why in (({**good, url("f.bin"): b"x" * 100}, "Lockly's offer says 87 KB"),   # cut short
+                           ({k: v for k, v in good.items() if not k.endswith("k.bin")}, "404")):
+            c, sent = _install_client(files)
+            try:
+                c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
+            except LocklyError as e:
+                assert why in str(e) and sent == []                           # nothing went to the lock
+            else:
+                raise AssertionError(f"installed with a bad file ({why})")
+        c, sent = _install_client(good)
+        lie = dict(c._session.files)
+        c._session.md5 = lambda b: "0" * 32                                    # the server's MD5 differs
+        try:
+            c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
+        except LocklyError as e:
+            assert "doesn't match the checksum" in str(e) and sent == []
+        else:
+            raise AssertionError("installed a file whose MD5 isn't the server's")
+
+        home = tempfile.mkdtemp()                          # nothing cached yet (the runs above cached some)
+        _set_home(home)
+        c, sent = _install_client(lie)
+        events = []
+        assert c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], events.append)["versions"]
+        assert len(sent) == 1 and sorted(c._session.gets) == sorted(url(p["name"]) for p in send)
+        texts = [e["text"] for e in events]
+        assert texts.index("Sending the request to the lock") > max(
+            i for i, t in enumerate(texts) if "downloaded and checked" in t)    # files first
+        cached = os.listdir(os.path.join(home, "firmware"))
+        assert sorted(cached) == sorted([p["name"] for p in send] + [p["name"] + ".json" for p in send])
+
+        c, sent = _install_client(lie)                     # the server still has the same files
+        c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], events.append)
+        assert c._session.gets == [] and len(sent) == 1
+        c, sent = _install_client(lie)
+        c._session.down = True                             # offline: the copies checked before are used
+        events = []
+        c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], events.append)
+        assert len(sent) == 1 and any("can't be reached" in e["text"] for e in events)
+        with open(os.path.join(home, "firmware", "f.bin"), "r+b") as f:
+            f.write(b"damaged")                            # a cached copy that changed isn't used
+        c, sent = _install_client(lie)
+        c._session.down = True
+        try:
+            c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None)
+        except LocklyError as e:
+            assert "Couldn't download the front 1.00.95 file" in str(e) and sent == []
+        else:
+            raise AssertionError("used a cached file that no longer matches")
+
+        for bad, why in (({"name": "../../evil", "url": url("f.bin")}, "isn't a plain file name"),
+                         ({"name": "f.bin", "url": "http://files.example.com/fw/f.bin"}, "isn't HTTPS")):
+            c, sent = _install_client(lie)
+            try:
+                c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], lambda ev: None,
+                                   files=[{"part": "front", "version": "1", "size_kb": 87, **bad}])
+            except LocklyError as e:
+                assert why in str(e) and sent == [] and c._session.gets == []
+            else:
+                raise AssertionError(f"fetched a file the offer names unsafely ({why})")
+    finally:
+        restore()
+        _set_home(None)
+
+
+def test_firmware_plan_lists_every_file_the_update_needs():
+    """The parts the lock downloads, at the address the request gives it, and
+    the Bluetooth chip's file, which this computer sends after them."""
+    from locklyctl.transport import LocklyClient
+    c = LocklyClient("a@b")
+    c.query_status = lambda lk: {"lock_type": 105, "battery_percent": 90, "firmware_version": "1.00.87",
+                                 "sub_version": "1.00.76", "wifi_version": "2.02.72", "ble_version": "1.14.21"}
+    c._firmware_reply = lambda lk, lock_type=None: FW_REPLY
+    plan = c.firmware_plan(VISAGE)
+    assert [(f["part"], f["url"], f["size_kb"]) for f in plan["files"]] == [
+        ("front", "https://files.example.com/fw/f.bin", 87), ("ble", "https://files.example.com/fw/b.img", 280)]
+    c.query_status = lambda lk: {"lock_type": 105, "battery_percent": 90, "firmware_version": "1.00.87",
+                                 "sub_version": "1.00.76", "wifi_version": "2.02.72", "ble_version": "1.14.28"}
+    assert [f["part"] for f in c.firmware_plan(VISAGE)["files"]] == ["front"]       # the chip is current
+
+
+def test_an_install_holds_its_lock():
+    """While an install runs, nothing else reaches that lock from another
+    thread, a second install on it is refused, and its thread keeps working."""
+    import threading
+    from locklyctl import guard as G
+    from locklyctl.transport import LocklyClient, LocklyError
+    c = LocklyClient("a@b")
+    c.status_cache[UUID] = {"reachable": True, "ts": 1}
+    restore = _quiet_guard()
+    errors, own = [], []
+    try:
+        with G.firmware_install(UUID, "11X: front 1.00.95") as warning:
+            assert warning == "" and G.running() == ["11X: front 1.00.95"]
+            assert G.blocking(UUID) is None                         # this thread is the install's own
+
+            def other():
+                for call in (lambda: c.query_status(VISAGE), lambda: c.exchange_frame(VISAGE, "00"),
+                             lambda: c.bluetooth_status(VISAGE), lambda: c.bluetooth_in_range(VISAGE)):
+                    try:
+                        call()
+                    except LocklyError as e:
+                        errors.append((e.cod, "11X" in str(e)))
+                c.refresh_all_status([VISAGE])
+                own.append(c.status_cache[UUID])
+            t = threading.Thread(target=other)
+            t.start()
+            t.join()
+            try:
+                with G.firmware_install(UUID, "again"):
+                    pass
+            except ValueError as e:
+                assert "already running" in str(e)
+            else:
+                raise AssertionError("two installs ran on one lock")
+        assert errors == [("busy", True)] * 4 and own == [{"reachable": True, "ts": 1}]   # left alone
+        assert G.running() == [] and G.blocking(UUID) is None
+    finally:
+        restore()
+
+
+def test_ctrl_c_takes_several_presses_during_an_install():
+    import signal
+    from locklyctl import guard as G
+    restore = _quiet_guard()
+    before = signal.getsignal(signal.SIGINT)
+    try:
+        with G.firmware_install(UUID, "11X: Bluetooth chip"):
+            for _ in range(G.FORCE_PRESSES - 1):
+                signal.raise_signal(signal.SIGINT)                  # warned, and it goes on
+            signal.raise_signal(signal.SIGTERM)                     # ignored
+            if hasattr(signal, "SIGHUP"):
+                signal.raise_signal(signal.SIGHUP)                  # a closed terminal: ignored
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError(f"{G.FORCE_PRESSES} presses didn't stop it")
+        assert signal.getsignal(signal.SIGINT) is before            # put back afterwards
+    finally:
+        restore()
+
+
+def test_keeping_this_computer_awake():
+    import sys
+    from locklyctl import guard as G
+    if sys.platform != "linux":
+        return
+    real = (G.shutil.which, G.subprocess.Popen)
+    started = []
+
+    class Proc:
+        def __init__(self, cmd, exits, **kw):
+            started.append((cmd, kw.get("start_new_session")))
+            self.exits, self.returncode, self.stderr = exits, 1 if exits else None, None
+            self.stopped = False
+
+        def wait(self, timeout=None):
+            if not self.exits and not self.stopped:
+                raise G.subprocess.TimeoutExpired("x", timeout)
+            return self.returncode
+
+        def terminate(self):
+            self.stopped = True
+    try:
+        G.shutil.which = lambda name: None
+        assert "isn't on this computer" in G._KeepAwake().warning
+        G.shutil.which = lambda name: "/usr/bin/" + name
+        G.subprocess.Popen = lambda cmd, **kw: Proc(cmd, False, **kw)
+        awake = G._KeepAwake()
+        assert awake.warning == "" and started[-1][1] is True       # its own session: Ctrl+C isn't its
+        assert started[-1][0][:2] == ["systemd-inhibit", "--what=sleep:shutdown:idle:handle-lid-switch"]
+        proc = awake.proc
+        awake.release()
+        assert proc.stopped and awake.proc is None
+        G.subprocess.Popen = lambda cmd, **kw: Proc(cmd, True, **kw)  # refused (polkit): it exits at once
+        assert "Couldn't keep this computer awake" in G._KeepAwake().warning
+    finally:
+        G.shutil.which, G.subprocess.Popen = real
+
+
+def test_a_failing_display_doesnt_stop_an_install():
+    """Once the request is sent, a progress display that fails (a closed
+    terminal) doesn't end the install; the outcome still comes back."""
+    parts, _ = F.firmware_reply_parts(FW_REPLY)
+    send = F.firmware_parts_to_install(parts, {"front": "1.00.87"}, True)
+    restore = _quiet_guard()
+    _set_home(tempfile.mkdtemp())
+    try:
+        c, sent = _install_client(_offer_files())
+        shown = []
+
+        def display(ev):
+            if ev["stage"] != "download":
+                raise OSError(5, "Input/output error")
+            shown.append(ev["text"])
+        assert c.firmware_install(VISAGE, send, FW_REPLY["downloadUrl"], display)["versions"]["front"] == "1.00.95"
+        assert len(sent) == 1 and shown
+    finally:
+        restore()
+        _set_home(None)
 
 # -- Wi-Fi over Bluetooth (the app's Wi-Fi setup screen) -------------------------
 

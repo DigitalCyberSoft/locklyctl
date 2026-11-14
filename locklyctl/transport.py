@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import threading
 import time
@@ -23,7 +24,9 @@ from typing import Callable
 import requests
 
 from . import ble as BLE
+from . import config
 from . import features as F
+from . import guard as G
 from . import protocol as P
 from .capabilities import LockCapabilities, resolve_capabilities
 from .const import (
@@ -63,6 +66,33 @@ def _plain(html_text: str) -> str:
 def _int_or_none(value) -> int | None:
     text = str(value).strip() if value is not None else ""
     return int(text) if text.isdigit() else None
+
+
+def _lock_label(lock: dict) -> str:
+    return str(lock.get("na") or lock.get("blename") or lock.get("ID") or "?")
+
+
+def _shielded(on_event: Callable[[dict], None]) -> Callable[[dict], None]:
+    """on_event for the part of an install that must not stop: a display that
+    fails (a closed terminal, say) is logged once and the install goes on. The
+    install's own outcome still reaches the caller as a return or a raise."""
+    failed: list[bool] = []
+
+    def call(event: dict) -> None:
+        if failed:
+            return
+        try:
+            on_event(event)
+        except Exception:       # boundary: the caller's display code, not the install
+            failed.append(True)
+            _LOGGER.exception("firmware progress display failed; the install goes on")
+    return call
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def _fw_parts_text(parts: list[dict], on_lock: dict) -> str:
@@ -441,7 +471,9 @@ class LocklyClient:
         Wi-Fi-native/Matter lock, or a hub account that answers 930, falls back
         to the MQTT device channel. While this thread holds a Bluetooth link
         (bluetooth_status), the frame goes straight to the lock over it instead.
+        Refused while another thread installs firmware on the lock.
         """
+        self._refuse_if_installing(lock)
         self._tl.last_cod = None
         self._tl.mqtt_code = None
         self._tl.via = None
@@ -514,7 +546,9 @@ class LocklyClient:
         answered is tried over Bluetooth from this computer when it's in range,
         and if that answers, its checks go to Bluetooth first for
         BLUETOOTH_FIRST_S; "bluetooth" goes straight there. On any route, a reply whose clock is
-        wrong gets one more check on that route (_fix_clock)."""
+        wrong gets one more check on that route (_fix_clock). Refused while
+        another thread installs firmware on the lock."""
+        self._refuse_if_installing(lock)
         mc, uuid_ = str(lock["mc"]), lock["ID"]
         frame = lambda: P.build_query_status_cmd(mc, uuid_, F.lock_now(lock))   # noqa: E731
         send = lambda: self.exchange_frame(lock, frame())                       # noqa: E731
@@ -643,6 +677,14 @@ class LocklyClient:
             self._tl.ble = None
             link.close()
 
+    @staticmethod
+    def _refuse_if_installing(lock: dict) -> None:
+        """Nothing else goes to a lock while another thread installs firmware on it (guard)."""
+        what = G.blocking(str(lock.get("ID")))
+        if what:
+            raise LocklyError(f"A firmware install is running on this lock ({what}). Try again when it "
+                              "has finished.", "busy")
+
     @contextmanager
     def _remote_only(self):
         """Status checks on this thread don't fall back to Bluetooth meanwhile."""
@@ -657,6 +699,7 @@ class LocklyClient:
     def bluetooth_in_range(self, lock: dict, timeout: float = BLE.SCAN_S) -> bool:
         """Whether this computer hears the lock over Bluetooth (listening only).
         Raises BLE.BluetoothError when Bluetooth can't be used here."""
+        self._refuse_if_installing(lock)
         why = BLE.available()
         if why:
             raise BLE.BluetoothError(why)
@@ -668,6 +711,7 @@ class LocklyClient:
         carries the current time, which is how the app keeps a lock's clock
         (QueryLockStatusCmd, isAddTime), and a wrong clock gets a second check.
         Raises BLE.BluetoothError when the lock can't be reached that way."""
+        self._refuse_if_installing(lock)
         why = BLE.available()
         if why:
             raise BLE.BluetoothError(why)
@@ -687,6 +731,8 @@ class LocklyClient:
         from concurrent.futures import ThreadPoolExecutor
 
         def one(lk):
+            if G.blocking(lk["ID"]):
+                return                  # installing firmware: left alone, its last status kept
             try:
                 self.query_status(lk)   # populates status_cache
             except Exception:  # noqa: BLE001 - one lock must not sink the batch
@@ -858,12 +904,13 @@ class LocklyClient:
         """What installing over Wi-Fi would do now. Asks the lock for its
         versions and battery (wakes it) and Lockly for its offer. Returns
         {"offer", "status", "onLock", "send": the parts the app would install
-        over MQTT, "downloadUrl", "blocked": why it can't start, or ""}."""
+        over MQTT, "downloadUrl", "files": what fetch_firmware_files gets before
+        it starts (_install_files), "blocked": why it can't start, or ""}."""
         st = self.query_status(lock) or {}
         body = self._firmware_reply(lock, st.get("lock_type"))
         offer = self._offer_from_reply(lock, body)
         plan = {"offer": offer, "status": st, "onLock": F.firmware_versions_on_lock(st), "send": [],
-                "downloadUrl": str(body.get("downloadUrl") or ""), "blocked": ""}
+                "downloadUrl": str(body.get("downloadUrl") or ""), "files": [], "blocked": ""}
         if offer["kind"] != F.FW_MULTI_PART:
             plan["blocked"] = "This lock's firmware is installed from a phone over Bluetooth: use the Lockly app."
             return plan
@@ -879,6 +926,7 @@ class LocklyClient:
             plan["blocked"] = "Lockly's offer looks wrong: " + "; ".join(problems) + "."
             return plan
         plan["send"] = F.firmware_parts_to_install(parts, plan["onLock"], F.bluetooth_chip_needs_phone(lock))
+        plan["files"] = self._install_files(lock, body, parts, plan["send"], plan["onLock"])
         battery = st.get("battery_percent")
         if not plan["send"]:
             plan["blocked"] = "Nothing to install over Wi-Fi."
@@ -891,8 +939,97 @@ class LocklyClient:
                                f"30 % or less either; change the batteries first.")
         return plan
 
+    @staticmethod
+    def _install_files(lock: dict, body: dict, parts: list[dict], send: list[dict], on_lock: dict) -> list[dict]:
+        """Every file updating to this offer needs, for fetch_firmware_files: those
+        the lock downloads for ``send``, at the address the request gives it
+        (downloadUrl and file name), fetched here only to check them first; and
+        the Bluetooth chip's when it's behind, which this computer sends itself
+        after the rest (bluetooth_chip_update), so it's in hand by then."""
+        base = str(body.get("downloadUrl") or "").rstrip("/")
+        files = [{"part": p["part"], "name": p["name"], "version": p["version"], "size_kb": p["size"],
+                  "url": f"{base}/{p['name']}"} for p in send]
+        chip = next((p for p in parts if p["part"] == "ble"), None)
+        if (chip and body.get("bleUrl") and F.bluetooth_chip_needs_phone(lock)
+                and F.version_lower(on_lock.get("ble"), chip["version"])):
+            files.append({"part": "ble", "name": chip["name"], "version": chip["version"],
+                          "size_kb": chip["size"], "url": str(body["bleUrl"])})
+        return files
+
+    # -- firmware: the files, downloaded and checked before anything is sent ----
+
+    FW_FETCH_TIMEOUT_S = 60.0
+
+    @staticmethod
+    def firmware_cache_dir() -> Path:
+        return config._config_dir() / "firmware"
+
+    def fetch_firmware_files(self, files: list[dict], on_event: Callable[[dict], None]) -> dict[str, bytes]:
+        """Download each of ``files`` ({"part", "name", "version", "size_kb",
+        "url"}) into this computer's firmware cache and check it (its size
+        against the offer's, its MD5 against the server's), before anything goes
+        to a lock. A cached copy is used again while the server has the same
+        file (its ETag), or when the server can't be reached. Returns {part:
+        the file's bytes}. Raises LocklyError naming the file that's missing or wrong."""
+        out = {}
+        for f in files:
+            label = f"{f['part']} {f['version']}"
+            on_event({"stage": "download", "progress": None, "text": f"Getting the {label} file"})
+            out[f["part"]], note = self._fetch_firmware_file(f, label)
+            on_event({"stage": "download", "progress": None, "text": f"{label}: {note}"})
+        return out
+
+    def _fetch_firmware_file(self, f: dict, label: str) -> tuple[bytes, str]:
+        name = str(f.get("name") or "")
+        if not F.firmware_file_name_ok(name):
+            raise LocklyError(f"Lockly's offer names the {label} file {name!r}, which isn't a plain file name.",
+                              "firmware")
+        if not str(f.get("url") or "").startswith("https://"):
+            # The chip's file is sent from here as it is: over plain HTTP anyone on
+            # the way could swap it, and its own CRC can be forged to match.
+            raise LocklyError(f"Lockly's offer gives the {label} file an address that isn't HTTPS.", "firmware")
+        folder = self.firmware_cache_dir()
+        path, meta_path = folder / name, folder / f"{name}.json"
+        cached, meta = None, {}
+        if path.is_file() and meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):            # unreadable record: download it again
+                meta = {}
+            data = path.read_bytes()
+            if (meta.get("md5") == F.md5_hex(data) and meta.get("url") == f["url"]
+                    and not F.firmware_file_problems(data, f.get("size_kb"), None)):
+                cached = data
+        try:
+            head = self._session.head(f["url"], timeout=self.FW_FETCH_TIMEOUT_S, allow_redirects=True)
+            head.raise_for_status()
+        except requests.RequestException as e:
+            if cached is not None:
+                return cached, f"the server can't be reached ({e}); using the copy checked when it was downloaded"
+            raise LocklyError(f"Couldn't download the {label} file: {e}", "download") from e
+        etag = head.headers.get("ETag")
+        if cached is not None and etag and etag == meta.get("etag"):
+            return cached, "already downloaded and checked; the server still has the same file"
+        try:
+            resp = self._session.get(f["url"], timeout=self.FW_FETCH_TIMEOUT_S)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            raise LocklyError(f"Couldn't download the {label} file: {e}", "download") from e
+        data = resp.content
+        etag = resp.headers.get("ETag") or etag
+        problems = F.firmware_file_problems(data, f.get("size_kb"), F.etag_md5(etag))
+        if problems:
+            raise LocklyError(f"The {label} file from Lockly ({name}) is wrong: " + "; ".join(problems) + ".",
+                              "firmware")
+        folder.mkdir(parents=True, exist_ok=True)
+        _write_atomic(path, data)
+        _write_atomic(meta_path, json.dumps({"url": f["url"], "etag": etag, "md5": F.md5_hex(data),
+                                             "bytes": len(data), "fetched": int(time.time())}).encode())
+        return data, f"downloaded and checked ({len(data)} bytes)"
+
     def firmware_install(self, lock: dict, send: list[dict], download_url: str,
-                         on_event: Callable[[dict], None], bluetooth: bool = False) -> dict:
+                         on_event: Callable[[dict], None], bluetooth: bool = False,
+                         files: list[dict] | None = None) -> dict:
         """Install ``send`` (from firmware_plan) over MQTT, then confirm it: follows
         the lock's progress, then asks the lock for its versions until every part
         reports the offered one (FW_VERIFY_S at most). Calls on_event with
@@ -902,16 +1039,37 @@ class LocklyClient:
         that way), a lock whose Wi-Fi isn't back after FW_BLE_AFTER_S is asked
         over Bluetooth, which also sets its clock. Returns {"versions"}. Raises
         LocklyError when the lock reports a failure, goes quiet, or doesn't come
-        back on the new versions."""
+        back on the new versions.
+
+        First, before anything is sent, every file in ``files`` (the plan's;
+        without it, those of ``send``) is downloaded and checked
+        (fetch_firmware_files), and a missing or wrong one stops it there. From
+        the request on, the install is held (guard.firmware_install): nothing
+        else goes to this lock, this computer stays awake, and Ctrl+C on the
+        main thread takes guard.FORCE_PRESSES presses. The first event after
+        that carries "warning" when this computer may still sleep."""
         if not send:
             raise ValueError("Nothing to install.")
         if self.connection == "bluetooth":
             raise LocklyError("The connection is set to Bluetooth only, and firmware installs over Wi-Fi.",
                               "bluetooth")
+        if files is None:
+            base = download_url.rstrip("/")
+            files = [{"part": p["part"], "name": p.get("name"), "version": p["version"],
+                      "size_kb": p.get("size"), "url": f"{base}/{p.get('name')}"} for p in send]
+        self.fetch_firmware_files(files, on_event)
         ch = self._mqtt_channel()
         if ch is None:
             raise LocklyError("Couldn't connect to Lockly's device channel.")
         payload = F.build_firmware_upgrade(str(uuid.uuid4()), lock["ID"], download_url, send)
+        what = f"{_lock_label(lock)}: " + ", ".join(f"{p['part']} {p['version']}" for p in send)
+        with G.firmware_install(str(lock["ID"]), what) as warning:
+            return self._install_and_confirm(lock, send, ch, payload, _shielded(on_event), bluetooth, warning)
+
+    def _install_and_confirm(self, lock: dict, send: list[dict], ch, payload: dict,
+                             on_event: Callable[[dict], None], bluetooth: bool, warning: str) -> dict:
+        on_event({"stage": "install", "progress": None, "text": "Sending the request to the lock",
+                  **({"warning": warning} if warning else {})})
 
         def progress(body: dict) -> None:
             # The messages name no part, only a stage and a percentage
@@ -975,10 +1133,12 @@ class LocklyClient:
         this computer, by the Dialog SUOTA protocol app 3.3.4 uses for it
         (ble.suota_update). Checks first: Lockly offers a newer Bluetooth part,
         the lock answers over Bluetooth with a lower version and enough battery,
-        and the image matches its own header. Then asks the lock over Bluetooth
-        until it reports the new version, which also sets its clock. Returns
-        {"before", "after"}. Raises LocklyError (refused or not confirmed) or
-        BLE.BluetoothError (not reachable, or the lock stopped the update)."""
+        and the image (from this computer's firmware cache, fetch_firmware_files)
+        matches its own header. Then, held like firmware_install's (guard), sends
+        it and asks the lock over Bluetooth until it reports the new version,
+        which also sets its clock. Returns {"before", "after"}. Raises
+        LocklyError (refused or not confirmed) or BLE.BluetoothError (not
+        reachable, or the lock stopped the update)."""
         name = str(lock.get("blename") or "")
         st = self.bluetooth_status(lock)
         if not st:
@@ -1003,17 +1163,24 @@ class LocklyClient:
         battery = st.get("battery_percent")
         if battery is None or st.get("battery_invalid") or battery < F.FW_MIN_BATTERY:
             raise LocklyError(f"The battery is at {battery} %: change it before updating.", "firmware")
-        on_event({"stage": "download", "text": f"Downloading Bluetooth chip {offered}"})
-        resp = self._session.get(url, timeout=60)
-        resp.raise_for_status()
-        image = resp.content
+        file = {"part": "ble", "version": str(offered), "url": str(url),
+                "name": str(body.get("bleName") or str(url).rstrip("/").rsplit("/", 1)[-1]),
+                "size_kb": _int_or_none(body.get("bleSize"))}
+        image = self.fetch_firmware_files([file], on_event)["ble"]
         try:
             info = BLE.image_info(image)
         except ValueError as e:
             raise LocklyError(f"Lockly's Bluetooth-chip file is unusable: {e}", "firmware") from e
         if not info["version"].startswith(str(offered)):
             raise LocklyError(f"The file is version {info['version']}, not the offered {offered}.", "firmware")
-        on_event({"stage": "install", "progress": 0, "text": f"Sending Bluetooth chip {before} → {offered}"})
+        with G.firmware_install(str(lock["ID"]), f"{_lock_label(lock)}: Bluetooth chip {offered}") as warning:
+            return self._send_chip_and_confirm(lock, name, image, before, str(offered), _shielded(on_event),
+                                               warning)
+
+    def _send_chip_and_confirm(self, lock: dict, name: str, image: bytes, before, offered: str,
+                               on_event: Callable[[dict], None], warning: str) -> dict:
+        on_event({"stage": "install", "progress": 0, "text": f"Sending Bluetooth chip {before} → {offered}",
+                  **({"warning": warning} if warning else {})})
         BLE.suota_update(name, image, lambda done, total: on_event(
             {"stage": "install", "progress": done * 100 // total, "text": f"Sent {done} of {total} blocks"}))
         on_event({"stage": "verify", "text": "Sent; waiting for the lock to answer on the new version"})
@@ -1045,6 +1212,7 @@ class LocklyClient:
     def _bluetooth_session(self, lock: dict):
         """One Bluetooth connection for several commands on this thread; yields
         (link, status) with the status check's nonce. Raises BLE.BluetoothError."""
+        self._refuse_if_installing(lock)
         link = BLE.BleLink(str(lock.get("blename") or ""))
         try:
             link.connect()

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from .. import ble as BLE
 from .. import config
 from .. import features as F
+from .. import guard as G
 from .. import protocol as P
 from ..const import CONNECTIONS
 from ..features import lock_tz  # noqa: F401  (re-exported for callers)
@@ -245,7 +246,9 @@ class Api:
         return {"signedIn": True, "email": email, "storedIn": where}
 
     def sign_out(self) -> dict:
-        """Forget the saved login and end the session."""
+        """Forget the saved login and end the session. Refused while a firmware
+        install runs: ending the session would cut it off from the lock."""
+        self._refuse_while_installing("Signing out")
         cfg = config.load_config()
         config._save_credential(cfg, cfg.get("email", ""), None)
         self.close()
@@ -259,6 +262,7 @@ class Api:
                 self._client = None
 
     def _set_client(self, client: LocklyClient) -> None:
+        self._refuse_while_installing("Signing in again")
         self.close()
         client.connection = config.connection_mode(config.load_config())
         self._client = client
@@ -274,6 +278,7 @@ class Api:
         """Save how commands reach a lock: "auto", "remote" or "bluetooth"."""
         if mode not in CONNECTIONS:
             raise ValueError(f"Unknown connection setting {mode!r}.")
+        self._refuse_while_installing("Changing how commands reach a lock")
         cfg = config.load_config()
         cfg["connection"] = mode
         config.save_config(cfg)
@@ -765,10 +770,10 @@ class Api:
         # then "done" or "behind" by the version it reports for that part, or
         # "unconfirmed" if the install ends without it saying.
         job = {"running": True, "ok": None, "stage": "start", "progress": None, "away": None,
-               "text": "Sending the request", "error": "", "versions": {},
+               "text": "Getting the files", "error": "", "warning": "", "versions": {},
                "clockKnown": False, "clockOffset": None,
                "parts": [{"part": p["part"], "name": self._PART_NAMES[p["part"]], "version": p["version"],
-                          "current": plan["onLock"].get(p["part"]) or "", "state": "sending", "now": ""}
+                          "current": plan["onLock"].get(p["part"]) or "", "state": "files", "now": ""}
                          for p in plan["send"]]}
         with self._fw_lock:
             if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
@@ -798,10 +803,10 @@ class Api:
             raise ValueError("Lockly offers no Bluetooth-chip firmware for this lock.")
         current = (c.status_cache.get(lock["ID"]) or {}).get("ble_version") or ""
         job = {"running": True, "ok": None, "stage": "start", "progress": None, "away": None,
-               "text": "Looking for the lock over Bluetooth", "error": "", "versions": {},
+               "text": "Looking for the lock over Bluetooth", "error": "", "warning": "", "versions": {},
                "clockKnown": False, "clockOffset": None,
                "parts": [{"part": "ble", "name": self._PART_NAMES["ble"], "version": offered,
-                          "current": current, "state": "sending", "now": ""}]}
+                          "current": current, "state": "files", "now": ""}]}
         with self._fw_lock:
             if (self._fw_jobs.get(lock["ID"]) or {}).get("running"):
                 raise ValueError("A firmware install is already running on this door.")
@@ -813,16 +818,33 @@ class Api:
                          kwargs={"install": install}, name="locklyctl-firmware", daemon=True).start()
         return self.firmware_install_status(lock_id)
 
+    def firmware_jobs(self) -> list[str]:
+        """The doors (lock IDs) with a firmware install running, so a page that
+        was reloaded follows them again."""
+        with self._fw_lock:
+            return [lock_id for lock_id, job in self._fw_jobs.items() if job.get("running")]
+
+    def installing(self) -> list[str]:
+        """Installs past their first write (guard.running()): the window
+        doesn't close while there are any."""
+        return G.running()
+
+    def _refuse_while_installing(self, doing: str) -> None:
+        if self.firmware_jobs():
+            raise ValueError(f"{doing} has to wait: a firmware install is running. It stops by itself "
+                             "when the install finishes or fails.")
+
     def firmware_install_status(self, lock_id: str) -> dict:
         """Where the firmware install on this door is: {"running", "ok", "stage",
-        "progress", "away", "text", "error", "parts", "versions"}, or running
-        False and ok None when none was started."""
+        "progress", "away", "text", "error", "warning", "parts", "versions"},
+        or running False and ok None when none was started. A part's state is
+        "files" while the files are fetched and checked, then "sending"."""
         lock = self._lock(lock_id)
         with self._fw_lock:
             job = self._fw_jobs.get(lock["ID"])
             if not job:
                 return {"running": False, "ok": None, "stage": "", "progress": None, "away": None,
-                        "text": "", "error": "", "parts": [], "versions": {},
+                        "text": "", "error": "", "warning": "", "parts": [], "versions": {},
                         "clockKnown": False, "clockOffset": None}
             return {**job, "parts": [dict(p) for p in job["parts"]]}
 
@@ -841,6 +863,11 @@ class Api:
             with self._fw_lock:
                 job.update(stage=event.get("stage"), progress=event.get("progress"),
                            away=event.get("away"), text=event.get("text") or "")
+                if event.get("warning"):
+                    job["warning"] = event["warning"]
+                if event.get("stage") != "download":         # the files are in hand: it has started
+                    for p in job["parts"]:
+                        p["state"] = "sending" if p["state"] == "files" else p["state"]
                 if "clockOffset" in event:
                     job.update(clockKnown=True, clockOffset=event["clockOffset"])
                 if "versions" in event:
@@ -851,7 +878,7 @@ class Api:
         try:
             result = (install(on_event) if install else
                       self._c().firmware_install(lock, plan["send"], plan["downloadUrl"], on_event,
-                                                 bluetooth=bluetooth))
+                                                 bluetooth=bluetooth, files=plan.get("files")))
         except (LocklyError, ValueError, BLE.BluetoothError) as e:
             outcome = {"ok": False, "error": str(e)}
         except Exception as e:          # thread boundary: record it, or the page would wait forever
@@ -863,7 +890,9 @@ class Api:
             if outcome["ok"]:
                 self._mark_parts(job["parts"], result["versions"])
             for p in job["parts"]:
-                if p["state"] in ("sending", "restarting"):
+                if p["state"] == "files":                    # stopped before anything was sent
+                    p["state"] = "notSent"
+                elif p["state"] in ("sending", "restarting"):
                     p["state"] = "unconfirmed"
             job.update(running=False, **outcome)
 

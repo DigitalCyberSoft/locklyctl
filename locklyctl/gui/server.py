@@ -138,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     bridge = Bridge()
     print(f"locklyctl is running at {bridge.url}\nKeep this window open; press Ctrl+C to stop.")
     webbrowser.open(bridge.url)
+    from .. import guard
+    guard.hold_signals_while_installing()       # Ctrl+C during a firmware install takes several presses
     try:
         bridge.serve_forever()
     except KeyboardInterrupt:

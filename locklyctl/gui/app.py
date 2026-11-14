@@ -7,6 +7,7 @@ add ``--browser`` to open it in your web browser instead (see server.py).
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -33,11 +34,26 @@ def main(argv: list[str] | None = None) -> int:
     window = webview.create_window(
         "locklyctl", url=(WEB_DIR / "index.html").as_uri(), js_api=api,
         width=1180, height=780, min_size=(860, 600), background_color="#E4E7E2")
+    window.events.closing += lambda: _may_close(window, api)
     window.events.closed += api.close
     # Windows and macOS show the .exe's or .app's own icon (packaging/locklyctl.ico, .icns).
     icon = str(WEB_DIR / "icon.png") if sys.platform.startswith("linux") else None
     webview.start(debug=debug, gui=_linux_backend(), icon=icon)
     return 0
+
+
+def _may_close(window, api: Api) -> bool:
+    """The window's closing handler: False keeps it open while a firmware
+    install runs (pywebview 6 cancels the close when a handler returns False),
+    and the page says why. Quitting then would cut the install off midway."""
+    running = api.installing()
+    if not running:
+        return True
+    import threading
+    script = f"window.closeRefused && window.closeRefused({json.dumps(running)})"
+    # Not on this (the GUI) thread: evaluate_js waits for the page.
+    threading.Thread(target=window.evaluate_js, args=(script,), daemon=True).start()
+    return False
 
 
 def _linux_backend() -> str | None:

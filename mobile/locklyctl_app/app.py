@@ -29,6 +29,10 @@ class LocklyctlApp(toga.App):
         self.main_window.show()
 
     def on_exit(self) -> bool:
+        # Not while a firmware install runs: stopping the bridge would cut it
+        # off midway. The install's page says the app stays open until it ends.
+        if self.bridge.api.installing():
+            return False
         self.bridge.stop()
         return True
 

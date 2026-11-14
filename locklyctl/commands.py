@@ -27,6 +27,7 @@ import sys
 from . import ble as BLE
 from . import cli as C
 from . import features as F
+from . import guard as G
 from .transport import LocklyClient, LocklyError
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
@@ -257,19 +258,26 @@ def _firmware(client: LocklyClient, args) -> int:
             raise UsageError("firmware --install needs --yes when it can't ask for confirmation")
         print(C.yellow("  The lock downloads and installs it itself, then restarts; leave the door "
                        "alone until this finishes."))
+        print(C.yellow(_HELD))
         if not C.confirm(f"  install {send} on {C.bold(_name(lock))}?", default=False):
             return EXIT_OK
     last = [""]
 
     def progress(event: dict) -> None:
+        if event.get("warning"):
+            print(C.yellow(f"    {event['warning']}"), flush=True)
         if event["text"] != last[0]:
             last[0] = event["text"]
-            print(C.dim(f"    {event['text']}"))
+            print(C.dim(f"    {event['text']}"), flush=True)
 
-    result = client.firmware_install(lock, plan["send"], plan["downloadUrl"], progress)
+    result = client.firmware_install(lock, plan["send"], plan["downloadUrl"], progress, files=plan["files"])
     print(C.green(f"  {_name(lock)}: installed, the lock reports "
                   + ", ".join(f"{p['part']} {result['versions'].get(p['part'])}" for p in plan["send"]) + " ✓"))
     return EXIT_OK
+
+
+_HELD = (f"  The files are downloaded and checked first. Once the install starts, Ctrl+C has to be "
+         f"pressed {G.FORCE_PRESSES} times to stop it, and this computer is kept awake.")
 
 
 def _bluetooth_chip(client: LocklyClient, lock: dict, args) -> int:
@@ -278,11 +286,14 @@ def _bluetooth_chip(client: LocklyClient, lock: dict, args) -> int:
             raise UsageError("firmware --bluetooth-chip needs --yes when it can't ask for confirmation")
         print(C.yellow("  This rewrites the lock's Bluetooth chip over Bluetooth; keep this computer "
                        "next to the door until it finishes."))
+        print(C.yellow(_HELD))
         if not C.confirm(f"  update the Bluetooth chip of {C.bold(_name(lock))}?", default=False):
             return EXIT_OK
     shown = {"text": "", "pct": -10}
 
     def progress(event: dict) -> None:
+        if event.get("warning"):
+            print(C.yellow(f"    {event['warning']}"), flush=True)
         pct = event.get("progress")
         if event["stage"] == "install" and pct is not None:
             if pct < shown["pct"] + 10 and pct != 100:

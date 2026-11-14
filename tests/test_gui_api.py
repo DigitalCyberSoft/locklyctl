@@ -122,11 +122,12 @@ class FakeClient:
     firmware_offer = LocklyClient.firmware_offer
     firmware_plan = LocklyClient.firmware_plan
     _offer_from_reply = LocklyClient._offer_from_reply
+    _install_files = staticmethod(LocklyClient._install_files)
     _FW_PARTS = LocklyClient._FW_PARTS
     fw_install_error = None
 
-    def firmware_install(self, lock, send, download_url, on_event, bluetooth=False):
-        self.fw_bluetooth = bluetooth
+    def firmware_install(self, lock, send, download_url, on_event, bluetooth=False, files=None):
+        self.fw_bluetooth, self.fw_files = bluetooth, files
         on_event({"stage": "install", "progress": 50, "text": "Installing 50 %"})
         if self.fw_install_error:
             raise self.fw_install_error
@@ -318,6 +319,98 @@ def test_firmware_install(api):
         raise AssertionError("installed on a low battery")
 
 
+def _until_done(api, lock_id):
+    for _ in range(100):
+        st = api.firmware_install_status(lock_id)
+        if not st["running"]:
+            return st
+        threading.Event().wait(0.02)
+    raise AssertionError("install didn't finish")
+
+
+@_api_in_tmp_home
+def test_an_install_holds_off_sign_out_and_settings(api):
+    """While an install runs there's no signing out or in and no connection
+    change (each would cut it off from the lock), a reloaded page finds it,
+    its parts read "files" until the files are in hand, and the plan's files
+    go to the install."""
+    api.sign_in("a@b", "right", False)
+    c = api._client
+    reported = FakeClient.query_status(c, None)
+    c.query_status = lambda lock: {**reported, "battery_percent": 80}
+    gate, seen = threading.Event(), []
+    real = c.firmware_install
+
+    def slow(lock, send, url, on_event, bluetooth=False, files=None):
+        on_event({"stage": "download", "progress": None, "text": "back 1.00.76: downloaded and checked"})
+        seen.append([p["state"] for p in api.firmware_install_status(lock["ID"])["parts"]])
+        gate.wait(5)
+        return real(lock, send, url, on_event, bluetooth, files)
+    c.firmware_install = slow
+    r = api.firmware(B2)
+    api.firmware_install(B2, r["install"]["parts"])
+    for _ in range(100):
+        if seen:
+            break
+        threading.Event().wait(0.02)
+    assert seen == [["files"]] and api.firmware_jobs() == [B2]
+    for doing, call in (("Signing out", api.sign_out), ("Changing how", lambda: api.set_connection("remote")),
+                        ("Signing in again", lambda: api.sign_in("a@b", "right", False))):
+        try:
+            call()
+        except ValueError as e:
+            assert str(e).startswith(doing) and "firmware install is running" in str(e)
+        else:
+            raise AssertionError(f"{doing} went ahead during an install")
+    assert api._client is c and api.connection()["mode"] == "auto"
+    gate.set()
+    st = _until_done(api, B2)
+    assert st["ok"] and [p["state"] for p in st["parts"]] == ["done"]
+    assert c.fw_files and c.fw_files[0]["part"] == "back" and c.fw_files[0]["url"].endswith("/back.bin")
+    assert api.firmware_jobs() == [] and api.sign_out()["signedIn"] is False
+
+
+@_api_in_tmp_home
+def test_an_install_stopped_by_its_files_sent_nothing(api):
+    api.sign_in("a@b", "right", False)
+    c = api._client
+
+    reported = FakeClient.query_status(c, None)
+    c.query_status = lambda lock: {**reported, "battery_percent": 80}
+
+    def bad(lock, send, url, on_event, bluetooth=False, files=None):
+        on_event({"stage": "download", "progress": None, "text": "Getting the back 1.00.76 file"})
+        raise LocklyError("The back 1.00.76 file from Lockly (back.bin) is wrong: it is 9 bytes.", "firmware")
+    c.firmware_install = bad
+    api.firmware_install(B2, api.firmware(B2)["install"]["parts"])
+    st = _until_done(api, B2)
+    assert st["ok"] is False and "is wrong" in st["error"]
+    assert [p["state"] for p in st["parts"]] == ["notSent"]
+
+
+def test_the_window_stays_open_while_installing():
+    from locklyctl.gui import app as A
+
+    class Window:
+        def __init__(self):
+            self.js, self.ran = [], threading.Event()
+
+        def evaluate_js(self, script):
+            self.js.append(script)
+            self.ran.set()
+
+    class Running:
+        now: list = []
+
+        def installing(self):
+            return self.now
+    w, a = Window(), Running()
+    assert A._may_close(w, a) is True and w.js == []
+    a.now = ["11X: front 1.00.95"]
+    assert A._may_close(w, a) is False
+    assert w.ran.wait(2) and "closeRefused" in w.js[0] and "11X: front 1.00.95" in w.js[0]
+
+
 @_api_in_tmp_home
 def test_activity_reads_getlkhist_fields(api):
     api.sign_in("a@b", "right", False)
@@ -373,7 +466,7 @@ def test_firmware_job_follows_each_part_and_the_clock(api):
            "parts": [part("front", "Front board", "1.00.95", "1.00.87"), part("back", "Back board", "1.00.76", "1.00.72")]}
     seen = []
 
-    def install(lock, send, url, on_event, bluetooth=False):
+    def install(lock, send, url, on_event, bluetooth=False, files=None):
         for ev in ({"stage": "install", "progress": 50, "text": "Installing 50 %"},
                    {"stage": "verify", "progress": None, "away": 0, "text": "The lock is restarting"},
                    {"stage": "verify", "progress": None, "versions": {"front": "1.00.95", "back": "1.00.72"},
