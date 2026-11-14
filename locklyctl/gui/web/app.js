@@ -917,6 +917,35 @@ $("btn-ble-time").addEventListener("click", async (ev) => {
 
 // ── Wi-Fi, given to the lock over Bluetooth ────────────────────────────
 
+// Per network: "saved" (locklyctl has its password), "system" (this computer
+// has the network saved) or "". Passwords themselves never reach the page.
+let wifiKnown = {};
+const WIFI_MARK = { saved: " · password saved", system: " · saved on this computer" };
+
+function showWifiPassword() {
+  const f = $("wifi-form"), k = wifiKnown[f.ssid.value] || "";
+  for (const o of f.ssid.options) o.textContent = o.dataset.label + (WIFI_MARK[wifiKnown[o.value]] || "");
+  f.password.placeholder = k ? "Leave empty to use the saved password" : "";
+  $("wifi-pw-note").textContent = k === "saved" ? "locklyctl has this network's password saved."
+    : k === "system" ? "This computer has this network saved: leave the password empty to use it "
+      + "(on a Mac, macOS asks for an administrator's password first)."
+      : "The password is saved once the lock has joined the network with it.";
+  $("wifi-forget").hidden = k !== "saved";
+}
+$("wifi-form").ssid.addEventListener("change", showWifiPassword);
+
+$("wifi-forget").addEventListener("click", async (ev) => {
+  const ssid = $("wifi-form").ssid.value;
+  await busy(ev.currentTarget, async () => {
+    try {
+      const r = await call("forget_wifi_password", ssid);
+      wifiKnown[ssid] = "";
+      showWifiPassword();
+      toast(r.forgotten ? `Forgot the saved password for ${ssid}.` : `No password was saved for ${ssid}.`);
+    } catch (e) { toast(e.message, true); }
+  });
+});
+
 $("btn-wifi-scan").addEventListener("click", async (ev) => {
   const v = current();
   const out = $("wifi-out"), form = $("wifi-form");
@@ -925,8 +954,10 @@ $("btn-wifi-scan").addEventListener("click", async (ev) => {
   await busy(ev.currentTarget, async () => {
     try {
       const nets = await call("bluetooth_wifi_scan", v.id);
-      form.ssid.replaceChildren(...nets.map((n) => h("option", { value: n.ssid }, `${n.ssid} (${n.rssi} dBm)`)));
+      wifiKnown = Object.fromEntries(nets.map((n) => [n.ssid, n.known || ""]));
+      form.ssid.replaceChildren(...nets.map((n) => h("option", { value: n.ssid, "data-label": `${n.ssid} (${n.rssi} dBm)` })));
       form.hidden = !nets.length;
+      showWifiPassword();
       out.replaceChildren(h("p", { class: "muted" }, nets.length ? "" : "The lock sees no networks."));
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
@@ -943,10 +974,14 @@ $("wifi-form").addEventListener("submit", async (ev) => {
   out.replaceChildren(h("p", { class: "muted" }, `Saving ${f.ssid.value} on the lock and waiting for it to join…`));
   await busy(f.querySelector("button"), async () => {
     try {
-      const r = await call("bluetooth_wifi_setup", v.id, f.ssid.value, f.password.value);
+      const ssid = f.ssid.value;
+      const r = await call("bluetooth_wifi_setup", v.id, ssid, f.password.value);
       f.password.value = "";
       updateLock(r.lock);
-      out.replaceChildren(h("p", { class: r.ok ? "ok" : "form-error" }, r.ok ? `Connected to ${f.ssid.value}.` : `It didn't connect: ${r.text}.`));
+      wifiKnown[ssid] = r.known;
+      showWifiPassword();
+      fill(out, h("p", { class: r.ok ? "ok" : "form-error" }, r.ok ? `Connected to ${ssid}.` : `It didn't connect: ${r.text}.`),
+        r.note ? h("p", { class: "fine" }, r.note) : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
 });

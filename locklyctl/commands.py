@@ -10,6 +10,8 @@
     locklyctl welcome LOCK query
     locklyctl rain LOCK query|on|off [--send]
     locklyctl firmware LOCK [--install [--yes]] [--bluetooth-chip [--yes]]
+    locklyctl wifi LOCK [--ssid NAME [--password-file F | --ask-password] [--yes]]
+    locklyctl wifi --ssid NAME --forget
 
 LOCK is a lock's name (case-insensitive; a unique prefix will do) or its ID.
 They sign in with the credential saved by the interactive menu. Experimental
@@ -28,6 +30,7 @@ from . import ble as BLE
 from . import cli as C
 from . import features as F
 from . import guard as G
+from . import wifi_passwords as W
 from .transport import LocklyClient, LocklyError
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
@@ -102,9 +105,12 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p = sub.add_parser("wifi", help="the lock's Wi-Fi over Bluetooth from this computer: see the networks "
                                      "it sees, or give it one (as the app's Wi-Fi setup does)")
-    p.add_argument("lock")
+    p.add_argument("lock", nargs="?")
     p.add_argument("--ssid", help="the network to give the lock; without it, list what the lock sees")
-    p.add_argument("--password-file", help="read the Wi-Fi password from this file (else it's asked for)")
+    p.add_argument("--password-file", help="read the Wi-Fi password from this file (else the saved one, "
+                                           "this computer's, or it's asked for)")
+    p.add_argument("--ask-password", action="store_true", help="type the password even if one is saved")
+    p.add_argument("--forget", action="store_true", help="forget the password saved for --ssid, then stop")
     p.add_argument("--country", help="two-letter country code for Wi-Fi rules (default: this computer's)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p = sub.add_parser("firmware", help="newer firmware Lockly offers, next to what the lock "
@@ -119,6 +125,8 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command == "wifi" and getattr(args, "forget", False):
+        return _forget_wifi(args)                   # no Lockly sign-in needed
     try:
         client = C.login_flow(prompt=sys.stdin.isatty(), quiet=True)
     except (EOFError, KeyboardInterrupt):
@@ -319,20 +327,48 @@ def _country() -> str:
     return tag.split("_")[1][:2].upper() if "_" in tag else "US"
 
 
-def _wifi(client: LocklyClient, args) -> int:
-    lock = find_lock(client.locks, args.lock)
+def _forget_wifi(args) -> int:
     if not args.ssid:
-        for n in sorted(client.bluetooth_wifi_scan(lock), key=lambda n: n["rssi"]):
-            print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}")
-        return EXIT_OK
+        print("locklyctl: wifi --forget needs --ssid", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"  Forgot the saved password for {args.ssid}." if W.forget(args.ssid)
+          else f"  No password was saved for {args.ssid}.")
+    return EXIT_OK
+
+
+def _wifi_password(ssid: str, args) -> tuple[str, str]:
+    """(password, source): --password-file, else the saved one or this
+    computer's (wifi_passwords.resolve) unless --ask-password, else typed."""
     if args.password_file:
         with open(args.password_file, encoding="utf-8") as f:
-            password = f.read().rstrip("\r\n")
-    elif sys.stdin.isatty():
-        import getpass
-        password = getpass.getpass(f"  Wi-Fi password for {args.ssid}: ")
-    else:
-        raise UsageError("wifi --ssid needs --password-file when it can't ask")
+            return f.read().rstrip("\r\n"), "file"
+    if not args.ask_password:
+        if W.PLATFORM == "darwin" and W.known([ssid])[ssid] == "system":
+            print(C.dim("  macOS asks for an administrator's password to read it from the keychain"))
+        password, source, why = W.resolve(ssid)
+        if password:
+            print(C.dim(f"  using the password {W.source_text(source)} for {ssid}"))
+            return password, source
+        if why:
+            print(C.dim(f"  {why}"))
+    if not sys.stdin.isatty():
+        raise UsageError(f"wifi --ssid needs --password-file when it can't ask (no password is saved for {ssid})")
+    import getpass
+    return getpass.getpass(f"  Wi-Fi password for {ssid}: "), "typed"
+
+
+def _wifi(client: LocklyClient, args) -> int:
+    if not args.lock:
+        raise UsageError("wifi needs a lock (or --ssid NAME --forget)")
+    lock = find_lock(client.locks, args.lock)
+    if not args.ssid:
+        nets = sorted(client.bluetooth_wifi_scan(lock), key=lambda n: n["rssi"])
+        known = W.known([n["ssid"] for n in nets])
+        for n in nets:
+            mark = {"saved": "  (password saved)", "system": "  (saved on this computer)"}.get(known[n["ssid"]], "")
+            print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}{mark}")
+        return EXIT_OK
+    password, source = _wifi_password(args.ssid, args)
     if not args.yes:
         if not sys.stdin.isatty():
             raise UsageError("wifi --ssid needs --yes when it can't ask for confirmation")
@@ -348,6 +384,9 @@ def _wifi(client: LocklyClient, args) -> int:
                                     on_event=progress)
     ok = r["code"] == 3
     print((C.green if ok else C.red)(f"  {_name(lock)}: {r['text']}"))
+    note = W.after_setup(args.ssid, password, source, r["code"])
+    if note:
+        print(C.dim(f"  {note}"))
     return EXIT_OK if ok else EXIT_FAIL
 
 

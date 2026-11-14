@@ -18,6 +18,7 @@ from .. import config
 from .. import features as F
 from .. import guard as G
 from .. import protocol as P
+from .. import wifi_passwords as W
 from ..const import CONNECTIONS
 from ..features import lock_tz  # noqa: F401  (re-exported for callers)
 from ..transport import LocklyClient, LocklyError
@@ -928,7 +929,9 @@ class Api:
 
     def bluetooth_wifi_scan(self, lock_id: str) -> list[dict]:
         """The Wi-Fi networks the lock sees, asked over Bluetooth from this
-        computer: [{"ssid", "rssi", "routerType"}], strongest first, one per name."""
+        computer: [{"ssid", "rssi", "routerType", "known"}], strongest first,
+        one per name. "known" is "saved" (locklyctl saved its password),
+        "system" (this computer has the network saved) or ""."""
         lock = self._lock(lock_id)
         why = BLE.available()
         if why:
@@ -941,17 +944,28 @@ class Api:
         for n in sorted(seen, key=lambda n: n["rssi"]):
             if n["ssid"] and n["ssid"] not in best:
                 best[n["ssid"]] = {"ssid": n["ssid"], "rssi": -n["rssi"], "routerType": n["router_type"]}
-        return list(best.values())
+        known = W.known(list(best))
+        return [{**n, "known": known[n["ssid"]]} for n in best.values()]
 
     def bluetooth_wifi_setup(self, lock_id: str, ssid: str, password: str, country: str = "") -> dict:
         """Give the lock a Wi-Fi network over Bluetooth, then ask until it says
-        how joining went: {"ok", "text", "lock"}. The password isn't stored or logged."""
+        how joining went: {"ok", "text", "note", "known", "lock"}. An empty password
+        means the saved one, or this computer's (wifi_passwords.resolve). A
+        password the lock joins with is saved, and a saved one it calls wrong
+        is forgotten ("note" says which). Passwords never come back to the page
+        and aren't logged."""
         lock = self._lock(lock_id)
         why = BLE.available()
         if why:
             raise ValueError(why)
         if not ssid:
             raise ValueError("Choose a network.")
+        source = "typed"
+        if not password:
+            password, source, none_why = W.resolve(ssid)
+            if not password:
+                raise ValueError(f"Type the password for {ssid}: none is saved for it"
+                                 + (f" ({none_why})." if none_why else "."))
         import locale
         tag = locale.getlocale()[0] or ""
         cc = (country or (tag.split("_")[1][:2] if "_" in tag else "US")).upper()
@@ -959,7 +973,13 @@ class Api:
             r = self._c().bluetooth_wifi_setup(lock, ssid, password, country=cc, on_event=lambda e: None)
         except BLE.BluetoothError as e:
             raise LocklyError(str(e), "bluetooth") from e
-        return {"ok": r["code"] == 3, "text": r["text"], "lock": self._view(lock)}
+        note = W.after_setup(ssid, password, source, r["code"])
+        return {"ok": r["code"] == 3, "text": r["text"], "note": note, "known": W.known([ssid])[ssid],
+                "lock": self._view(lock)}
+
+    def forget_wifi_password(self, ssid: str) -> dict:
+        """Forget the password locklyctl saved for this network: {"forgotten"}."""
+        return {"forgotten": W.forget(ssid)}
 
     # ── connection test ──────────────────────────────────────────────────
 

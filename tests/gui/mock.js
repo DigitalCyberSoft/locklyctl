@@ -64,8 +64,13 @@ window.pywebview = {
       install: { blocked: "", parts: [
         { part: "front", name: "Front board", version: "1.00.95", current: "1.00.87" },
         { part: "back", name: "Back board", version: "1.00.76", current: "1.00.72" }] } }; },
-    async bluetooth_wifi_scan() { await wait(800); return [{ ssid: "Building Wi-Fi", rssi: -51, routerType: 3 }, { ssid: "Guest", rssi: -62, routerType: 3 }]; },
-    async bluetooth_wifi_setup(id, ssid) { await wait(1500); return { ok: true, text: "connected", lock: { ...find(id) } }; },
+    async bluetooth_wifi_scan() { await wait(800); return [{ ssid: "Building Wi-Fi", rssi: -51, routerType: 3, known: "system" }, { ssid: "Guest", rssi: -62, routerType: 3, known: "" }]; },
+    async bluetooth_wifi_setup(id, ssid, password) {
+      await wait(1500);
+      return { ok: true, text: "connected", note: password ? `Saved the password for ${ssid} in the keyring.` : "",
+        known: password ? "saved" : "system", lock: { ...find(id) } };
+    },
+    async forget_wifi_password() { await wait(100); return { forgotten: true }; },
     async connection() { return { mode: connection, bluetooth: "" }; },
     async set_connection(mode) { await wait(100); connection = mode; return { mode, bluetooth: "" }; },
     async bluetooth_check() { await wait(600); return { available: true, inRange: false, detail: "The lock isn't in Bluetooth range of this computer." }; },

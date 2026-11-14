@@ -1,4 +1,5 @@
 """GUI backend tests — the Api class with a fake client; no window, no network."""
+import json
 import os
 import sys
 import tempfile
@@ -583,18 +584,40 @@ def test_bluetooth_wifi_scan_and_setup(api):
                                           {"ssid": "Net A", "rssi": 51, "router_type": 3},
                                           {"ssid": "", "rssi": 40, "router_type": 0},
                                           {"ssid": "Guest", "rssi": 70, "router_type": 3}]
-    given = []
+    from locklyctl import wifi_passwords as W
+    given, codes = [], [3]
     c.bluetooth_wifi_setup = lambda lock, ssid, pw, country, on_event: given.append((ssid, pw, country)) or {
-        "code": 3, "text": "connected"}
-    real = BLE.available
+        "code": codes[0], "text": "connected" if codes[0] == 3 else "wrong password"}
+    real, real_nmcli = BLE.available, W.NMCLI
     BLE.available = lambda: ""
+    W.NMCLI = "/nonexistent/nmcli"                         # not this computer's NetworkManager
     try:
-        assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3},
-                                              {"ssid": "Guest", "rssi": -70, "routerType": 3}]
+        assert api.bluetooth_wifi_scan(B2) == [{"ssid": "Net A", "rssi": -51, "routerType": 3, "known": ""},
+                                              {"ssid": "Guest", "rssi": -70, "routerType": 3, "known": ""}]
+        try:
+            api.bluetooth_wifi_setup(B2, "Net A", "", "ph")             # nothing saved, nothing typed
+        except ValueError as e:
+            assert "Type the password for Net A" in str(e) and given == []
+        else:
+            raise AssertionError("set up a network with no password")
         r = api.bluetooth_wifi_setup(B2, "Net A", "pw-1", "ph")
         assert r["ok"] and given == [("Net A", "pw-1", "PH")]
+        assert r["known"] == "saved" and "Saved the password for Net A" in r["note"]   # joined: kept
+        assert "pw-1" not in json.dumps(r)                              # never back to the page
+        assert api.bluetooth_wifi_scan(B2)[0]["known"] == "saved"
+        r = api.bluetooth_wifi_setup(B2, "Net A", "", "ph")             # empty: the saved one
+        assert r["ok"] and given[-1] == ("Net A", "pw-1", "PH") and r["note"] == ""
+        codes[0] = 4                                                    # the network's password changed
+        r = api.bluetooth_wifi_setup(B2, "Net A", "", "ph")
+        assert not r["ok"] and "forgotten" in r["note"] and r["known"] == ""
+        api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph")              # wrong: not kept
+        assert api.bluetooth_wifi_scan(B2)[1]["known"] == ""
+        codes[0] = 3
+        api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph")
+        assert api.forget_wifi_password("Guest") == {"forgotten": True}
+        assert api.forget_wifi_password("Guest") == {"forgotten": False}
     finally:
-        BLE.available = real
+        BLE.available, W.NMCLI = real, real_nmcli
 
 
 @_api_in_tmp_home

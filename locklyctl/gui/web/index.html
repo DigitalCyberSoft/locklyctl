@@ -230,7 +230,9 @@
             <form id="wifi-form" hidden>
               <label class="field"><span>Network</span><select name="ssid" required></select></label>
               <label class="field"><span>Password</span><input name="password" type="password" autocomplete="off"></label>
-              <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button></div>
+              <p class="fine" id="wifi-pw-note"></p>
+              <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button>
+                <button class="btn btn-quiet" id="wifi-forget" type="button" hidden>Forget the saved password</button></div>
             </form>
             <div id="wifi-out"></div>
             <h2>Firmware</h2>
