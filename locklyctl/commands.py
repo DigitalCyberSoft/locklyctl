@@ -17,6 +17,8 @@
     locklyctl people [LOCK] [--json]
     locklyctl suspend LOCK USER [--dry-run] [--yes]
     locklyctl resume LOCK USER [--dry-run] [--yes]
+    locklyctl offline-code LOCK --name NAME [--anyway]
+    locklyctl offline-code LOCK --list [--json]
   Maintenance
     locklyctl timezone [LOCK ...]
     locklyctl timezone LOCK ... --sync [--yes]
@@ -91,7 +93,7 @@ def find_lock(locks: list[dict], query: str) -> dict:
 # clock), and the last group belongs to this computer, not to a lock.
 GROUPS = (
     ("Doors", ("list", "status", "lock", "unlock", "keep", "activity", "welcome", "rain")),
-    ("People", ("people", "suspend", "resume")),
+    ("People", ("people", "suspend", "resume", "offline-code")),
     ("Maintenance", ("timezone", "wifi", "firmware", "add", "backup", "restore")),
     ("This computer", ("gui", "hide", "unhide", "move")),
 )
@@ -173,6 +175,17 @@ def add_subcommands(parser: argparse.ArgumentParser) -> None:
                       "(from Lockly's records: no lock is woken)")
     p.add_argument("lock", nargs="?")
     p.add_argument("--json", action="store_true", help="machine-readable output (PINs are left out)")
+
+    p = cmd("offline-code", "a one-use code for a Visage or Vision that the lock checks by itself, so it "
+                            "works while the door is offline (made from Lockly's seed for the lock: no lock "
+                            "is woken); --list shows the ones on record")
+    p.add_argument("lock")
+    p.add_argument("--name", help="who the code is for (Lockly lists it under this name)")
+    p.add_argument("--list", action="store_true", help="the codes on record, by name (codes aren't printed)")
+    p.add_argument("--anyway", action="store_true",
+                   help="make one even after the app's daily count from this computer (it asks then, "
+                        "because codes left unused may stop newer ones working)")
+    p.add_argument("--json", action="store_true", help="with --list: machine-readable output")
 
     p = cmd("welcome", "Welcome Mode schedule (experimental)")
     p.add_argument("lock")
@@ -487,6 +500,40 @@ def _people(client: LocklyClient, args) -> int:
     for name in out["failedDoors"]:
         print(C.red(f"  couldn't read the people on {name}"), file=sys.stderr)
     return EXIT_FAIL if out["failedDoors"] else EXIT_OK
+
+
+def _offline_code(client: LocklyClient, args) -> int:
+    lock = find_lock(client.locks, args.lock)
+    api = _api(client)
+    if args.list == bool(args.name):
+        raise UsageError("offline-code takes --name NAME (make one) or --list, one of the two")
+    try:
+        if args.list:
+            rows = [{"name": c["name"], "once": c["once"]} for c in api.offline_codes(lock["ID"])["codes"]]
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            elif not rows:
+                print(C.dim(f"  no offline codes on record for {_name(lock)}"))
+            else:
+                for r in rows:
+                    print(f"  {r['name'] or '(no name)':<24} {'one use' if r['once'] else ''}")
+            return EXIT_OK
+        r = api.make_offline_code(lock["ID"], args.name, args.anyway)
+    except ValueError as e:             # not a Visage or Vision
+        raise UsageError(str(e)) from e
+    if not r["made"]:
+        print(C.yellow(f"  {r['madeToday']} offline codes were made for {_name(lock)} from here today. "
+                       f"Lockly says: \"{r['ask']}\" Add --anyway to make another."), file=sys.stderr)
+        return EXIT_FAIL
+    print(C.bold(f"  {r['shown']}") + f"  for {r['name']} at {_name(lock)}, one use")
+    for i, step in enumerate(r["steps"], 1):
+        print(f"  {i}. {step}")
+    print(C.dim(f"  {r['note']}"))
+    if not r["counterSaved"]:
+        print(C.red(f"  {r['problem']}: the code works, but Lockly didn't move on to the next one, so the next "
+                    "code made for this door, here or in the Lockly app, would be this same code."), file=sys.stderr)
+        return EXIT_FAIL
+    return EXIT_OK
 
 
 def _rain(client: LocklyClient, args) -> int:
@@ -893,4 +940,4 @@ _HANDLERS = {"list": _list, "hide": _hide, "unhide": _unhide, "move": _move,
              "backup": _backup, "restore": _restore,
              "status": _status, "lock": _lock, "unlock": _unlock,
              "welcome": _welcome, "rain": _rain, "firmware": _firmware, "wifi": _wifi, "timezone": _timezone,
-             "add": _add, "suspend": _suspend, "resume": _resume}
+             "add": _add, "suspend": _suspend, "resume": _resume, "offline-code": _offline_code}

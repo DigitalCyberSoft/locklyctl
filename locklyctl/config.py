@@ -396,6 +396,27 @@ def pop_suspended(lock_id: str, user_id: int) -> dict | None:
     return record
 
 
+# Offline codes made from this computer today, per door: lock_id -> {"day",
+# "count"}. The app keeps the same count per phone to ask before too many in
+# one day (oac.MANY_A_DAY); codes made elsewhere aren't in it.
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def offline_codes_today(lock_id: str) -> int:
+    made = (load_config().get("offline_codes_made") or {}).get(lock_id) or {}
+    return int(made.get("count") or 0) if made.get("day") == _today() else 0
+
+
+def count_offline_code(lock_id: str) -> int:
+    cfg = load_config()
+    made = dict(cfg.get("offline_codes_made") or {})
+    n = offline_codes_today(lock_id) + 1
+    made[lock_id] = {"day": _today(), "count": n}
+    save_config({**cfg, "offline_codes_made": made})
+    return n
+
+
 # The saved credential is the SHA-256 password hash, which the login API takes
 # directly — so it is password-equivalent. It goes in the OS keyring (Secret
 # Service / Keychain / Credential Locker) when the optional `keyring` package

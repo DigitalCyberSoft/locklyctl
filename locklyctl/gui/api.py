@@ -19,6 +19,7 @@ from .. import ble as BLE
 from .. import config
 from .. import features as F
 from .. import guard as G
+from .. import oac as OAC
 from .. import protocol as P
 from .. import vault
 from .. import view as V
@@ -447,6 +448,8 @@ class Api:
             "firmwareKind": F.firmware_check_kind(lock),
             "eventLog": F.uses_event_log(lock),
             "faceCapable": F.supports_face(lock),
+            # One-use codes the lock checks by itself, made from Lockly's seed.
+            "offlineCodes": OAC.supported(lock),
             "favorite": lock["ID"] in _favorite_ids(cfg),
             # Left out of the door list (still reached by "Check all doors").
             "hidden": lock["ID"] in hidden,
@@ -676,6 +679,37 @@ class Api:
         lock = self._lock(lock_id)
         r = self._c().resume_access_user(lock, int(user_id))
         return {"ok": True, "source": r["source"]}
+
+    # ── offline codes: one-use codes for a door that may be offline ─────
+
+    def offline_codes(self, lock_id: str) -> dict:
+        """The offline codes Lockly has on record for a door (made here or in
+        the Lockly app), each with its code, how many this computer made for
+        it today, and how a guest enters one. Cloud only: the lock isn't woken."""
+        lock = self._lock(lock_id)
+        if not OAC.supported(lock):
+            raise ValueError("Offline codes need a Visage or Vision.")
+        codes = [{**r, "shown": OAC.shown(r["code"])} for r in self._c().offline_codes(lock)]
+        return {"codes": codes, "madeToday": config.offline_codes_today(lock["ID"]),
+                "steps": list(OAC.STEPS), "note": OAC.STEPS_NOTE}
+
+    def make_offline_code(self, lock_id: str, name: str, anyway: bool = False) -> dict:
+        """Make the next one-use code for ``name`` (LocklyClient.make_offline_code).
+        From the app's daily count on (oac.MANY_A_DAY) nothing is made unless
+        ``anyway``: the answer is ``made`` False with the app's warning in ``ask``.
+        ``counterSaved`` False comes with ``problem``: the code works, but the
+        next one made anywhere would be the same code."""
+        lock = self._lock(lock_id)
+        if not OAC.supported(lock):
+            raise ValueError("Offline codes need a Visage or Vision.")
+        today = config.offline_codes_today(lock["ID"])
+        if today >= OAC.MANY_A_DAY and not anyway:
+            return {"made": False, "madeToday": today, "ask": OAC.MANY_TEXT}
+        r = self._c().make_offline_code(lock, name)
+        return {"made": True, "code": r["code"], "shown": OAC.shown(r["code"]),
+                "name": " ".join(str(name).split()), "counterSaved": r["counterSaved"],
+                "problem": r["problem"], "madeToday": config.count_offline_code(lock["ID"]),
+                "steps": list(OAC.STEPS), "note": OAC.STEPS_NOTE}
 
     # -- editing a person's access on one door -------------------------------
 

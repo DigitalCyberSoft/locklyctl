@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import features as F
+from . import oac as OAC
 from . import protocol as P
 from . import config
 from . import vault
@@ -733,6 +734,33 @@ def do_keep(client: LocklyClient, lock: dict) -> None:
     print(green(f"  unlocked until {r['until']}, lock time ✓"))
 
 
+def do_offline_code(client: LocklyClient, lock: dict) -> None:
+    """A one-use code the lock checks by itself, for a guest (oac.py)."""
+    api = _api(client)
+    name = ask("  who is the code for (Lockly lists it under this name)", "").strip()
+    if not name:
+        print(red("  a name is needed"))
+        return
+    try:
+        r = api.make_offline_code(lock["ID"], name)
+        if not r["made"]:
+            print(yellow(f"  {r['madeToday']} offline codes were made for this door from here today. "
+                         f"Lockly says: \"{r['ask']}\""))
+            if not confirm("  make another anyway?", default=False):
+                return
+            r = api.make_offline_code(lock["ID"], name, True)
+    except ValueError as e:
+        print(red(f"  {e}"))
+        return
+    print(bold(f"\n  {r['shown']}") + f"  for {r['name']}, one use")
+    for i, step in enumerate(r["steps"], 1):
+        print(f"  {i}. {step}")
+    print(dim(f"  {r['note']}"))
+    if not r["counterSaved"]:
+        print(red(f"  {r['problem']}: the code works, but Lockly didn't move on to the next one, so the next "
+                  "code made for this door, here or in the Lockly app, would be this same code."))
+
+
 def _submenu(client: LocklyClient, lock: dict, title: str, options: list, actions: dict, note: str = "") -> None:
     """One group's menu: run the chosen action, then come back to it, until Back."""
     while True:
@@ -794,12 +822,15 @@ def lock_menu(client: LocklyClient, lock: dict) -> None:
         if choice in ("back", "quit"):
             return
         if choice == "people":
+            offline = [("offline", "Make an offline code (one use)")] if OAC.supported(lock) else []
             _submenu(client, lock, "People and PINs", [
                 ("guests", "List people with a PIN"),
                 ("addguest", "Add a person with a PIN"),
+                *offline,
                 ("delguest", "Remove a person"),
                 ("enrol", "Faces, fingerprints and lock slots " + yellow("(experimental)") + more),
-            ], {"guests": do_list_guests, "addguest": do_add_guest, "delguest": do_delete_guest, "enrol": do_enrol})
+            ], {"guests": do_list_guests, "addguest": do_add_guest, "delguest": do_delete_guest, "enrol": do_enrol,
+                "offline": do_offline_code})
         elif choice == "schedule":
             _submenu(client, lock, "Schedule", [("welcome", "Welcome Mode hours"), ("rain", "Rain Mode")],
                      {"welcome": do_welcome_mode, "rain": do_rain_mode})

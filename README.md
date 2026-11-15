@@ -48,6 +48,7 @@ way the official app does.
 | People: everyone's access across all doors, merged by person | ✅ reads cloud and lock; merging is kept on your device |
 | Visage/Vision: add a person with a PIN (always, for a while, set hours, or between dates), change PIN, remove from a door: from People, or from a door's Access tab, which lists everyone on that door | ✅ tested on a Visage: created, checked on the lock and the cloud, changed, deleted. "For a while" (4 hours to a week from now) is the between-dates record with now as its start. A person is removed from the lock first, then from Lockly's record, wherever it's done from: until 2026-11-15 the door's "Guest PINs" tab deleted only Lockly's record, which leaves the lock's own untouched |
 | Visage/Vision: pause a person on one door and resume them, keeping their PIN, fingerprints and face (`suspend`, `resume`; Pause and Resume in People and in a door's Access tab) | ✅ run on a Visage from the command line (2026-11-14): the lock took the pause (a window far in the future) and the resume, kept the person's PIN, fingerprints and face through both, and got their exact schedule back. The app's buttons call the same code; they're tested against a stand-in lock. A second pause is refused: it would save the pause itself as the schedule to restore |
+| Visage/Vision: offline codes, one use each, which the lock checks by itself, so they work while the door is offline (a door's Access tab, `locklyctl offline-code`, People and PINs in the menus) | ⚠️ not yet tried at a door. Each code is the Lockly app's own calculation from the seed Lockly keeps for the lock (app 3.3.4): it gave the same codes as the app's own methods for 20,000 made-up seeds, and for every Visage and Vision seed on one account (read-only, 2026-11-15). A code is recorded with Lockly under the name it's for, so the Lockly app lists it, and then Lockly's count moves on so the next one differs; if a plan's monthly limit is reached, nothing is used up. The guest's steps are the ones on Lockly's own guest page for these locks. A code can't be deleted once made, and the app warns that codes made in a row and left unused may stop newer ones working, so from the fifth in a day on one computer it asks first. Lockly has no seed for PGD7Y locks |
 | Visage/Vision: remove one fingerprint, face or card | ⚠️ checked against the app and lock replies; not yet run on a lock |
 | Other locks (e.g. PGD7Y): a person with a PIN, always or for a while; remove | ⚠️ Lockly's cloud takes the record; whether such a lock picks it up isn't confirmed. These locks don't keep people the way a Visage does, so changing a PIN and pausing aren't offered for them |
 | Welcome Mode, 8-slot `0x9B` (Visage, Vision): read, set, off | ✅ tested on a Visage (set, read back, restore). Set asks how the hours start: when the first person opens the door (the Lockly app's default, and the one tested), or by itself at the start time (the entry bit a "keep unlocked" window uses, seen to work on one; not yet tried on a weekly schedule). A set or an off rewrites the lock's 8 slots but writes a running "keep unlocked" window back (tested against a stand-in lock) |
@@ -200,18 +201,18 @@ For Claude Desktop, add this to `claude_desktop_config.json`:
 ```
 
 By default it can only look and lock: `list_doors`, `check_door`,
-`door_activity`, `list_people`, `read_door_modes`, `check_firmware` and `lock_door`. Two flags add
-more:
+`door_activity`, `list_people`, `list_offline_codes`, `read_door_modes`, `check_firmware` and
+`lock_door`. Two flags add more:
 
 | Flag | Adds |
 |---|---|
-| `--allow-writes` | `grant_access`, `change_pin`, `revoke_access`, `turn_off_welcome_mode`, `end_keep_unlocked`, `set_rain_mode` |
+| `--allow-writes` | `grant_access`, `change_pin`, `make_offline_code`, `revoke_access`, `turn_off_welcome_mode`, `end_keep_unlocked`, `set_rain_mode` |
 | `--allow-unlock` | `unlock_door` |
 | both | `set_welcome_mode` (with `unlock_by_itself` to choose how the hours start) and `keep_unlocked_for`, since both keep a door unlocked |
 
 Tools a flag doesn't allow aren't offered at all, so the assistant never sees
-them. Existing PINs are never returned; a PIN the server creates is returned
-once, in the reply that created it. Installing firmware isn't a tool under
+them. Existing PINs and offline codes are never returned; a PIN or offline
+code the server creates is returned once, in the reply that created it. Installing firmware isn't a tool under
 any flag: it's in the desktop app and the command line only.
 
 ## Command line
@@ -255,6 +256,8 @@ locklyctl people                        # everyone, door by door (PINs are never
 locklyctl people "Front" [--json]       # who can open one door
 locklyctl suspend "Front" "Dana" --yes  # pause a person: their PIN, fingerprints and face stay
 locklyctl resume "Front" "Dana" --yes   # their schedule back, as it was
+locklyctl offline-code "Front" --name "Sam"   # a one-use code, works while the door is offline
+locklyctl offline-code "Front" --list   # the ones on record, by name (codes aren't printed)
 
 # Maintenance
 locklyctl timezone                      # each lock's time zone in the account, and this computer's

@@ -1,7 +1,7 @@
 // Browser stand-in for locklyctl/gui/api.py, for designing the GUI without a
 // lock or a Lockly account. Serve the repo root and open
 //   http://localhost:8000/locklyctl/gui/web/index.html?mock=/tests/gui/mock.js
-// Optional &scene=signin|door|access|schedules|edit|people|person-detail|maint|firmware|settings
+// Optional &scene=signin|door|access|offline|offline-many|schedules|edit|people|person-detail|maint|firmware|settings
 // scripts a starting state; &device=phone is the phone app (no Bluetooth, "this phone").
 
 const params = new URLSearchParams(location.search);
@@ -15,7 +15,7 @@ const mk = (id, name, unit, rest, model, hub, state, battery, extra = {}) => ({
   route: hub ? "hub" : model === "PGD7Y" ? "bluetooth" : "wifi", eventLog: model === "PGK728WRHK", favorite: false,
   keepUnlockedUntil: null, keepMaxMinutes: 1439, clockKnown: false, clockOffset: null,
   timeZone: "UTC+8", computerTimeZone: "UTC+8", takesTimeZone: model === "PGK728WRHK", hidden: false,
-  hasWifi: model === "PGK728WRHK", accessUsers: model !== "PGD7Y",
+  hasWifi: model === "PGK728WRHK", accessUsers: model !== "PGD7Y", offlineCodes: model !== "PGD7Y",
   firmwareKind: model === "PGK728WRHK" ? "multi" : model === "PGK798HK" ? "camera" : "single", ...extra,
 });
 
@@ -57,6 +57,17 @@ const access = (lockId, userId, person, role, when, extra = {}) => {
     hasPin: false, pin: "", fingerprints: 0, faces: 0, cards: 0, twoStep: false, recordKey: "", ...extra };
 };
 let roster = [];
+// Offline codes on record per door (made-up), and how many "this computer" made today.
+// &scene=offline-many starts at the app's daily count, so making one asks first.
+const OAC_STEPS = [
+  "Double-tap the Lockly logo button. The four circles on the keypad flash: it's ready for the code.",
+  "Enter the code, then press the logo.",
+  "Enter the code again, then press the logo. A new code has to be entered twice the first time.",
+];
+const OAC_NOTE = "Enter it within a minute of the circles flashing. If the door doesn't open, do the steps again. The code works once and can't be deleted or changed.";
+const oacShown = (c) => `${c.slice(0, 2)} ${c.slice(2)}`;
+const oacRecords = { "2d3e": [{ id: 9101, name: "Plumber", once: true, code: "4071" }] };
+const oacToday = { "2d3e": scene === "offline-many" ? 4 : 0 };
 // The app lock: &scene=locked starts locked (the passcode is 2468); &scene=applock has one set.
 let passcode = ["locked", "applock"].includes(scene) ? "2468" : "", unlocked = scene !== "locked", wrong = 0;
 
@@ -223,6 +234,22 @@ window.pywebview = {
       return { ok: true, userId: 40, slot: 7 };
     },
     async separate_person() { return this.people(); },
+    async offline_codes(id) {
+      await wait(250);
+      return { codes: (oacRecords[id] || []).map((c) => ({ ...c, shown: oacShown(c.code) })),
+        madeToday: oacToday[id] || 0, steps: OAC_STEPS, note: OAC_NOTE };
+    },
+    async make_offline_code(id, name, anyway) {
+      await wait(500);
+      if ((oacToday[id] || 0) >= 4 && !anyway) {
+        return { made: false, madeToday: oacToday[id], ask: "Activate the issued OAC access code before activating a new one." };
+      }
+      const code = String(1000 + Math.floor(Date.now() / 7) % 9000);
+      (oacRecords[id] = oacRecords[id] || []).push({ id: 9200 + oacRecords[id].length, name, once: true, code });
+      oacToday[id] = (oacToday[id] || 0) + 1;
+      return { made: true, code, shown: oacShown(code), name, counterSaved: true, problem: null,
+        madeToday: oacToday[id], steps: OAC_STEPS, note: OAC_NOTE };
+    },
     async diagnose(id) { await wait(500); return { model: find(id).model, hub: find(id).hub, cachedOk: false, liveOk: true, trail: "senddata → ACK", lock: { ...find(id) } }; },
   },
 };
@@ -246,6 +273,14 @@ setTimeout(() => {
   const door = (label) => click(`.plate[aria-label^="${label}"]`);
   if (scene === "door") door("2A Front");
   if (scene === "access" || scene === "access-touch") { door(scene === "access" ? "2A Front" : "2A Office"); click("#tab-access"); }
+  if (scene === "offline" || scene === "offline-many") {
+    door("2A Front");
+    click("#tab-access");
+    setTimeout(() => {
+      document.getElementById("oac-form").who.value = "Sam (Saturday)";
+      click("#oac-make");
+    }, 600);
+  }
   if (scene === "schedules") { door("3A"); click("#tab-schedules"); }
   if (scene === "schedules-touch") { door("2A Office"); click("#tab-schedules"); }
   if (scene === "edit") click("#edit-list");

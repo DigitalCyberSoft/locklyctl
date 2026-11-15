@@ -2,7 +2,7 @@
 run your Lockly doors through locklyctl.
 
     locklyctl-mcp                    # read-only, plus locking doors
-    locklyctl-mcp --allow-writes     # also manage people, PINs, Rain Mode, Welcome off
+    locklyctl-mcp --allow-writes     # also manage people, PINs, offline codes, Rain Mode, Welcome off
     locklyctl-mcp --allow-unlock     # also unlock doors
     locklyctl-mcp --allow-writes --allow-unlock   # also Welcome Mode schedules,
                                                   # which keep a door unlocked
@@ -11,8 +11,8 @@ It speaks MCP over stdio and signs in with the login saved by ``locklyctl`` or
 the desktop app (sign in there once with "remember me"). Tools that a flag
 doesn't allow are not offered at all, so the assistant never sees them.
 
-Existing PINs are never returned. A PIN this server creates is returned once,
-in the reply to the call that created it.
+Existing PINs and offline codes are never returned. A PIN or offline code this
+server creates is returned once, in the reply to the call that created it.
 """
 from __future__ import annotations
 
@@ -198,6 +198,16 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         return {"people": people, "doorsThatFailedToLoad": out["failedDoors"]}
 
     @mcp.tool(annotations=READ)
+    async def list_offline_codes(door: str) -> dict:
+        """The one-use offline codes on record for a Visage/Vision door, by
+        the name each was made for (the codes themselves aren't returned).
+        Reads Lockly's cloud; no lock is woken."""
+        v = await anyio.to_thread.run_sync(doors.find, door)
+        r = await run(doors.api.offline_codes, v["id"])
+        return {"door": v["name"], "codes": [{"name": c["name"], "oneUse": c["once"]} for c in r["codes"]],
+                "madeFromHereToday": r["madeToday"]}
+
+    @mcp.tool(annotations=READ)
     async def check_firmware(door: str) -> dict:
         """Newer firmware Lockly offers for a door, part by part, next to what
         the lock reports running. Wakes the lock. Installing isn't offered here."""
@@ -264,6 +274,24 @@ def build_server(doors: Doors | None = None, *, allow_writes: bool = False,
         new_pin = pin or f"{secrets.randbelow(10**6):06d}"
         await run(doors.api.change_pin, v["id"], d["userId"], new_pin)
         return {"ok": True, "door": v["name"], "person": d["person"], "pin": new_pin}
+
+    @mcp.tool(annotations=WRITE)
+    async def make_offline_code(door: str, name: str, anyway: bool = False) -> dict:
+        """A one-use code for a guest on a Visage/Vision door, recorded under
+        name. The lock checks it by itself, so it works while the door is
+        offline; it's made from Lockly's seed for the lock (no lock is woken).
+        It can't be deleted once made, and codes left unused may stop newer
+        ones working, so make one only when the user asked for one. Returned
+        once, with the steps for the guest. From the app's daily count this
+        stops and asks; anyway=True only after the user, told that, said to
+        make another."""
+        v = await anyio.to_thread.run_sync(doors.find, door)
+        r = await run(doors.api.make_offline_code, v["id"], name, anyway)
+        if not r["made"]:
+            raise ToolError(f"{r['madeToday']} offline codes were made for {v['name']} from here today. "
+                            f"Lockly says: \"{r['ask']}\" Ask the user before making another.")
+        return {"ok": True, "door": v["name"], "name": r["name"], "code": r["code"], "steps": r["steps"],
+                "note": r["note"], "counterSaved": r["counterSaved"], "problem": r["problem"]}
 
     @mcp.tool(annotations=RISKY)
     async def revoke_access(door: str, person: str) -> dict:

@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from locklyctl import cli, commands, config
+from locklyctl import cli, commands, config, oac
 from locklyctl import protocol as P
 from locklyctl.transport import LocklyClient, LocklyError
 from test_gui_api import B2, MC, UUID, FakeClient
@@ -38,7 +38,7 @@ def test_every_command_is_in_one_group_and_has_a_handler(capsys):
     parser = argparse.ArgumentParser(prog="locklyctl", epilog="Commands sign in with the saved login.")
     commands.add_subcommands(parser)
     names = [n for _, group in commands.GROUPS for n in group]
-    assert len(names) == len(set(names)) == 21
+    assert len(names) == len(set(names)) == 22
     assert set(names) - {"gui"} == set(commands._HANDLERS)          # gui is opened by cli.main itself
     text = parser.format_help()
     for title, group in commands.GROUPS:
@@ -112,6 +112,60 @@ def test_people_never_prints_a_pin(capsys):
     config.stash_suspended(B2, 5, {"user_type": 0x12, "date": "00" * 10})
     commands._people(c, _args(lock="1204", json=False))
     assert "paused" in capsys.readouterr().out
+
+
+# ── offline codes ───────────────────────────────────────────────────────────
+
+def _oac_args(**kw):
+    return _args(**{**dict(lock="1204", name=None, list=False, anyway=False, json=False), **kw})
+
+
+def _first_code():
+    from test_oac import VECTORS
+    return VECTORS[1]["codes"].split(",")[0]          # FakeLockly's seed, at its position
+
+
+def test_an_offline_code_from_the_command_line(capsys):
+    c = FakeClient("a@b")
+    assert commands._offline_code(c, _oac_args(name="Sam")) == 0
+    out = capsys.readouterr().out
+    assert oac.shown(_first_code()) in out and "for Sam at 1204, one use" in out
+    assert "1. Double-tap the Lockly logo" in out and "can't be deleted" in out
+    # past the app's daily count it stops and says how to go on
+    for _ in range(oac.MANY_A_DAY - 1):
+        commands._offline_code(c, _oac_args(name="Sam"))
+    capsys.readouterr()
+    assert commands._offline_code(c, _oac_args(name="Sam")) == 1
+    assert "--anyway" in capsys.readouterr().err
+    assert commands._offline_code(c, _oac_args(name="Sam", anyway=True)) == 0
+    # a code that works, but whose position Lockly didn't save, is shown and said, and the exit says so
+    c.oac_server.answers["oac/usage/save"] = {"cod": "910"}
+    assert commands._offline_code(c, _oac_args(name="Sam", anyway=True)) == 1
+    captured = capsys.readouterr()
+    assert "the code works" in captured.err and "one use" in captured.out
+
+
+def test_the_offline_code_list_never_prints_a_code(capsys):
+    c = FakeClient("a@b")
+    c._rest_ok = lambda endpoint, req: {"cod": "200", "obj": [
+        {"id": 1, "acctname": "Sam", "pwType": "OFFONE", "password": "4071"}]}
+    assert commands._offline_code(c, _oac_args(list=True)) == 0
+    out = capsys.readouterr().out
+    assert "Sam" in out and "one use" in out and "4071" not in out and "40 71" not in out
+    assert commands._offline_code(c, _oac_args(list=True, json=True)) == 0
+    raw = capsys.readouterr().out
+    assert json.loads(raw) == [{"name": "Sam", "once": True}] and "4071" not in raw
+
+
+def test_offline_code_usage_errors():
+    c = FakeClient("a@b")
+    for kw in ({}, {"name": "Sam", "list": True}):
+        with pytest.raises(commands.UsageError, match="--name NAME"):
+            commands._offline_code(c, _oac_args(**kw))
+    for kw in ({"name": "Sam"}, {"list": True}):           # a Touch: no offline codes
+        with pytest.raises(commands.UsageError, match="Visage or Vision"):
+            commands._offline_code(c, _oac_args(lock="2A Office", **kw))
+    assert c.oac_server is None                              # Lockly wasn't asked
 
 
 # ── welcome ─────────────────────────────────────────────────────────────────
@@ -218,15 +272,16 @@ def test_the_lock_menu_is_grouped(monkeypatch, capsys):
     cli.lock_menu(c, visage)
     assert seen[0] == ("Action", ["status", "unlock", "lock", "keep", "history", "people", "schedule",
                                   "maintenance", "list", "back"])
-    assert seen[1] == ("People and PINs", ["guests", "addguest", "delguest", "enrol", "back"])
+    assert seen[1] == ("People and PINs", ["guests", "addguest", "offline", "delguest", "enrol", "back"])
     assert seen[3] == ("Schedule", ["welcome", "rain", "back"])
     assert seen[5] == ("Maintenance", ["diagnose", "back"])
     assert seen[7] == ("Door list", ["hide", "up", "down", "back"])
     assert "locklyctl firmware, wifi, timezone" in capsys.readouterr().out
-    # a single-schedule lock has no one-time slots, so no Keep unlocked
-    seen = _drive(monkeypatch, ["back"])
+    # a single-schedule lock has no one-time slots, so no Keep unlocked; and no offline codes
+    seen = _drive(monkeypatch, ["people", "back", "back"])
     cli.lock_menu(c, touch)
     assert "keep" not in seen[0][1]
+    assert seen[1] == ("People and PINs", ["guests", "addguest", "delguest", "enrol", "back"])
 
 
 def test_the_menu_removes_a_person_the_way_the_app_does(monkeypatch, capsys):
@@ -236,6 +291,19 @@ def test_the_menu_removes_a_person_the_way_the_app_does(monkeypatch, capsys):
     cli.lock_menu(c, c.locks[1])                                     # the Visage
     assert c.calls[-1] == ("delete", 5, 6, 0x12)                     # its own record, not only Lockly's
     assert "removed from the lock, then from Lockly's record" in capsys.readouterr().out
+
+
+def test_an_offline_code_from_the_menu(monkeypatch, capsys):
+    c = MenuClient("a@b")
+    _drive(monkeypatch, ["people", "offline", "back", "back"], answers=["Sam"])
+    cli.lock_menu(c, c.locks[1])                                     # the Visage
+    out = capsys.readouterr().out
+    assert oac.shown(_first_code()) in out and "for Sam, one use" in out
+    assert c.oac_server.endpoints() == ["oac/get", "oac/saveName", "oac/usage/save"]
+    # with no name nothing is asked of Lockly
+    _drive(monkeypatch, ["people", "offline", "back", "back"], answers=[""])
+    cli.lock_menu(c, c.locks[1])
+    assert "a name is needed" in capsys.readouterr().out and len(c.oac_server.calls) == 3
 
 
 def test_keep_unlocked_from_the_menu(monkeypatch, capsys):

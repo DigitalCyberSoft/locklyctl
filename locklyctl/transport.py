@@ -29,6 +29,7 @@ from . import ble as BLE
 from . import config
 from . import features as F
 from . import guard as G
+from . import oac as OAC
 from . import protocol as P
 from .capabilities import LockCapabilities, resolve_capabilities
 from .const import (
@@ -1633,6 +1634,69 @@ class LocklyClient:
                "adminAcuId": lock.get("adminAcuId", 0)}
         body = self._post_para_des3("acu/delete", req)
         return str(body.get("cod")) == "200"
+
+    # -- high-level: offline codes (Lockly's cloud only; the lock isn't contacted) --
+
+    def offline_code_seed(self, lock: dict) -> OAC.Seed:
+        """This lock's offline code seed and position from Lockly's server."""
+        body = self._post_para_des3("oac/get", {"acct": self.email, "dv": lock["ID"],
+                                                "uploadTime": int(time.time() * 1000)})
+        cod = str(body.get("cod"))
+        if cod == "920":
+            raise LocklyError("Lockly has no offline code seed for this door.", cod)
+        if cod != "200":
+            raise LocklyError(f"oac/get failed: {P.describe_cod(cod)}", cod)
+        try:
+            return OAC.from_reply(body)
+        except OAC.OacError as e:
+            raise LocklyError(str(e), "oac") from e
+
+    def offline_codes(self, lock: dict) -> list[dict]:
+        """The offline codes Lockly has on record for this lock, made here or
+        in the Lockly app (OAC.records: each with the code under "code")."""
+        return OAC.records(self._rest_ok("oac/getNameList", {"dv": lock["ID"]}))
+
+    def make_offline_code(self, lock: dict, name: str) -> dict:
+        """Make the next one-use offline code for a Visage or Vision, the way
+        the app's share step does: work out the code at the seed's position,
+        record it for ``name`` (oac/saveName; Lockly's monthly limit answers
+        8001 here, and then nothing is used up), then move the position on
+        (oac/usage/save) so the next code differs.
+
+        ``counterSaved`` False means the code was recorded and works, but the
+        position didn't move: the next code made anywhere would be this one
+        again. ``problem`` says why."""
+        if not OAC.supported(lock):
+            raise LocklyError("Offline codes need a Visage or Vision.")
+        name = " ".join(str(name or "").split())
+        if not name:
+            raise LocklyError("Say who the code is for.")
+        seed = self.offline_code_seed(lock)
+        try:
+            code = OAC.code(seed)
+        except OAC.OacError as e:
+            raise LocklyError(str(e), "oac") from e
+        rec = self._post_para_des3("oac/saveName", OAC.record_body(lock["ID"], name, code))
+        cod = str(rec.get("cod"))
+        if cod == OAC.LIMIT_CODE:
+            raise LocklyError(OAC.LIMIT_TEXT, cod)
+        if cod != "200":
+            raise LocklyError(f"oac/saveName failed: {rec.get('msg') or P.describe_cod(cod)}", cod)
+        moved, problem = OAC.after(seed), None
+        for _ in range(3):                    # a dropped connection is tried again; a refusal isn't
+            try:
+                body = self._post_para_des3("oac/usage/save", OAC.usage_body(
+                    moved, self.email, lock["ID"], int(time.time() * 1000)))
+            except requests.RequestException as e:
+                problem = f"Lockly's server couldn't be reached ({type(e).__name__})"
+                continue
+            ok = str(body.get("cod")) == "200"
+            problem = None if ok else f"oac/usage/save failed: {P.describe_cod(body.get('cod'))}"
+            break
+        _LOGGER.info("offline code made for %s at position %d; position %s", lock["ID"], seed.index,
+                     "saved" if problem is None else f"NOT saved ({problem})")
+        return {"code": code, "position": seed.index, "recordId": rec.get("pwdid"),
+                "counterSaved": problem is None, "problem": problem}
 
     # -- high-level: remote enrolment over BLE (experimental) -----------------
     # The restriction that forces Bluetooth in the app lives only in its

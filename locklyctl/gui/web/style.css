@@ -400,6 +400,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 #grant-weekly { display: grid; gap: 0.85rem; }
 .cred-list .btn { padding: 0.3rem 0.6rem; font-size: var(--fs-xs); }
 
+.oac { display: grid; gap: 0.85rem; max-width: 46rem; border-top: 1px solid var(--rule); padding-top: 1.25rem; }
+.oac h3 { font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft); margin-bottom: 0.4rem; }
+.oac .field { flex: 1 1 14rem; }
+.oac-made { display: grid; gap: 0.6rem; padding: 0.9rem 1rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--wall); }
+.oac-code { font-size: 2.4rem; font-weight: 800; letter-spacing: 0.06em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.oac-steps { margin: 0; padding-left: 1.3rem; display: grid; gap: 0.3rem; font-size: var(--fs-sm); max-width: 62ch; }
+.oac-text { width: 100%; font: inherit; font-size: var(--fs-xs); padding: 0.5rem 0.6rem; border: 1px solid var(--rule); border-radius: 4px;
+  background: var(--surface); color: var(--ink); resize: vertical; }
+
 /* ── toast & dialog ───────────────────────────────────────────────── */
 .toast {
   position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%);

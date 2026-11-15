@@ -58,9 +58,9 @@ def _call(server, tool, **args):
 
 def test_tools_offered_by_flag(home):
     reads = {"list_doors", "check_door", "door_activity", "list_people", "read_door_modes", "lock_door",
-             "check_firmware"}
+             "check_firmware", "list_offline_codes"}
     writes = {"grant_access", "change_pin", "revoke_access", "turn_off_welcome_mode", "set_rain_mode",
-              "end_keep_unlocked"}
+              "end_keep_unlocked", "make_offline_code"}
     assert _names(_server()[1]) == reads
     assert _names(_server(allow_unlock=True)[1]) == reads | {"unlock_door"}
     assert _names(_server(allow_writes=True)[1]) == reads | writes
@@ -100,6 +100,27 @@ def test_grant_access_makes_a_pin(home):
     assert (op, lock_id, kw["name"], kw["pin"], kw["time_type"]) == ("create", UUID, "Visitor", out["pin"], "WEEK")
     err, msg = _call(s, "grant_access", door="2A Office", name="Visitor", pin="12")
     assert err and "4 to 8 digits" in msg
+
+
+def test_offline_codes_are_returned_once_and_never_listed(home):
+    doors, s = _server(allow_writes=True)
+    err, out = _call(s, "make_offline_code", door="1204", name="Sam")
+    assert not err and out["door"] == "1204" and out["name"] == "Sam" and out["counterSaved"] is True
+    code = out["code"]
+    assert len(code) == 4 and code.isdigit() and out["steps"][0].startswith("Double-tap")
+    doors.api._client._rest_ok = lambda endpoint, req: {"cod": "200", "obj": [
+        {"id": 1, "acctname": "Sam", "pwType": "OFFONE", "password": code}]}
+    err, out = _call(s, "list_offline_codes", door="1204")
+    assert not err and out["codes"] == [{"name": "Sam", "oneUse": True}] and code not in json.dumps(out)
+    # a Touch has none; past the app's daily count it stops until told "anyway"
+    err, msg = _call(s, "make_offline_code", door="2A Office", name="Sam")
+    assert err and "Visage or Vision" in msg
+    for _ in range(3):
+        _call(s, "make_offline_code", door="1204", name="Sam")
+    err, msg = _call(s, "make_offline_code", door="1204", name="Sam")
+    assert err and "Ask the user" in msg
+    err, out = _call(s, "make_offline_code", door="1204", name="Sam", anyway=True)
+    assert not err and out["code"] == code
 
 
 def test_revoke_finds_person_on_door(home):

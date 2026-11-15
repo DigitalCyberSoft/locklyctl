@@ -322,6 +322,7 @@ function forgetSession() {
   for (const id of ["panel-activity", "access-list"]) $(id).replaceChildren();
   resetSchedules();
   resetJobs();
+  resetOac();
   $("who").textContent = "";
 }
 
@@ -640,6 +641,7 @@ function selectLock(id, connect = false) {
   if (changed) {
     resetSchedules();
     resetJobs();
+    resetOac();
     loadTab(activeTab);
   }
   const v = current();
@@ -939,6 +941,7 @@ async function loadAccess() {
   const id = currentId;
   const list = $("access-list");
   mountGrant("door");
+  loadOac();
   list.replaceChildren(h("p", { class: "muted" }, "Loading who can open this door…"));
   try {
     const rows = await call("door_access", id);
@@ -957,6 +960,118 @@ async function doorAccessChanged() {
   peopleLoaded = false;
   await loadAccess();
 }
+
+// ── offline codes: one-use codes the lock checks by itself (Visage, Vision) ──
+// A code made here is shown once in #oac-made; the ones on record stay hidden until Show.
+
+function resetOac() {
+  $("oac").hidden = true;
+  $("oac-error").textContent = "";
+  $("oac-form").who.value = "";
+  const made = $("oac-made");
+  made.hidden = true;
+  made.replaceChildren();
+  $("oac-list").replaceChildren();
+}
+
+async function loadOac() {
+  const id = currentId;
+  const v = current();
+  $("oac").hidden = !(v && v.offlineCodes);
+  if (!v || !v.offlineCodes) return;
+  const list = $("oac-list");
+  list.replaceChildren(h("p", { class: "muted" }, "Loading the codes on record…"));
+  try {
+    const r = await call("offline_codes", id);
+    if (id !== currentId) return;
+    fill(list, r.codes.length
+      ? [h("h3", {}, "On record"), h("ul", { class: "cred-list" }, r.codes.map(oacItem))]
+      : h("p", { class: "muted" }, "No offline codes made for this door yet."));
+  } catch (e) {
+    if (id === currentId) list.replaceChildren(h("p", { class: "form-error" }, e.message));
+  }
+}
+
+function oacItem(c) {
+  const val = h("span", { class: "pin-val" }, "hidden");
+  const show = h("button", { class: "btn btn-quiet", type: "button", "aria-pressed": "false" }, "Show");
+  show.addEventListener("click", () => {
+    const on = show.getAttribute("aria-pressed") !== "true";
+    show.setAttribute("aria-pressed", String(on));
+    show.textContent = on ? "Hide" : "Show";
+    val.textContent = on ? c.shown : "hidden";
+  });
+  return h("li", {}, h("span", {}, c.name || "No name", c.once ? h("span", { class: "muted" }, " · one use") : null),
+    h("span", { class: "pin-edit" }, val, show));
+}
+
+function oacMessage(v, r) {
+  return [`${r.name}, here is your one-use code for ${doorLabel(v)}: ${r.code}`, "",
+    ...r.steps.map((s, i) => `${i + 1}. ${s}`), "", r.note].join("\n");
+}
+
+function showOac(v, r) {
+  const box = $("oac-made");
+  const text = oacMessage(v, r);
+  const area = h("textarea", { class: "oac-text", readonly: true, rows: String(text.split("\n").length + 1),
+    "aria-label": "Message for the guest" });
+  area.value = text;
+  const copy = h("button", { class: "btn btn-quiet", type: "button" }, "Copy message");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Message copied.");
+    } catch (e) {
+      area.select();
+      toast("Couldn't copy here, so the message is selected: copy it by hand.", true);
+    }
+  });
+  const done = h("button", { class: "btn btn-quiet", type: "button" }, "Done");
+  done.addEventListener("click", () => { box.hidden = true; box.replaceChildren(); });
+  fill(box,
+    h("p", { class: "muted" }, `For ${r.name}, one use:`),
+    h("p", { class: "oac-code" }, r.shown),
+    r.counterSaved ? null : h("p", { class: "caution" },
+      `${r.problem}. The code works, but Lockly didn't move on to the next one, so the next code made for this door, here or in the Lockly app, would be this same code.`),
+    h("ol", { class: "oac-steps" }, r.steps.map((s) => h("li", {}, s))),
+    h("p", { class: "fine" }, r.note),
+    area,
+    h("div", { class: "row" }, copy, done));
+  box.hidden = false;
+}
+
+$("oac-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.currentTarget;
+  const id = currentId;
+  const v = current();
+  const err = $("oac-error");
+  err.textContent = "";
+  const who = f.who.value.trim();
+  if (!who) {
+    err.textContent = "Say who the code is for.";
+    f.who.focus();
+    return;
+  }
+  await busy($("oac-make"), async () => {
+    try {
+      let r = await call("make_offline_code", id, who, false);
+      if (!r.made) {
+        const ok = await confirmDialog("Make another code today?",
+          `${r.madeToday} offline codes were made for this door from here today. Lockly says: "${r.ask}" A code made while earlier ones are still unused may not work.`,
+          "Make it");
+        if (!ok) return;
+        r = await call("make_offline_code", id, who, true);
+      }
+      if (id !== currentId) return;
+      f.who.value = "";
+      showOac(v, r);
+      loadOac();
+    } catch (e) {
+      if (id === currentId) err.textContent = e.message;
+    }
+  });
+});
 
 // ── schedule: Welcome Mode hours and Rain Mode ─────────────────────────
 

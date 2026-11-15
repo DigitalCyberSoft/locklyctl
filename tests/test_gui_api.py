@@ -110,6 +110,18 @@ class FakeClient:
         self._log("rest", endpoint, req)
         return {}
 
+    # Offline codes: the real client's steps, against test_oac's stand-in for Lockly.
+    offline_code_seed = LocklyClient.offline_code_seed
+    offline_codes = LocklyClient.offline_codes
+    make_offline_code = LocklyClient.make_offline_code
+    oac_server = None
+
+    def _post_para_des3(self, endpoint, body, **kw):
+        if self.oac_server is None:
+            from test_oac import FakeLockly
+            self.oac_server = FakeLockly()
+        return self.oac_server(endpoint, body)
+
     def get_history(self, lock, since_ms):
         """getlkhist's event shape, as Lockly returned it for a Visage (2026-11-12)."""
         return [{"tm": 1794464102000, "co": "92", "na": "Dana", "pid": 7, "id": 1, "logVer": 0},
