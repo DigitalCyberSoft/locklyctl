@@ -1277,16 +1277,41 @@ def parse_wifi_scan(d: str) -> dict:
     return out
 
 
+def mqtt_override(host: str | None, port: int | str | None) -> tuple[str | None, int | None]:
+    """The MQTT host and port a Wi-Fi setup writes instead of the ones the
+    server gives (to aim a lock at a private locklyctl-mqtt server), checked
+    against what the lock's setup message holds: the host in 128 bytes, the
+    port as text in 4 (ConfiguratorWiFi153Cmd.java:150-152, app 3.3.4).
+    Returns (host or None, port or None); raises ValueError for anything the
+    lock couldn't take whole."""
+    host = (host or "").strip() or None
+    if host is not None and not re.fullmatch(r"[A-Za-z0-9.-]{1,128}", host):
+        raise ValueError(f"{host!r} isn't an MQTT host a lock can take: give a name or IPv4 address of up "
+                         "to 128 characters, without https:// or a port.")
+    text = str(port).strip() if port is not None else ""
+    if not text:
+        return host, None
+    if not text.isdigit() or not 1 <= int(text) <= 9999:
+        raise ValueError(f"{text!r} isn't an MQTT port a lock can take: its Wi-Fi setup holds a port "
+                         "of up to 4 digits (1 to 9999).")
+    return host, int(text)
+
+
 def build_wifi_setup(lock: dict, nonce: str, *, ssid: str, password: str, host: str, port: int,
                      heartbeat_min: int, country: str, router_type: int, hidden: bool = False,
                      query: bool = False, password_bytes: int = 32, scan_support: bool = True) -> str:
     """0x99 ConfiguratorWiFi153Cmd.getData. Raises ValueError for a network
-    name or password the field can't hold."""
+    name, password, MQTT host or port the field can't hold, rather than
+    cutting it as the app's Strings.h would."""
     ssid_hex = ssid.encode("utf-8").hex()
     if len(ssid_hex) > 64:
         raise ValueError("Wi-Fi name is longer than 32 bytes.")
     if len(password) > password_bytes:
         raise ValueError(f"This lock takes Wi-Fi passwords up to {password_bytes} characters.")
+    if len(host) > 128 or not host.isascii():
+        raise ValueError(f"The MQTT host {host!r} doesn't fit the lock's 128-byte field.")
+    if not 0 < port <= 9999:
+        raise ValueError(f"The MQTT port {port} doesn't fit the lock's 4-digit field.")
     enc_mc, mc_len, key = _enc(lock)
     fields = ["99", mc_len, enc_mc, ssid_hex.ljust(64, "0"), _padded_text_hex(password, password_bytes),
               _padded_text_hex(host, 128), _padded_text_hex(country, 2), _padded_text_hex(str(port), 4),

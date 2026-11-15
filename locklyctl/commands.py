@@ -690,11 +690,17 @@ def _wifi(client: LocklyClient, args) -> int:
             mark = ", ".join(m for m in marks if m)
             print(f"  -{n['rssi']:<3} dBm  type {n['router_type']}  {n['ssid']}" + (f"  ({mark})" if mark else ""))
         return EXIT_OK
+    try:                                     # before asking anything: the lock must hold them whole
+        mqtt_host, mqtt_port = F.mqtt_override(getattr(args, "mqtt_host", None), getattr(args, "mqtt_port", None))
+    except ValueError as e:
+        raise UsageError(str(e)) from e
     password, source = _wifi_password(args.ssid, args)
     if not args.yes:
         if not sys.stdin.isatty():
             raise UsageError("wifi --ssid needs --yes when it can't ask for confirmation")
-        if not C.confirm(f"  give {C.bold(_name(lock))} the Wi-Fi network {args.ssid}?", default=False):
+        aim = (f" and the MQTT server {mqtt_host or '(the one given)'}:{mqtt_port or '(the one given)'}"
+               if mqtt_host or mqtt_port else "")
+        if not C.confirm(f"  give {C.bold(_name(lock))} the Wi-Fi network {args.ssid}{aim}?", default=False):
             return EXIT_OK
     last = [""]
 
@@ -703,8 +709,7 @@ def _wifi(client: LocklyClient, args) -> int:
             last[0] = event["text"]
             print(C.dim(f"    {event['text']}"), flush=True)
     r = client.bluetooth_wifi_setup(lock, args.ssid, password, country=(args.country or _country()).upper(),
-                                    on_event=progress, mqtt_host=getattr(args, "mqtt_host", None),
-                                    mqtt_port=getattr(args, "mqtt_port", None))
+                                    on_event=progress, mqtt_host=mqtt_host, mqtt_port=mqtt_port)
     ok = r["code"] == 3
     print((C.green if ok else C.red)(f"  {_name(lock)}: {r['text']}"))
     note = W.after_setup(args.ssid, password, source, r["code"])

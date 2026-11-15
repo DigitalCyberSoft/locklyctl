@@ -10,9 +10,11 @@ LocklyHA). This module only moves bytes.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import re
 import ssl
 import threading
 import time
@@ -21,6 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -109,6 +112,46 @@ class LocklyError(Exception):
     def __init__(self, message: str, cod: str | None = None) -> None:
         super().__init__(message)
         self.cod = cod
+
+
+# ── a private locklyctl-mqtt server ─────────────────────────────────────────
+
+def server_url(url: str) -> str:
+    """A private server's address as locklyctl keeps it: ``http(s)://host[:port][/path]``,
+    scheme and host in lower case, no trailing slash. Raises ValueError for
+    anything else, so a sign-in never goes to a half-typed address."""
+    text = (url or "").strip()
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if parts.scheme.lower() not in ("http", "https") or not re.fullmatch(r"[a-z0-9.-]+|[0-9a-f:.]+", host):
+        raise ValueError(f"{text!r} isn't a server address. Give it as https://host or https://host:port.")
+    try:
+        port = parts.port                     # None when none is given
+    except ValueError:                        # urllib reports a port it can't read only by raising
+        port = -1
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"{text!r} has a port that isn't a number from 1 to 65535.")
+    if parts.query or parts.fragment or parts.username or parts.password or " " in parts.path:
+        raise ValueError(f"{text!r} has more than a server address in it. Give it as https://host or "
+                         "https://host:port.")
+    if ":" in host:                           # an IPv6 address goes back in its brackets
+        host = f"[{host}]"
+    return urlunsplit((parts.scheme.lower(), host + (f":{port}" if port else ""), parts.path.rstrip("/"), "", ""))
+
+
+def unencrypted(url: str) -> bool:
+    """True for plain http:// to anything but this device itself: the sign-in
+    and every door's master code would cross the network readable."""
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "http":
+        return False
+    host = (parts.hostname or "").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:                        # a name, not an address: ipaddress has no non-raising check
+        return True
 
 
 # ── MQTT device channel ─────────────────────────────────────────────────────
@@ -341,6 +384,11 @@ class LocklyClient:
         if auth and self.jwt:
             headers["Authorization"] = f"Bearer {self.jwt}"
         resp = self._session.post(base + endpoint, json=body, headers=headers, timeout=timeout)
+        if self.server and resp.status_code == 404:
+            # locklyctl-mqtt serves only the routes in its CONTRACT.md; the rest are Lockly's own
+            raise LocklyError(f"No locklyctl-mqtt server answers at {self.server}." if endpoint == "login"
+                              else f"The private server doesn't have this: {endpoint} is a Lockly cloud feature.",
+                              "404")
         try:
             data = resp.json()
         except Exception:
@@ -444,7 +492,16 @@ class LocklyClient:
     def _is_matter(self, lock: dict) -> bool:
         return str(lock.get("hubid", "")).startswith(MATTER_HUB_PREFIX)
 
+    def _lockly_only(self, what: str) -> None:
+        """Refuse one of Lockly's own cloud features on a private server before
+        anything is sent, so no lock is woken or half set up for a call that
+        can only fail there."""
+        if self.server:
+            raise LocklyError(f"The private server doesn't have this: {what} is a Lockly cloud feature.", "404")
+
     def _mqtt_channel(self) -> MqttChannel | None:
+        if self.server:                       # a private server relays frames itself (/api/senddata):
+            return None                       # never hand its token and the email to Lockly's broker
         # Locked so parallel status refreshes share one channel, not many.
         with self._mqtt_lock:
             if self._mqtt is None:
@@ -830,6 +887,9 @@ class LocklyClient:
         the lock, so a run that stops after that can be started again: the lock
         then refuses 01 01 as not reset, and the kept codes carry on. The code,
         master code and PIN are never logged or returned."""
+        # The lock takes its new master code before Lockly's initialCode/add and
+        # backac: on a private server it would be left set up and on no account.
+        self._lockly_only("setting up a lock")
         model = BIND.model_for(ble_name)
         if model is None:
             raise LocklyError(f"Setting up {ble_name} isn't ported: only these models are: "
@@ -1040,6 +1100,7 @@ class LocklyClient:
 
     def _firmware_reply(self, lock: dict, lock_type: int | None = None) -> dict:
         """Lockly's raw answer to the firmware check this lock's kind uses."""
+        self._lockly_only("firmware")           # and its own DES3 envelope below has no server form
         kind = F.firmware_check_kind(lock)
         model = str(lock.get("mod") or "")
         if kind == F.FW_SINGLE:
@@ -1110,6 +1171,7 @@ class LocklyClient:
         {"offer", "status", "onLock", "send": the parts the app would install
         over MQTT, "downloadUrl", "files": what fetch_firmware_files gets before
         it starts (_install_files), "blocked": why it can't start, or ""}."""
+        self._lockly_only("firmware")           # before the status check wakes the lock
         st = self.query_status(lock) or {}
         body = self._firmware_reply(lock, st.get("lock_type"))
         offer = self._offer_from_reply(lock, body)

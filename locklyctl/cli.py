@@ -23,7 +23,7 @@ from . import config
 from . import vault
 from . import view as V
 from .const import CONNECTIONS
-from .transport import LocklyClient, LocklyError
+from .transport import LocklyClient, LocklyError, server_url, unencrypted
 
 _LOG = logging.getLogger("locklyctl")
 
@@ -858,38 +858,50 @@ def login_flow(*, prompt: bool = True, quiet: bool = False,
     """Sign in: silently with the saved credential, else (if ``prompt``) by
     asking for the password. ``quiet`` sends status chatter to stderr so a
     command's stdout stays clean for scripts. ``server`` signs in to a private
-    locklyctl-mqtt server instead of Lockly's services."""
+    locklyctl-mqtt server instead of Lockly's services; left out, the saved
+    sign-in's own server is used. A saved credential goes only to the server it
+    was saved for, never to another ``server``."""
     def say(msg: str) -> None:
         print(msg, file=sys.stderr if quiet else sys.stdout)
 
     cfg = config.load_config()
     email = cfg.get("email")
     pw_hash = config.load_credential(cfg)
+    home = config.saved_server(cfg)          # where the saved sign-in belongs, even when its keyring is locked
+    if server is None:
+        server = home
+    there = f" on {server}" if server else ""
 
     # 1) Stay logged in like the app: if we stored the credential, re-authenticate
-    #    silently — no password prompt.
-    if email and pw_hash:
+    #    silently (no password prompt), only with the server it was saved for.
+    if email and pw_hash and server == home:
         client = LocklyClient(email, server=server)
         try:
             client.login_with_hash(pw_hash)
             client.load_devices()
             client.connection = config.connection_mode(cfg)
-            say(green(f"  signed in as {email} — {len(client.locks)} lock(s)"))
+            say(green(f"  signed in as {email}{there}: {len(client.locks)} lock(s)"))
             if not cfg.get("pw_in_keyring") and config._keyring():
-                config._save_credential(cfg, email, pw_hash)   # migrate file → keyring
+                config._save_credential(cfg, email, pw_hash)   # migrate file → keyring, server kept
                 say(dim("  (moved the saved login into the system keyring)"))
             return client
         except LocklyError:
             say(dim("  saved login was rejected (password changed?)"
-                    + (" — signing in again" if prompt else "")))
+                    + (": signing in again" if prompt else "")))
+    elif email and pw_hash:
+        say(dim(f"  the saved login is for {home or 'Lockly'}, so it isn't sent to {server or 'Lockly'}"))
 
     if not prompt:
-        say(red("  no saved login — run `locklyctl` once and choose to stay logged in"))
+        say(red(f"  no saved login{there}: run `locklyctl{' --server ' + server if server else ''}` once "
+                "and choose to stay logged in"))
         return None
 
     # 2) Password login.
-    email = ask("  Lockly email", email)
-    password = getpass.getpass("  Lockly password: ")
+    if server and unencrypted(server):
+        say(yellow(f"  {server} isn't https: the password and the doors' master codes cross the network "
+                   "readable"))
+    email = ask(f"  email{there}" if server else "  Lockly email", email)
+    password = getpass.getpass(f"  password{there}: " if server else "  Lockly password: ")
     client = LocklyClient(email, server=server)
     try:
         client.login(password)
@@ -898,7 +910,7 @@ def login_flow(*, prompt: bool = True, quiet: bool = False,
         say(red(f"  {e}"))
         return None
     if confirm("  stay logged in on this computer, like the app?", default=True):
-        where = config._save_credential(cfg, email, client.pw_hash)
+        where = config._save_credential(cfg, email, client.pw_hash, server=server)
         say(dim("  (stored your login credential in "
                 + ("the system keyring" if where == "keyring"
                    else "locklyctl's saved data, sealed with the app passcode" if config.sealed()
@@ -907,8 +919,16 @@ def login_flow(*, prompt: bool = True, quiet: bool = False,
     else:
         config._save_credential(cfg, email, None)
     client.connection = config.connection_mode(cfg)
-    say(green(f"  logged in — {len(client.locks)} lock(s) found"))
+    say(green(f"  logged in{there}: {len(client.locks)} lock(s) found"))
     return client
+
+
+def _server_arg(text: str) -> str:
+    """argparse type for --server: the URL as server_url keeps it."""
+    try:
+        return server_url(text)
+    except ValueError as e:                  # argparse prints an ArgumentTypeError's own text
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
 def unlock_saved_data(passcode_file: str | None) -> int:
@@ -957,9 +977,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="how to reach locks: auto (hub or Lockly's server, then Bluetooth from "
                              "this computer for a status check that got no answer), remote, or "
                              "bluetooth (status checks only); default: the saved setting, else auto")
-    parser.add_argument("--server", metavar="URL",
+    parser.add_argument("--server", metavar="URL", type=_server_arg,
                         help="sign in to a private locklyctl-mqtt server at URL instead of Lockly's "
-                             "services (plain JSON over its REST API; remote commands relay through it)")
+                             "services (plain JSON over its REST API; remote commands relay through it). "
+                             "Without it, the saved login's own server is used")
     parser.add_argument("--passcode-file", metavar="FILE",
                         help="with the app lock on (the app's Settings), read the app passcode from FILE's "
                              "first line instead of asking for it; LOCKLYCTL_PASSCODE_FILE does the same")

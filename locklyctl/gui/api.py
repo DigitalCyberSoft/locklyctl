@@ -15,6 +15,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from .. import ble as BLE
 from .. import config
 from .. import features as F
@@ -26,7 +28,7 @@ from .. import view as V
 from .. import wifi_passwords as W
 from ..const import CONNECTIONS
 from ..features import lock_tz  # noqa: F401  (re-exported for callers)
-from ..transport import LocklyClient, LocklyError
+from ..transport import LocklyClient, LocklyError, server_url, unencrypted
 
 _LOG = logging.getLogger("locklyctl.gui")
 _UNIT_RE = re.compile(r"^\s*(\d{1,4}[A-Za-z]?)\b\s*(.*)$")
@@ -242,41 +244,66 @@ class Api:
     # ── session ──────────────────────────────────────────────────────────
 
     def session(self) -> dict:
-        """Sign in silently with the saved login, if there is one. With the
-        app lock on and this run not unlocked yet, nothing can be read:
-        {"locked": True, "wait": seconds until a passcode is taken}."""
+        """Sign in silently with the saved login, if there is one, at the
+        server it was saved for ("server": a private server's URL, "" for
+        Lockly). With the app lock on and this run not unlocked yet, nothing
+        can be read: {"locked": True, "wait": seconds until a passcode is taken}."""
         if config.locked():
             return {"signedIn": False, "locked": True, "wait": config.unlock_wait(), "email": ""}
         cfg = config.load_config()
         email, pw_hash = cfg.get("email"), config.load_credential(cfg)
         if not (email and pw_hash):
-            return {"signedIn": False, "email": email or ""}
-        client = self._factory(email)
+            # A forgotten sign-in took its server with it; one whose keyring can't be
+            # read now still names it, so signing in again goes there.
+            home = config.saved_server(cfg)
+            return {"signedIn": False, "email": email or "", **({"server": home} if home else {})}
+        server = config.saved_server(cfg)
+        client = self._factory(email, server=server)
         try:
             client.login_with_hash(pw_hash)
             client.load_devices()
         except LocklyError as e:
-            return {"signedIn": False, "email": email,
+            return {"signedIn": False, "email": email, "server": server or "",
                     "message": f"Your saved sign-in no longer works ({e}). Sign in again."}
         except Exception as e:  # noqa: BLE001 - offline etc.
-            return {"signedIn": False, "email": email,
-                    "message": f"Couldn't reach Lockly: {e}"}
+            return {"signedIn": False, "email": email, "server": server or "",
+                    "message": f"Couldn't reach {server or 'Lockly'}: {e}"}
         if not cfg.get("pw_in_keyring") and config._keyring():
-            config._save_credential(cfg, email, pw_hash)   # migrate file → keyring
+            config._save_credential(cfg, email, pw_hash)   # migrate file → keyring, server kept
         self._set_client(client)
-        return {"signedIn": True, "email": email}
+        return self._signed_in(email, server)
 
-    def sign_in(self, email: str, password: str, remember: bool) -> dict:
+    def sign_in(self, email: str, password: str, remember: bool, server: str = "") -> dict:
+        """Sign in to Lockly, or with ``server`` to a private locklyctl-mqtt
+        server; with ``remember``, keep the sign-in and the server it's for on
+        this device, else keep none. The session in use stays until the new one
+        has signed in, so a failed switch from Settings changes nothing."""
         email = (email or "").strip()
+        where = server_url(server) if (server or "").strip() else None
         if not email or not password:
-            raise ValueError("Enter your Lockly email and password.")
-        client = self._factory(email)
-        client.login(password)
-        client.load_devices()
+            raise ValueError("Enter the email and password of your account on that server." if where
+                             else "Enter your Lockly email and password.")
+        self._refuse_while_installing("Signing in again")
+        client = self._factory(email, server=where)
+        try:
+            client.login(password)
+            client.load_devices()
+        except requests.RequestException as e:           # nothing answered: say where, not urllib's text
+            _LOG.warning("sign-in to %s: %s", where or "Lockly", e)
+            raise LocklyError(f"Couldn't reach {where or 'Lockly'}. Check the address, and that the server "
+                              "is running." if where else "Couldn't reach Lockly. Check the connection.") from e
         cfg = config.load_config()
-        where = config._save_credential(cfg, email, client.pw_hash if remember else None)
+        stored = config._save_credential(cfg, email, client.pw_hash if remember else None, server=where)
         self._set_client(client)
-        return {"signedIn": True, "email": email, "storedIn": where}
+        return {**self._signed_in(email, where), "storedIn": stored}
+
+    @staticmethod
+    def _signed_in(email: str, server: str | None) -> dict:
+        """A session's answer. On a private server it also names the server and
+        says whether that address is plain http to another machine
+        (``plainHttp``), which the page warns about; on Lockly neither is sent."""
+        here = {"server": server, "plainHttp": unencrypted(server)} if server else {}
+        return {"signedIn": True, "email": email, **here}
 
     def sign_out(self) -> dict:
         """Forget the saved login and end the session. Refused while a firmware
@@ -399,6 +426,9 @@ class Api:
     def _view(self, lock: dict, cfg: dict | None = None, hidden: set[str] | None = None) -> dict:
         cfg = config.load_config() if cfg is None else cfg
         hidden = V.hidden_ids(self._c()) if hidden is None else hidden
+        # A private server serves the lock's own commands, not Lockly's cloud
+        # features (firmware, offline codes): the page leaves those out.
+        lockly = not self._c().server
         name = str(lock.get("na") or lock.get("blename") or lock.get("ID", "?"))
         unit, rest = split_unit(name)
         e = self._c().status_cache.get(lock["ID"]) or {}
@@ -445,11 +475,11 @@ class Api:
             # (Visage, Vision), and which firmware check it gets.
             "hasWifi": F.has_wifi_setup(lock),
             "accessUsers": F.is_access_user_lock(lock),
-            "firmwareKind": F.firmware_check_kind(lock),
+            "firmwareKind": F.firmware_check_kind(lock) if lockly else None,
             "eventLog": F.uses_event_log(lock),
             "faceCapable": F.supports_face(lock),
             # One-use codes the lock checks by itself, made from Lockly's seed.
-            "offlineCodes": OAC.supported(lock),
+            "offlineCodes": OAC.supported(lock) and lockly,
             "favorite": lock["ID"] in _favorite_ids(cfg),
             # Left out of the door list (still reached by "Check all doors").
             "hidden": lock["ID"] in hidden,
@@ -1185,19 +1215,27 @@ class Api:
         return [{**best[o["ssid"]], "known": o["known"], "connected": o["connected"], "twinOf": o["twin_of"],
                  "suggested": o["suggested"]} for o in W.order(list(best))]
 
-    def bluetooth_wifi_setup(self, lock_id: str, ssid: str, password: str, country: str = "") -> dict:
+    def bluetooth_wifi_setup(self, lock_id: str, ssid: str, password: str, country: str = "",
+                             mqtt_host: str = "", mqtt_port: int | str | None = None) -> dict:
         """Give the lock a Wi-Fi network over Bluetooth, then ask until it says
-        how joining went: {"ok", "text", "note", "known", "lock"}. An empty password
-        means the saved one, or this computer's (wifi_passwords.resolve). A
-        password the lock joins with is saved, and a saved one it calls wrong
-        is forgotten ("note" says which). Passwords never come back to the page
-        and aren't logged."""
+        how joining went: {"ok", "text", "note", "known", "mqttHost", "mqttPort", "lock"}. An
+        empty password means the saved one, or this computer's
+        (wifi_passwords.resolve). A password the lock joins with is saved, and a
+        saved one it calls wrong is forgotten ("note" says which). Passwords
+        never come back to the page and aren't logged.
+
+        ``mqtt_host`` / ``mqtt_port`` aim the lock at another MQTT server than
+        the one the signed-in server gives, such as a private locklyctl-mqtt
+        one, as ``locklyctl wifi --mqtt-host/--mqtt-port`` does. "mqttHost" and
+        "mqttPort" say what was written instead ("" and 0 for a part left as
+        the server gives it)."""
         lock = self._lock(lock_id)
         why = BLE.available()
         if why:
             raise ValueError(why)
         if not ssid:
             raise ValueError("Choose a network.")
+        host, port = F.mqtt_override(mqtt_host, mqtt_port)       # before Bluetooth: what the lock holds
         source = "typed"
         if not password:
             password, source, none_why = W.resolve(ssid)
@@ -1208,12 +1246,13 @@ class Api:
         tag = locale.getlocale()[0] or ""
         cc = (country or (tag.split("_")[1][:2] if "_" in tag else "US")).upper()
         try:
-            r = self._c().bluetooth_wifi_setup(lock, ssid, password, country=cc, on_event=lambda e: None)
+            r = self._c().bluetooth_wifi_setup(lock, ssid, password, country=cc, on_event=lambda e: None,
+                                               mqtt_host=host, mqtt_port=port)
         except BLE.BluetoothError as e:
             raise LocklyError(str(e), "bluetooth") from e
         note = W.after_setup(ssid, password, source, r["code"])
         return {"ok": r["code"] == 3, "text": r["text"], "note": note, "known": W.known([ssid])[ssid],
-                "lock": self._view(lock)}
+                "mqttHost": host or "", "mqttPort": port or 0, "lock": self._view(lock)}
 
     def forget_wifi_password(self, ssid: str) -> dict:
         """Forget the password locklyctl saved for this network: {"forgotten"}."""

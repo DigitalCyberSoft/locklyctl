@@ -454,12 +454,26 @@ def load_credential(cfg: dict) -> str | None:
     return cfg.get("pw_hash")
 
 
-def _save_credential(cfg: dict, email: str, pw_hash: str | None) -> str:
-    """Store (or, with None, forget) the credential. Returns where it went:
-    'keyring', 'file' or 'none'."""
+_KEEP = object()        # _save_credential: keep the private server saved with the login
+
+
+def saved_server(cfg: dict) -> str | None:
+    """The private locklyctl-mqtt server the saved sign-in belongs to, or None
+    for Lockly's. A saved credential is only ever sent to this one."""
+    return cfg.get("server") or None
+
+
+def _save_credential(cfg: dict, email: str, pw_hash: str | None, server=_KEEP) -> str:
+    """Store (or, with None, forget) the credential and where it signs in:
+    ``server`` is a private server's URL, None for Lockly, or left out to keep
+    the one saved with it (moving the credential between the keyring and the
+    file). A forgotten credential takes its server with it, so the next
+    sign-in starts at Lockly. Returns where it went: 'keyring', 'file' or 'none'."""
     old_email = cfg.get("email", "")
+    home = saved_server(cfg) if server is _KEEP else server
+    home = {"server": home} if pw_hash and home else {}
     # "token" is a session JWT stored by older versions; nothing reads it now.
-    cfg = {k: v for k, v in cfg.items() if k not in ("pw_hash", "pw_in_keyring", "token")}
+    cfg = {k: v for k, v in cfg.items() if k not in ("pw_hash", "pw_in_keyring", "token", "server")}
     kr = _keyring()
     if kr:
         for e in {old_email, email} - {""}:          # never leave a stale copy
@@ -470,9 +484,9 @@ def _save_credential(cfg: dict, email: str, pw_hash: str | None) -> str:
     if pw_hash and kr:
         try:
             kr.set_password(_KEYRING_SERVICE, email, pw_hash)
-            save_config({**cfg, "email": email, "pw_in_keyring": True})
+            save_config({**cfg, "email": email, "pw_in_keyring": True, **home})
             return "keyring"
         except Exception:  # noqa: BLE001 - locked/unavailable → file fallback
             _LOG.warning("keyring unavailable, storing login in the config file", exc_info=True)
-    save_config({**cfg, "email": email, "pw_hash": pw_hash})
+    save_config({**cfg, "email": email, "pw_hash": pw_hash, **home})
     return "file" if pw_hash else "none"

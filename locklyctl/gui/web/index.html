@@ -43,7 +43,17 @@
   <main id="signin" class="screen signin" hidden>
     <form id="signin-form" class="signin-plate" novalidate>
       <h1 class="signin-title"><img class="logo" src="logo.svg" alt="">locklyctl</h1>
-      <p class="muted">Sign in with your Lockly account.</p>
+      <p class="muted" id="signin-about">Sign in with your Lockly account.</p>
+      <fieldset class="seg where" id="signin-where">
+        <legend>Sign in to</legend>
+        <label><input type="radio" name="where" value="lockly" checked><span>Lockly</span></label>
+        <label><input type="radio" name="where" value="server"><span>A private server</span></label>
+      </fieldset>
+      <label class="field" id="signin-server-field" hidden>
+        <span>Server address</span>
+        <input name="server" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://locks.example.net">
+      </label>
+      <p class="caution" id="signin-plain" hidden></p>
       <label class="field">
         <span>Email</span>
         <input name="email" type="email" autocomplete="username" required>
@@ -340,7 +350,7 @@
             <p class="fine" id="ble-none" hidden></p>
             <div id="ble-out"></div>
             <div id="tz-box">
-              <p class="muted">The lock also keeps a time zone of its own, which the Lockly app gives it when it's set up and after a firmware update. This gives it the one in the Lockly account, then the time. It wakes the lock.</p>
+              <p class="muted" id="tz-about">The lock also keeps a time zone of its own, which the Lockly app gives it when it's set up and after a firmware update. This gives it the one in the Lockly account, then the time. It wakes the lock.</p>
               <p class="fine" id="tz-note"></p>
               <div><button class="btn btn-quiet" id="btn-tz" type="button"><svg class="i" aria-hidden="true"><use href="#i-schedules"/></svg>Give it its time zone</button></div>
               <div id="tz-out"></div>
@@ -349,13 +359,22 @@
 
           <section class="job" id="job-wifi">
             <h2>Wi-Fi</h2>
-            <p class="muted">Give the lock a Wi-Fi network over Bluetooth, next to the door, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
+            <p class="muted" id="wifi-about">Give the lock a Wi-Fi network over Bluetooth, next to the door, as the Lockly app's Wi-Fi setup does. Lockly supplies the server it connects to.</p>
             <div id="wifi-on"><button class="btn btn-quiet" id="btn-wifi-scan" type="button"><svg class="i" aria-hidden="true"><use href="#i-wifi"/></svg>Networks it sees</button></div>
             <p class="fine" id="wifi-none" hidden></p>
             <form id="wifi-form" hidden>
               <label class="field"><span>Network</span><select name="ssid" required></select></label>
               <label class="field"><span>Password</span><input name="password" type="password" autocomplete="off"></label>
               <p class="fine" id="wifi-pw-note"></p>
+              <!-- Wi-Fi setup also writes the MQTT server the lock connects to: another one aims it at a private server. -->
+              <details class="mqtt" id="wifi-mqtt">
+                <summary>MQTT server</summary>
+                <p class="fine" id="wifi-mqtt-about"></p>
+                <div class="row">
+                  <label class="field"><span>Host</span><input name="mqttHost" autocomplete="off" spellcheck="false" maxlength="128" placeholder="locks.example.net"></label>
+                  <label class="field field-short"><span>Port</span><input name="mqttPort" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="8883"></label>
+                </div>
+              </details>
               <div class="row"><button class="btn btn-ink" type="submit">Give it this network</button>
                 <button class="btn btn-quiet" id="wifi-forget" type="button" hidden>Forget the saved password</button></div>
             </form>
@@ -365,7 +384,8 @@
           <section class="job" id="job-firmware">
             <h2>Firmware</h2>
             <p class="muted">Asks Lockly for newer firmware and the lock for what it runs. It wakes the lock.</p>
-            <div><button class="btn btn-quiet" id="btn-firmware" type="button"><svg class="i" aria-hidden="true"><use href="#i-firmware"/></svg>Check for updates</button></div>
+            <div id="fw-on"><button class="btn btn-quiet" id="btn-firmware" type="button"><svg class="i" aria-hidden="true"><use href="#i-firmware"/></svg>Check for updates</button></div>
+            <p class="fine" id="fw-none" hidden></p>
             <div id="fw-out"></div>
           </section>
         </div>
@@ -377,11 +397,33 @@
       <section class="door settings">
         <header class="person-head"><h1>Settings</h1></header>
 
-        <section class="job">
+        <section class="job" id="job-account">
           <h2>Account</h2>
-          <p>Signed in as <strong id="who"></strong>.</p>
-          <div><button class="btn btn-quiet" id="sign-out" type="button"
+          <p>Signed in as <strong id="who"></strong><span id="who-where"></span>.</p>
+          <p class="caution" id="who-plain" hidden></p>
+          <p class="fine" id="who-console" hidden></p>
+          <div class="row"><button class="btn btn-quiet" id="switch-open" type="button">Sign in somewhere else</button>
+            <button class="btn btn-quiet" id="sign-out" type="button"
                   title="Signs out and forgets the saved sign-in on this device."><svg class="i" aria-hidden="true"><use href="#i-signout"/></svg>Sign out</button></div>
+          <!-- Another account, or Lockly and a private server in turn: the doors in use stay until this one signs in. -->
+          <form id="switch-form" class="inline-form" novalidate hidden>
+            <fieldset class="seg where" id="switch-where">
+              <legend>Sign in to</legend>
+              <label><input type="radio" name="where" value="lockly" checked><span>Lockly</span></label>
+              <label><input type="radio" name="where" value="server"><span>A private server</span></label>
+            </fieldset>
+            <label class="field" id="switch-server-field" hidden><span>Server address</span><input name="server" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://locks.example.net"></label>
+            <p class="caution" id="switch-plain" hidden></p>
+            <div class="row">
+              <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username"></label>
+              <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password"></label>
+            </div>
+            <label class="check"><input name="remember" type="checkbox" checked><span>Stay signed in on this device</span></label>
+            <p class="form-error" id="switch-error" role="alert"></p>
+            <div class="row"><button class="btn btn-ink" type="submit" id="switch-submit">Sign in</button>
+              <button class="btn btn-quiet" type="button" id="switch-cancel">Cancel</button></div>
+            <p class="fine">The doors you're signed in to now stay until this sign-in works. Staying signed in replaces the sign-in saved on this device.</p>
+          </form>
         </section>
 
         <section class="job">
@@ -390,7 +432,7 @@
           <fieldset class="seg" id="conn-mode">
             <legend>Reach doors by</legend>
             <label><input type="radio" name="conn" value="auto" checked><span>Auto</span></label>
-            <label><input type="radio" name="conn" value="remote"><span>Hub or Lockly's server</span></label>
+            <label><input type="radio" name="conn" value="remote"><span id="conn-remote">Hub or Lockly's server</span></label>
             <label><input type="radio" name="conn" value="bluetooth"><span>Bluetooth only</span></label>
           </fieldset>
           <p class="fine" id="conn-note"></p>

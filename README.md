@@ -2,7 +2,8 @@
 
 **Unofficial** control of Lockly smart locks from your computer, your phone or
 an AI assistant, with no Lockly app needed. It talks to Lockly's cloud the same
-way the official app does.
+way the official app does, or to a [locklyctl-mqtt](https://github.com/DigitalCyberSoft/locklyctl-mqtt)
+server you run yourself instead ([Private server](#private-server-locklyctl-mqtt)).
 
 - **Desktop app** for Windows, macOS and Linux
 - **Phone app** for Android and iOS
@@ -60,13 +61,15 @@ way the official app does.
 | Firmware install over Wi-Fi (Visage and other multi-part Wi-Fi locks): front, back and Wi-Fi boards, as the app sends them over MQTT | ✅ installed and confirmed on a Visage (2026-11-13): it restarted, came back on Wi-Fi in about 3 minutes and reported every new version. An earlier run on another Visage left it offline afterwards; with this computer next to the door, the check after the restart also asks over Bluetooth and sets the clock. Checks Bluetooth first and warns if the lock is out of range. Shows each part's progress |
 | Bluetooth-chip firmware over Bluetooth (Visage): the Dialog SUOTA update the app uses for that chip | ⚠️ installed on a Visage (2026-11-13): the lock acknowledged every block and the end signal and later reported the new version, but it went silent over Bluetooth for about 13 minutes first. The app updates the chip only after the other parts are current, and so does this: it refuses while any other part is behind. Checks the image's own CRC before sending |
 | Firmware installs: every file downloaded and checked before anything is sent, and hard to stop once started | ⚠️ the checks and the hold are tested, not yet during a real install on a lock. Before anything goes to the lock, each file is downloaded and checked (its size against Lockly's offer, its MD5 against the server's) and kept in `~/.locklyctl/firmware`, used again while the server has the same file or when it can't be reached; run against Lockly's 1.14.34 Visage files (2026-11-14). From the first write until the install is confirmed or fails: other commands to that lock are refused; Ctrl+C has to be pressed 3 times within 5 s, and SIGTERM and a closed terminal are ignored (run in a separate process); this computer is kept from sleeping, shutting down or suspending on a closed lid (systemd-inhibit on Linux, run here; caffeinate on macOS and SetThreadExecutionState on Windows, not run); the desktop window stays open and signing out waits. The phone app refuses to quit, but the phone can still suspend it |
-| Wi-Fi setup over Bluetooth (Visage): list the networks the lock sees, give it one, and follow it joining, as the app's Wi-Fi setup does, with the server settings Lockly gives the lock | ✅ brought a Visage that had been offline for months back onto Wi-Fi (2026-11-13): connected 21 s after the save, reachable through Lockly's server about a minute later |
+| Wi-Fi setup over Bluetooth (Visage): list the networks the lock sees, give it one, and follow it joining, as the app's Wi-Fi setup does, with the server settings Lockly gives the lock, or a private server's MQTT host and port instead | ✅ brought a Visage that had been offline for months back onto Wi-Fi (2026-11-13): connected 21 s after the save, reachable through Lockly's server about a minute later |
+| A [private server](#private-server-locklyctl-mqtt) ([locklyctl-mqtt](https://github.com/DigitalCyberSoft/locklyctl-mqtt)) in place of Lockly's cloud: sign in to it (the app's sign-in screen, or Settings, Account; `--server` on the command line), and point a lock's Wi-Fi at its MQTT broker (Maintenance, Wi-Fi, MQTT server; `wifi --mqtt-host/--mqtt-port`) | ⚠️ the app (its real page and backend), the command line and the MCP server were run against a locklyctl-mqtt server on this computer (2026-11-15): sign-in, a restart staying signed in there, the door list, its event log, a status check relayed through the server, signing out, and the saved sign-in kept from another `--server`. No lock was connected to it, and no lock has connected to one yet: whether a lock takes a broker other than Lockly's isn't known |
 | Wi-Fi passwords typed once: saved after a lock joins the network with one (in the OS keyring, else the owner-only config file), forgotten when a lock calls a saved one wrong, and otherwise taken from this computer's own saved network. Networks are offered in this order: those a lock has joined before (locklyctl saved their password), the one this computer is on, others this computer has saved, then by signal; only one of the first two kinds is preselected. When a router names each band ("Home" and "Home-5G") and this computer is on the 5 GHz name, the 2.4 GHz name counts as the one it's on; two names that differ by more than the band aren't matched. Only networks from the lock's own scan are offered, and the Visage's Wi-Fi chip (Renesas DA16200) is 2.4 GHz only, so a 5 GHz-only network never appears | ⚠️ saving in the GNOME keyring and reading a saved network from NetworkManager were run on Linux (2026-11-14), not yet in a setup on a lock. macOS (the keychain's Wi-Fi item, after macOS asks for an administrator's password) and Windows (`netsh wlan export profile key=clear`, which gives the password only when Windows allows it for that user) are tested against stand-ins only, and so is finding which network a Mac or Windows PC is on (macOS 15 and later reportedly hide the name; then that step is skipped). Phones can't read the system's saved networks. Passwords are never logged, printed or sent to the GUI's page |
 | Slot locks (e.g. PGD7Y): PIN `0x4B`, list `0x50`, delete `0x4D` | ⚠️ checked against the app; not yet working on a lock |
 | Face enrolment `0x7D` + `0x92` (Visage), fingerprint capture `0x7D` | ⚠️ checked against the app; needs someone at the lock, not yet tried |
 
 Commands reach a lock through its hub (`senddata` relay) or, for Wi-Fi locks
-like the Visage, Lockly's MQTT device channel. With the Auto connection
+like the Visage, Lockly's MQTT device channel; signed in to a private server,
+through that server's relay. With the Auto connection
 setting, a status check that gets no answer that way is tried over Bluetooth
 from this computer when the lock is in range. Locks with no hub are listed,
 but the desktop app doesn't check or control them yet.
@@ -187,7 +190,8 @@ What it doesn't protect:
 
 `locklyctl-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server. Sign in once with `locklyctl` (choose to stay signed in), then add it
-to your assistant. For Claude Code:
+to your assistant. It uses that saved sign-in, on Lockly or on a
+[private server](#private-server-locklyctl-mqtt). For Claude Code:
 
 ```bash
 pip install -e '.[mcp,keyring]'
@@ -215,6 +219,58 @@ them. Existing PINs and offline codes are never returned; a PIN or offline
 code the server creates is returned once, in the reply that created it. Installing firmware isn't a tool under
 any flag: it's in the desktop app and the command line only.
 
+## Private server (locklyctl-mqtt)
+
+[locklyctl-mqtt](https://github.com/DigitalCyberSoft/locklyctl-mqtt) is a
+server you run yourself in place of Lockly's cloud: Wi-Fi locks connect to its
+MQTT broker, it keeps each lock's people, PINs and schedules, and locklyctl
+signs in to it instead of Lockly. It's early. No lock has connected to one yet,
+and whether a lock accepts a broker other than Lockly's, especially over TLS,
+won't be known until one is tried on a spare lock.
+
+**Signing in.** In the desktop and phone apps, choose **A private server** on
+the sign-in screen and give its address, like `https://locks.example.net`.
+Later, Settings, Account, **Sign in somewhere else** switches between Lockly
+and a server (or another account); the doors in use stay until the new
+sign-in works. From the command line, `locklyctl --server https://locks.example.net`
+opens the menus and signs in there. A sign-in you keep remembers its server:
+the next start, single commands and the MCP server all use it without
+`--server`. A saved sign-in is only ever sent to the server it was saved for:
+`--server` naming another one asks for that server's password instead (or, for
+a single command that can't ask, stops).
+
+**Use https.** Over plain `http://` to another machine, the password and every
+door's master code cross the network readable: the server hands an account
+its locks' master codes, which locklyctl needs to talk to them. The app warns
+when an address is like that (`http://127.0.0.1` and `localhost` don't count).
+
+**What goes through the server.** The door list, status, lock and unlock, keep
+unlocked, Welcome and Rain Mode, the lock's time zone and clock, activity (the
+server keeps the events its locks send), hiding and ordering doors, and
+backups (`backup`, `restore`). Commands for a lock are relayed through the
+server's own MQTT broker. People, PINs and schedules are kept in the server's
+console, at its address, rather than edited from locklyctl. Offline codes,
+firmware and setting up a new lock (`add`) are Lockly's own, so the app leaves
+them out there and the command line refuses them before anything reaches a
+lock.
+
+**Moving a lock to it.**
+
+1. Signed in to Lockly: `locklyctl backup doors.backup` ([Backups](#backups-and-moving-to-a-private-server)).
+2. `locklyctl --server https://locks.example.net restore doors.backup` brings
+   the locks and their people into the server.
+3. Next to the door, give the lock Wi-Fi with the server's MQTT broker: in the
+   app, Maintenance, Wi-Fi, **MQTT server** (its host, and its port: 8883 with
+   TLS, 1883 without), or
+   `locklyctl wifi "Front" --ssid "Home" --mqtt-host locks.example.net --mqtt-port 8883`.
+   Signed in to the server itself, Wi-Fi setup already writes the broker the
+   server gives (its `-public-mqtt-host` and `-public-mqtt-port`). A lock takes
+   a port of up to 4 digits and a host of up to 128 characters (the app's own
+   setup message); locklyctl refuses longer ones rather than cutting them.
+
+From then on Lockly's app and server can't reach that lock, until it's given
+Wi-Fi again without the MQTT server set.
+
 ## Command line
 
 ```bash
@@ -231,7 +287,9 @@ the credential goes to the OS keyring (with the `keyring` extra), otherwise to
 use `--logout` on shared machines. `--debug` prints protocol logging.
 `--connection auto|remote|bluetooth` overrides the saved connection setting
 for one run. With an [app lock](#app-lock) set, the passcode is asked for
-first, or read from `--passcode-file FILE`.
+first, or read from `--passcode-file FILE`. `--server URL` signs in to a
+[private server](#private-server-locklyctl-mqtt) instead of Lockly; a kept
+sign-in remembers its server, so later commands need no `--server`.
 
 Once a login is saved, single actions run without the menus. `locklyctl --help`
 lists them in the same groups:

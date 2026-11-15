@@ -65,6 +65,21 @@ const noBluetooth = () => (!caps.bluetooth ? "" : caps.commandLine ? caps.blueto
   : `The ${caps.device === "phone" ? "phone app" : "packaged app"} has no Bluetooth yet: `
     + "use locklyctl from source on a computer with Bluetooth, next to the door.");
 
+// Where this session signed in (Api.session / sign_in): Lockly, or a private locklyctl-mqtt
+// server, which serves the locks' own commands but not Lockly's cloud features.
+let account = { email: "", server: "", plainHttp: false };
+const cloud = () => (account.server ? "your server" : "Lockly's server");
+const Cloud = () => (account.server ? "Your server" : "Lockly's server");
+// Plain http to another machine (the page's copy of transport.unencrypted, for the warning as it's typed).
+function plainHttp(url) {
+  const m = /^http:\/\/(\[[^\]]*\]|[^/:?#]*)/i.exec((url || "").trim());
+  if (!m) return false;
+  const host = m[1].toLowerCase().replace(/^\[|\]$/g, "");
+  return !(host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host));
+}
+const PLAIN_TEXT = "This address isn't https: your password and every door's master code would cross the "
+  + "network readable. Use https unless the network is yours alone.";
+
 // ── plumbing ───────────────────────────────────────────────────────────
 
 async function connect() {
@@ -197,8 +212,51 @@ async function boot() {
 // screen while the app lock holds, else the app, else signing in.
 function afterSession(s) {
   if (s.locked) return showUnlock(s.wait);
-  if (s.signedIn) return enterApp(s.email);
-  showSignin(s.email, s.message);
+  if (s.signedIn) return enterApp(s);
+  showSignin(s.email, s.message, s.server);
+}
+
+// The "Sign in to: Lockly / A private server" choice, on the sign-in screen and in Settings
+// (prefix "signin" or "switch"): the address field shows for a server, with a warning for plain http.
+function setWhere(prefix, server) {
+  const f = $(`${prefix}-form`);
+  f.where.value = server ? "server" : "lockly";
+  if (server !== undefined) f.server.value = server || "";
+  showWhere(prefix);
+}
+
+function showWhere(prefix) {
+  const f = $(`${prefix}-form`);
+  const toServer = f.where.value === "server";
+  $(`${prefix}-server-field`).hidden = !toServer;
+  const warn = $(`${prefix}-plain`);
+  warn.hidden = !(toServer && plainHttp(f.server.value));
+  warn.textContent = warn.hidden ? "" : PLAIN_TEXT;
+  if (prefix === "signin") {
+    $("signin-about").textContent = toServer
+      ? "Sign in to your own locklyctl-mqtt server, with the account it has for you."
+      : "Sign in with your Lockly account.";
+  }
+}
+
+for (const prefix of ["signin", "switch"]) {
+  $(`${prefix}-where`).addEventListener("change", () => {
+    showWhere(prefix);
+    if ($(`${prefix}-form`).where.value === "server") $(`${prefix}-form`).server.focus();
+  });
+  $(`${prefix}-form`).server.addEventListener("input", () => showWhere(prefix));
+}
+
+// What sign_in gets from one of those forms: the server's address, or "" for Lockly.
+function whereTo(f, errorId) {
+  if (f.where.value !== "server") return "";
+  const server = f.server.value.trim();
+  if (!server) {
+    $(errorId).textContent = "Enter the server's address, like https://locks.example.net.";
+    f.server.focus();
+    return null;
+  }
+  return server;
 }
 
 // ── the app lock: a passcode that seals what locklyctl saved on this device ──
@@ -323,12 +381,16 @@ function forgetSession() {
   resetSchedules();
   resetJobs();
   resetOac();
+  closeSwitch();
+  account = { email: "", server: "", plainHttp: false };
   $("who").textContent = "";
 }
 
-function showSignin(email, message) {
+// ``server``: where a saved sign-in that no longer works was for, so trying again goes there.
+function showSignin(email, message, server) {
   const f = $("signin-form");
   if (email) f.email.value = email;
+  setWhere("signin", server || "");
   $("signin-error").textContent = message || "";
   show("signin");
   (email ? f.password : f.email).focus();
@@ -338,14 +400,75 @@ $("signin-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.currentTarget;
   $("signin-error").textContent = "";
-  await busy(f.querySelector("button"), async () => {
+  const server = whereTo(f, "signin-error");
+  if (server === null) return;
+  await busy(f.querySelector("button[type=submit]"), async () => {
     try {
-      const s = await call("sign_in", f.email.value, f.password.value, f.remember.checked);
+      const s = await call("sign_in", f.email.value, f.password.value, f.remember.checked, server);
       f.password.value = "";
-      await enterApp(s.email);
+      await enterApp(s);
     } catch (e) {
       $("signin-error").textContent = e.message;
     }
+  });
+});
+
+// ── Settings, Account: where this session is signed in, and signing in somewhere else ──
+
+function renderAccount() {
+  $("who").textContent = account.email;
+  $("who-where").textContent = account.server ? ` on ${account.server}, a private server` : " on Lockly";
+  $("who-plain").hidden = !account.plainHttp;
+  $("who-plain").textContent = account.plainHttp
+    ? "This server is reached over plain http: the password and every door's master code cross the network readable."
+    : "";
+  const consoleNote = $("who-console");
+  consoleNote.hidden = !account.server;
+  consoleNote.replaceChildren(...(account.server ? [
+    "People, PINs and schedules on this server are kept in its own console, at ",
+    h("code", {}, `${account.server}/`), ". Firmware and offline codes are Lockly's, so they aren't offered here."] : []));
+}
+
+function openSwitch() {
+  const f = $("switch-form");
+  f.hidden = false;
+  $("switch-open").hidden = true;
+  $("switch-error").textContent = "";
+  f.email.value = account.email;
+  f.password.value = "";
+  f.server.value = account.server;                        // the same server, for another account on it
+  f.where.value = account.server ? "lockly" : "server";   // the usual reason to switch: the other place
+  showWhere("switch");
+  (f.where.value === "server" ? f.server : f.password).focus();
+}
+
+function closeSwitch() {
+  const f = $("switch-form");
+  f.hidden = true;
+  f.password.value = "";
+  $("switch-open").hidden = false;
+}
+
+$("switch-open").addEventListener("click", openSwitch);
+$("switch-cancel").addEventListener("click", closeSwitch);
+
+$("switch-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.currentTarget;
+  $("switch-error").textContent = "";
+  const server = whereTo(f, "switch-error");
+  if (server === null) return;
+  await busy($("switch-submit"), async () => {
+    let s;
+    try {
+      s = await call("sign_in", f.email.value, f.password.value, f.remember.checked, server);
+    } catch (e) {
+      $("switch-error").textContent = e.message;         // the doors in use stay as they were
+      return;
+    }
+    forgetSession();
+    await enterApp(s);
+    toast(`Signed in as ${s.email} on ${s.server || "Lockly"}.`);
   });
 });
 
@@ -355,9 +478,11 @@ function showConnection(c) {
   for (const r of $("conn-mode").querySelectorAll("input")) r.checked = r.value === c.mode;
   const why = noBluetooth();
   $("conn-mode").hidden = !!why && c.mode !== "bluetooth";
+  $("conn-remote").textContent = account.server ? "Your server" : "Hub or Lockly's server";
+  const remote = account.server ? "your server" : "the hub or Lockly's server";
   $("conn-about").textContent = why
-    ? "Doors are reached through their hub or Lockly's server."
-    : `How ${here()} reaches every door. Auto uses the hub or Lockly's server, and when a door doesn't answer a `
+    ? `Doors are reached through ${remote}.`
+    : `How ${here()} reaches every door. Auto uses ${remote}, and when a door doesn't answer a `
       + `status check that way, tries it over Bluetooth from ${here()}. Only status checks go over Bluetooth so far.`;
   $("conn-note").textContent = why ? `Bluetooth isn't used here. ${why}` : "";
 }
@@ -371,8 +496,10 @@ $("conn-mode").addEventListener("change", async (ev) => {
   }
 });
 
-async function enterApp(email) {
-  $("who").textContent = email;
+// ``s``: the session (Api.session or sign_in): who, and on which server ("" or missing: Lockly).
+async function enterApp(s) {
+  account = { email: s.email, server: s.server || "", plainHttp: !!s.plainHttp };
+  renderAccount();
   show("app");
   showView("doors");
   renderAbout();
@@ -388,7 +515,9 @@ async function enterApp(email) {
   // Api.locks returns them in the list's order: by name until a door is moved.
   renderFavs();
   if (!locks.length) {
-    $("plates").replaceChildren(h("li", { class: "muted" }, "No locks on this account. Add them in the Lockly app first."));
+    $("plates").replaceChildren(h("li", { class: "muted" }, account.server
+      ? "No locks on this account on the server yet. Add them in its console, or restore a backup into it."
+      : "No locks on this account. Add them in the Lockly app first."));
     return;
   }
   renderPlates();
@@ -413,7 +542,8 @@ window.addEventListener("beforeunload", (ev) => {
 
 $("sign-out").addEventListener("click", async () => {
   const ok = await confirmDialog("Sign out?",
-    "This also forgets the saved sign-in, so you'll need your Lockly password next time.", "Sign out");
+    `This also forgets the saved sign-in, so you'll need your ${account.server ? "password for the server"
+      : "Lockly password"} next time.`, "Sign out");
   if (!ok) return;
   let s;
   try {
@@ -590,7 +720,7 @@ async function runCommand(v, kind) {
       const fix = clockFixText(view.clockFix);
       toast((view.state !== "asleep"
         ? `${label}: ${STATE_WORD[view.state]}${view.via === "bluetooth" ? " (over Bluetooth)" : ""}.`
-        : (view.offline ? `Lockly's server says ${label} is offline.` : `${label} didn't answer.`)
+        : (view.offline ? `${Cloud()} says ${label} is offline.` : `${label} didn't answer.`)
           + (view.bluetoothNote ? ` Bluetooth: ${view.bluetoothNote}` : ""))
         + (fix ? ` ${fix}` : ""),
         view.state === "asleep" || (view.clockFix && !view.clockFix.fixed));
@@ -679,7 +809,7 @@ function renderDoor() {
   st.dataset.state = doing ? "busy" : v.route === "bluetooth" ? "unknown" : v.state;
   st.replaceChildren(...(doing ? [icon(v.route), DOING[doing]]
     : [stateIcon(stateOf(v)), v.route === "bluetooth" ? "No hub: only reachable over Bluetooth"
-      : v.state === "asleep" ? (v.offline ? "Offline: Lockly's server says its Wi-Fi isn't connected"
+      : v.state === "asleep" ? (v.offline ? `Offline: ${cloud()} says its Wi-Fi isn't connected`
         : "Didn't answer (asleep or offline)")
         : v.state === "unknown" ? "Status not checked yet" : STATE_WORD[v.state]]));
 
@@ -690,7 +820,7 @@ function renderDoor() {
   const since = sinceText(v.checkedAt);
   if (since) facts.push(h("li", {}, v.cached ? `From the hub, ${since}`
     : `Checked ${since}${v.via === "bluetooth" ? " over Bluetooth" : ""}`));
-  if (v.wifiOffline) facts.push(h("li", { class: "warn" }, `Wi-Fi offline: Lockly's server says so, and ${here()} reached it over Bluetooth`));
+  if (v.wifiOffline) facts.push(h("li", { class: "warn" }, `Wi-Fi offline: ${cloud()} says so, and ${here()} reached it over Bluetooth`));
   if (v.state === "asleep" && v.bluetoothNote) facts.push(h("li", {}, `Bluetooth: ${v.bluetoothNote}`));
   const clock = clockText(v.clockKnown, v.clockOffset);
   const fix = clockFixText(v.clockFix);
@@ -703,9 +833,12 @@ function renderDoor() {
 
 function renderTimeZone(v) {
   $("tz-box").hidden = !v.takesTimeZone;
+  const where = account.server ? "your server's account" : "the Lockly account";
+  $("tz-about").textContent = "The lock also keeps a time zone of its own, which the Lockly app gives it when it's "
+    + `set up and after a firmware update. This gives it the one in ${where}, then the time. It wakes the lock.`;
   $("tz-note").textContent = v.timeZone === "not set"
-    ? `The Lockly account has no time zone for this lock, so it gets ${here()}'s (${v.computerTimeZone}).`
-    : `In the Lockly account: ${v.timeZone}. ${Here()}: ${v.computerTimeZone}.`
+    ? `${where.replace(/^t/, "T").replace(/^y/, "Y")} has no time zone for this lock, so it gets ${here()}'s (${v.computerTimeZone}).`
+    : `In ${where}: ${v.timeZone}. ${Here()}: ${v.computerTimeZone}.`
       + (v.timeZone !== v.computerTimeZone ? " They differ: the lock gets the account's." : "");
 }
 
@@ -920,8 +1053,9 @@ async function loadActivity() {
     if (!events.length) {
       const v = current();
       panel.replaceChildren(h("p", { class: "muted" }, v && v.eventLog
-        ? "No events in the last 7 days. This lock sends its events to Lockly over its Wi-Fi, so none arrive "
-          + "while it's offline."
+        ? `No events in the last 7 days. This lock sends its events to ${account.server ? "your server" : "Lockly"} `
+          + "over its Wi-Fi, so none arrive while it's offline."
+        : account.server ? "Your server has no record of this door in the last 7 days."
         : "Lockly's cloud has no record of this door in the last 7 days. That doesn't mean nobody used it: "
           + "for this lock the cloud only has what was uploaded to it."));
       return;
@@ -940,6 +1074,12 @@ async function loadActivity() {
 async function loadAccess() {
   const id = currentId;
   const list = $("access-list");
+  $("access-slot").hidden = !!account.server;            // the grant form may sit here from before
+  if (account.server) {
+    loadOac();                                           // hides itself: offline codes are Lockly's
+    list.replaceChildren(serverPeopleNote());
+    return;
+  }
   mountGrant("door");
   loadOac();
   list.replaceChildren(h("p", { class: "muted" }, "Loading who can open this door…"));
@@ -1263,12 +1403,29 @@ function renderMaintDoor() {
   $("wifi-on").hidden = !!why;
   $("wifi-none").hidden = !why;
   $("wifi-none").textContent = why ? `Wi-Fi setup goes over Bluetooth, which isn't available here. ${why}` : "";
+  $("wifi-about").textContent = account.server
+    ? "Give the lock a Wi-Fi network over Bluetooth, next to the door. Your server supplies the MQTT server it "
+      + "connects to, unless another is given below."
+    : "Give the lock a Wi-Fi network over Bluetooth, next to the door, as the Lockly app's Wi-Fi setup does. "
+      + "Lockly supplies the server it connects to; to move the lock to a private server, give that server's "
+      + "MQTT host and port below.";
+  $("wifi-mqtt-about").textContent = "For a private locklyctl-mqtt server: the host and port its MQTT listener has "
+    + "(8883 with TLS, 1883 without; a lock takes up to 4 digits). Leave both empty to use the one "
+    + `${account.server ? "your server" : "Lockly"} gives.`;
+  // Firmware comes from Lockly: a private server has none to offer (Api: firmwareKind is null there).
+  $("fw-on").hidden = !!account.server;
+  $("fw-none").hidden = !account.server;
+  $("fw-none").textContent = account.server
+    ? "Firmware comes from Lockly's servers, so it isn't offered while signed in to a private server." : "";
 }
 
 // A different door: the last door's results don't belong to it.
 function resetJobs() {
   for (const id of ["diag-out", "ble-out", "tz-out", "wifi-out", "fw-out"]) $(id).replaceChildren();
-  $("wifi-form").hidden = true;
+  const f = $("wifi-form");
+  f.hidden = true;
+  f.mqttHost.value = f.mqttPort.value = "";
+  $("wifi-mqtt").open = false;
 }
 
 
@@ -1396,20 +1553,31 @@ $("wifi-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const v = current();
   const f = ev.currentTarget, out = $("wifi-out");
+  const host = f.mqttHost.value.trim(), port = f.mqttPort.value.trim();
+  const given = account.server ? "your server's" : "Lockly's";
+  const aim = host || port ? `${host || `${given} host`}:${port || `${given} port`}` : "";
   const ok = await confirmDialog(`Give ${doorLabel(v)} the network ${f.ssid.value}?`,
-    `This replaces the Wi-Fi network saved on the lock. Keep ${here()} next to the door; it takes up to a minute and a half.`,
+    `This replaces the Wi-Fi network saved on the lock. Keep ${here()} next to the door; it takes up to a minute and a half.`
+    + (aim ? ` It also points the lock at the MQTT server ${aim} instead of the one ${account.server ? "your server"
+      : "Lockly"} gives, so ${account.server ? "your server" : "Lockly's app and server"} can't reach it until it's `
+      + "given Wi-Fi again without it. Whether a lock takes a server other than Lockly's hasn't been tried on a "
+      + "lock yet: try it on a door you can reach over Bluetooth." : ""),
     "Give it");
   if (!ok) return;
   out.replaceChildren(h("p", { class: "muted" }, `Saving ${f.ssid.value} on the lock and waiting for it to join…`));
-  await busy(f.querySelector("button"), async () => {
+  await busy(f.querySelector("button[type=submit]"), async () => {
     try {
       const ssid = f.ssid.value;
-      const r = await call("bluetooth_wifi_setup", v.id, ssid, f.password.value);
+      const r = await call("bluetooth_wifi_setup", v.id, ssid, f.password.value, "", host, port);
       f.password.value = "";
       updateLock(r.lock);
       wifiKnown[ssid] = r.known;
       showWifiPassword();
+      const mqtt = r.mqttHost || r.mqttPort
+        ? `It was given the MQTT server ${r.mqttHost || `${given} host`}:${r.mqttPort || `${given} port`}. `
+          + "A check shows whether it reaches it." : "";
       fill(out, h("p", { class: r.ok ? "ok" : "form-error" }, r.ok ? `Connected to ${ssid}.` : `It didn't connect: ${r.text}.`),
+        mqtt ? h("p", { class: "fine" }, mqtt) : null,
         r.note ? h("p", { class: "fine" }, r.note) : null);
     } catch (e) { out.replaceChildren(h("p", { class: "form-error" }, e.message)); }
   });
@@ -1580,7 +1748,21 @@ function renderAbout() {
   $("about-log").textContent = caps.device === "computer" && caps.logPath ? `Log file: ${caps.logPath}` : "";
 }
 
+// On a private server, people, PINs and schedules live in its own console (locklyctl-mqtt's
+// management API): the page says where, instead of asking Lockly's cloud for them.
+function serverPeopleNote() {
+  return h("p", { class: "muted" }, "People, PINs and schedules on a private server are kept in its own console, at ",
+    h("code", {}, `${account.server}/`), ". Add, change and remove them there.");
+}
+
 async function loadPeople() {
+  for (const id of ["add-person", "people-search"]) $(id).closest(".field, button").hidden = !!account.server;
+  if (account.server) {
+    people = []; personKey = null; peopleLoaded = true;
+    renderPeople();
+    renderPerson();
+    return;
+  }
   $("people-list").replaceChildren(h("li", { class: "muted" }, "Loading people from every door…"));
   try {
     applyPeople(await call("people"));
@@ -1619,6 +1801,10 @@ function totals(p) {
 }
 
 function renderPeople() {
+  if (account.server) {                    // kept by the server's console, not Lockly's cloud
+    $("people-list").replaceChildren(h("li", {}, serverPeopleNote()));
+    return;
+  }
   const q = $("people-search").value.trim().toLowerCase();
   const shown = people.filter((p) => !q || p.name.toLowerCase().includes(q) || (p.email || "").toLowerCase().includes(q)
     || p.doors.some((d) => d.doorName.toLowerCase().includes(q)));

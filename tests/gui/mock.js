@@ -2,6 +2,8 @@
 // lock or a Lockly account. Serve the repo root and open
 //   http://localhost:8000/locklyctl/gui/web/index.html?mock=/tests/gui/mock.js
 // Optional &scene=signin|door|access|offline|offline-many|schedules|edit|people|person-detail|maint|firmware|settings
+// (and on a private server: signin-server|switch|server|server-access|server-people|server-maint|server-settings|
+// server-switch|wifi-mqtt)
 // scripts a starting state; &device=phone is the phone app (no Bluetooth, "this phone").
 
 const params = new URLSearchParams(location.search);
@@ -38,6 +40,26 @@ const locks = [
 ];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const find = (id) => locks.find((l) => l.id === id);
+
+// A private locklyctl-mqtt server: &scene=server* starts signed in to one. Lockly's cloud features
+// (people from the cloud, offline codes, firmware) answer as transport's 404 does, so a page that
+// asked for one there would show it.
+let onServer = "";
+function setServer(url) {
+  onServer = url;
+  for (const l of locks) {
+    l.lockly = l.lockly || { offlineCodes: l.offlineCodes, firmwareKind: l.firmwareKind };
+    Object.assign(l, url ? { offlineCodes: false, firmwareKind: null } : l.lockly);
+  }
+}
+setServer(scene.startsWith("server") ? "https://locks.example.net" : "");
+const lacks = (what) => {
+  if (!onServer) return;
+  (window.lacked = window.lacked || []).push(what);       // for page checks: the page asked anyway
+  throw new Error(`The private server doesn't have this: ${what} is a Lockly cloud feature.`);
+};
+const plainHttp = (u) => /^http:\/\//i.test(u) && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(u);
+const onServerReply = () => ({ server: onServer, plainHttp: plainHttp(onServer) });
 // The door list's order, as locklyctl/view.py keeps it: by name until a door is
 // moved, then the saved order (doors it doesn't know go last).
 let order = null;
@@ -80,7 +102,12 @@ window.pywebview = {
     async session() {
       await wait(200);
       if (!unlocked) return { signedIn: false, locked: true, wait: 0, email: "" };
-      return scene === "signin" ? { signedIn: false, email: "owner@example.com" } : { signedIn: true, email: "owner@example.com" };
+      if (scene === "signin-server") {     // a saved sign-in for a server that didn't answer
+        return { signedIn: false, email: "owner@example.com", server: "http://192.168.1.20:8080",
+          message: "Couldn't reach http://192.168.1.20:8080: the server didn't answer." };
+      }
+      if (scene === "signin") return { signedIn: false, email: "owner@example.com" };
+      return { signedIn: true, email: "owner@example.com", ...(onServer ? onServerReply() : {}) };
     },
     async unlock_app(code) {
       await wait(250);                     // the key derivation takes a moment
@@ -99,7 +126,16 @@ window.pywebview = {
     async remove_app_lock(current) { await wait(250); if (current !== passcode) throw new Error("Wrong passcode."); passcode = ""; return { on: false }; },
     async lock_now() { unlocked = false; return { locked: true, wait: 0 }; },
     async erase_saved_data() { passcode = ""; unlocked = true; return { signedIn: false, email: "" }; },
-    async sign_in(email) { await wait(400); return { signedIn: true, email }; },
+    async sign_in(email, password, remember, server) {
+      await wait(400);
+      if (password === "wrong") throw new Error("login failed: wrong email or password");
+      const url = (server || "").trim().replace(/\/+$/, "");
+      if (url && !/^https?:\/\/[a-z0-9.-]+(:\d{1,5})?(\/\S*)?$/i.test(url)) {
+        throw new Error(`'${server.trim()}' isn't a server address. Give it as https://host or https://host:port.`);
+      }
+      setServer(url.toLowerCase());
+      return { signedIn: true, email, ...(onServer ? onServerReply() : {}) };
+    },
     async sign_out() { return { signedIn: false, email: "owner@example.com" }; },
     async locks() { await wait(150); return ordered().map((l) => ({ ...l })); },
     async set_hidden(id, on) { await wait(120); Object.assign(find(id), { hidden: !!on }); return { ...find(id) }; },
@@ -132,7 +168,7 @@ window.pywebview = {
     async unlock(id) { await wait(700); Object.assign(find(id), { state: "unlocked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
     async keep_unlocked(id, minutes) { await wait(500); const until = new Date(Date.now() + minutes * 60000).toTimeString().slice(0, 5); Object.assign(find(id), { keepUnlockedUntil: until, state: "unlocked" }); return { ok: true, until, detail: "", lock: { ...find(id) } }; },
     async end_keep_unlocked(id) { await wait(500); Object.assign(find(id), { keepUnlockedUntil: null, state: "locked" }); return { ok: true, detail: "", lock: { ...find(id) } }; },
-    async firmware(id) { await wait(500); return { kind: "multi", release: "1.14.34", title: "New firmware", notes: "Changes in release 1.14.34:\n1. Fixed bugs", answered: true, lockFirmware: "1.00.87", lock: { ...find(id) }, parts: [
+    async firmware(id) { lacks("lockly/syspara"); await wait(500); return { kind: "multi", release: "1.14.34", title: "New firmware", notes: "Changes in release 1.14.34:\n1. Fixed bugs", answered: true, lockFirmware: "1.00.87", lock: { ...find(id) }, parts: [
       { name: "Front board", current: "1.00.87", offered: "1.00.95", newer: true, sizeKb: 87, byPhone: false },
       { name: "Back board", current: "1.00.72", offered: "1.00.76", newer: true, sizeKb: 35, byPhone: false },
       { name: "Wi-Fi module", current: "2.02.72", offered: "2.02.72", newer: false, sizeKb: 1180, byPhone: false },
@@ -146,10 +182,18 @@ window.pywebview = {
         twinOf: "", suggested: true },
         { ssid: "Guest", rssi: -62, routerType: 3, known: "", connected: false, twinOf: "", suggested: false }];
     },
-    async bluetooth_wifi_setup(id, ssid, password) {
+    async bluetooth_wifi_setup(id, ssid, password, country, mqttHost, mqttPort) {
+      const host = (mqttHost || "").trim(), port = String(mqttPort ?? "").trim();
+      if (host && !/^[A-Za-z0-9.-]{1,128}$/.test(host)) {
+        throw new Error(`'${host}' isn't an MQTT host a lock can take: give a name or IPv4 address of up to 128 `
+          + "characters, without https:// or a port.");
+      }
+      if (port && (!/^\d+$/.test(port) || +port < 1 || +port > 9999)) {
+        throw new Error(`'${port}' isn't an MQTT port a lock can take: its Wi-Fi setup holds a port of up to 4 digits (1 to 9999).`);
+      }
       await wait(1500);
       return { ok: true, text: "connected", note: password ? `Saved the password for ${ssid} in the keyring.` : "",
-        known: password ? "saved" : "system", lock: { ...find(id) } };
+        known: password ? "saved" : "system", mqttHost: host, mqttPort: port ? +port : 0, lock: { ...find(id) } };
     },
     async forget_wifi_password() { await wait(100); return { forgotten: true }; },
     async connection() { return { mode: connection, bluetooth: "" }; },
@@ -196,7 +240,7 @@ window.pywebview = {
         { time: "2026-10-29 21:30", what: "Auto-lock", who: "" },
       ];
     },
-    async door_access(id) { await wait(200); return roster.filter((r) => r.lockId === id).map((r) => ({ ...r }))
+    async door_access(id) { lacks("acu/crdntl/list"); await wait(200); return roster.filter((r) => r.lockId === id).map((r) => ({ ...r }))
       .sort((x, y) => (x.role !== "owner") - (y.role !== "owner") || x.person.localeCompare(y.person)); },
     async suspend_person(id, userId) { await wait(500); roster.find((r) => r.lockId === id && r.userId === userId).suspended = true; return { ok: true, kept: true }; },
     async resume_person(id, userId) { await wait(500); roster.find((r) => r.lockId === id && r.userId === userId).suspended = false; return { ok: true, source: "stash" }; },
@@ -211,6 +255,7 @@ window.pywebview = {
     async welcome_state() { await wait(400); return { ok: true, sent: true, detail: "Welcome Mode off" }; },
     async rain_state() { await wait(400); return { ok: true, sent: true, detail: "Rain Mode off" }; },
     async people() {
+      lacks("acu/crdntl/list");
       await wait(300);
       const by = new Map();
       for (const r of roster) {
@@ -235,11 +280,13 @@ window.pywebview = {
     },
     async separate_person() { return this.people(); },
     async offline_codes(id) {
+      lacks("oac/getNameList");
       await wait(250);
       return { codes: (oacRecords[id] || []).map((c) => ({ ...c, shown: oacShown(c.code) })),
         madeToday: oacToday[id] || 0, steps: OAC_STEPS, note: OAC_NOTE };
     },
     async make_offline_code(id, name, anyway) {
+      lacks("oac/get");
       await wait(500);
       if ((oacToday[id] || 0) >= 4 && !anyway) {
         return { made: false, madeToday: oacToday[id], ask: "Activate the issued OAC access code before activating a new one." };
@@ -311,4 +358,27 @@ setTimeout(() => {
   if (scene === "person-detail") { click("#view-people"); setTimeout(() => { click(".people-list li:nth-child(2) .person-row"); setTimeout(() => click(".access-table tbody tr:nth-child(4) .row-actions .btn"), 300); }, 500); }
   if (scene === "new-person") { click("#view-people"); setTimeout(() => { click("#add-person"); const f = document.getElementById("grant-form"); f.elements.name.value = "Dana R"; f.querySelector("input[value=weekly]").click(); f.querySelector("input[value=weekly]").dispatchEvent(new Event("change", { bubbles: true })); }, 600); }
   if (scene === "confirm") { click('.plate[aria-label^="1204"]'); click("#check-all"); }
+  // Signed in to a private server (&scene=server*), and moving to one
+  const maintRow = (label) => [...document.querySelectorAll(".maint-row")]
+    .find((b) => b.querySelector(".m-name").textContent.startsWith(label))?.click();
+  if (scene === "server-access") { door("2A Front"); click("#tab-access"); }
+  if (scene === "server-people") click("#view-people");
+  if (["server-settings", "server-switch", "switch"].includes(scene)) {
+    click("#view-settings");
+    if (scene !== "server-settings") setTimeout(() => click("#switch-open"), 200);
+  }
+  if (scene === "server-maint" || scene === "wifi-mqtt") {
+    click("#view-maint");
+    setTimeout(() => {
+      maintRow("2A Front");
+      if (scene !== "wifi-mqtt") return;
+      click("#btn-wifi-scan");
+      setTimeout(() => {
+        const f = document.getElementById("wifi-form");
+        document.getElementById("wifi-mqtt").open = true;
+        f.mqttHost.value = "locks.example.net";
+        f.mqttPort.value = "8883";
+      }, 1100);
+    }, 200);
+  }
 }, 700);

@@ -331,3 +331,16 @@ def test_the_page_is_not_offered_the_command_lines_way_in():
             "unlock_app", "app_lock", "set_app_lock", "remove_app_lock", "lock_now", "erase_saved_data"} <= offered
     c = FakeClient("a@b")
     assert over_client(c)._c() is c
+
+
+# ── Wi-Fi aimed at a private server ─────────────────────────────────────────
+
+def test_wifi_refuses_an_mqtt_port_the_lock_would_cut(capsys):
+    c = FakeClient("a@b")
+    asked = []
+    c.bluetooth_wifi_setup = lambda *a, **kw: asked.append(kw) or {"code": 3, "text": "connected"}
+    for host, port in (("locks.example.net", 18830), ("https://locks.example.net", None)):
+        with pytest.raises(commands.UsageError, match="MQTT (port|host)"):
+            commands._wifi(c, _args(lock="1204", ssid="Net", forget=False, yes=True, password=None,
+                                    country="US", mqtt_host=host, mqtt_port=port))
+    assert asked == []                                  # refused before Bluetooth or a password prompt

@@ -130,6 +130,11 @@ h1, h2, p { margin: 0; }
 .forgot { font-size: var(--fs-sm); color: var(--ink-soft); }
 .forgot summary { cursor: pointer; min-height: 2rem; }
 .forgot[open] { display: grid; gap: 0.75rem; justify-items: start; }
+/* Wi-Fi setup's MQTT server: closed unless a private server is meant */
+.mqtt { margin: 0.5rem 0; }
+.mqtt summary { cursor: pointer; min-height: 2rem; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-soft); }
+.mqtt[open] { display: grid; gap: 0.75rem; }
+#who-console code, .people-list code, #access-list code { overflow-wrap: anywhere; }
 
 /* ── layout ───────────────────────────────────────────────────────── */
 .app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }

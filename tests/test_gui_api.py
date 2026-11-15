@@ -25,9 +25,12 @@ def _set_home(value):
 
 
 class FakeClient:
-    def __init__(self, email):
+    made = []                               # (email, server) of every client the Api made
+
+    def __init__(self, email, server=None):
         self.email = email
-        self.server = None                  # signed in to Lockly, as LocklyClient without --server
+        self.server = server                # None: Lockly, as LocklyClient without --server
+        FakeClient.made.append((email, server))
         self.pw_hash = None
         self.status_cache = {}
         self.sent = []
@@ -151,6 +154,7 @@ class FakeClient:
 
     firmware_offer = LocklyClient.firmware_offer
     firmware_plan = LocklyClient.firmware_plan
+    _lockly_only = LocklyClient._lockly_only        # the real refusal on a private server
     _offer_from_reply = LocklyClient._offer_from_reply
     _install_files = staticmethod(LocklyClient._install_files)
     _FW_PARTS = LocklyClient._FW_PARTS
@@ -215,6 +219,41 @@ def test_session_and_sign_in(api):
     assert Api(client_factory=FakeClient).session()["signedIn"] is True   # saved login works
     api.sign_out()
     assert Api(client_factory=FakeClient).session()["signedIn"] is False
+
+
+@_api_in_tmp_home
+def test_signing_in_to_a_private_server_and_switching(api):
+    FakeClient.made.clear()
+    try:
+        api.sign_in("a@b", "right", True, "locks.example.net")           # not an address
+    except ValueError:
+        assert FakeClient.made == []                                    # nothing was asked
+    else:
+        raise AssertionError("signed in to a half-typed address")
+    s = api.sign_in("a@b", "right", True, " HTTPS://Locks.Example.net/ ")
+    assert (s["server"], s["plainHttp"]) == ("https://locks.example.net", False)
+    assert FakeClient.made[-1] == ("a@b", "https://locks.example.net")
+    # Lockly's cloud features are left out there: firmware and offline codes
+    assert not any(v["offlineCodes"] or v["firmwareKind"] for v in api.locks())
+    assert Api(client_factory=FakeClient).session() == {           # resumes at the server it saved
+        "signedIn": True, "email": "a@b", "server": "https://locks.example.net", "plainHttp": False}
+    assert FakeClient.made[-1] == ("a@b", "https://locks.example.net")
+    # A failed switch keeps the session and the saved sign-in; a good one replaces both
+    before = api._client
+    try:
+        api.sign_in("a@b", "wrong", True)
+    except LocklyError:
+        assert api._client is before
+        assert Api(client_factory=FakeClient).session()["server"] == "https://locks.example.net"
+    else:
+        raise AssertionError("bad password accepted")
+    s = api.sign_in("a@b", "right", True)                               # back to Lockly
+    assert "server" not in s and api._client.server is None
+    assert any(v["offlineCodes"] for v in api.locks())                  # the Visage's codes are back
+    assert "server" not in Api(client_factory=FakeClient).session()
+    s = api.sign_in("a@b", "right", False, "http://10.0.0.5:8080")       # plain http to another machine
+    assert s["plainHttp"] is True
+    assert Api(client_factory=FakeClient).session()["signedIn"] is False   # not kept: nothing saved
 
 
 @_api_in_tmp_home
@@ -637,9 +676,10 @@ def test_bluetooth_wifi_scan_and_setup(api):
                                           {"ssid": "", "rssi": 40, "router_type": 0},
                                           {"ssid": "Guest", "rssi": 70, "router_type": 3}]
     from locklyctl import wifi_passwords as W
-    given, codes = [], [3]
-    c.bluetooth_wifi_setup = lambda lock, ssid, pw, country, on_event: given.append((ssid, pw, country)) or {
-        "code": codes[0], "text": "connected" if codes[0] == 3 else "wrong password"}
+    given, codes, aimed = [], [3], []
+    c.bluetooth_wifi_setup = lambda lock, ssid, pw, country, on_event, mqtt_host=None, mqtt_port=None: (
+        given.append((ssid, pw, country)) or aimed.append((mqtt_host, mqtt_port)) or {
+            "code": codes[0], "text": "connected" if codes[0] == 3 else "wrong password"})
     real, real_nmcli = BLE.available, W.NMCLI
     BLE.available = lambda: ""
     W.NMCLI = "/nonexistent/nmcli"                         # not this computer's NetworkManager
@@ -670,6 +710,23 @@ def test_bluetooth_wifi_scan_and_setup(api):
         api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph")
         assert api.forget_wifi_password("Guest") == {"forgotten": True}
         assert api.forget_wifi_password("Guest") == {"forgotten": False}
+        # Aimed at a private server's broker, as `wifi --mqtt-host/--mqtt-port`
+        assert all(a == (None, None) for a in aimed)                    # nothing asked: the server's own
+        r = api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph", " locks.example.net ", "8883")
+        assert aimed[-1] == ("locks.example.net", 8883)
+        assert (r["mqttHost"], r["mqttPort"]) == ("locks.example.net", 8883)
+        r = api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph", "", 1883)   # the port alone
+        assert aimed[-1] == (None, 1883) and (r["mqttHost"], r["mqttPort"]) == ("", 1883)
+        for host, port in (("https://locks.example.net", ""), ("locks.example.net:8883", ""),
+                           ("a" * 129, ""), ("locks.example.net", "18830"), ("locks.example.net", "0"),
+                           ("locks.example.net", "88a"), ("lôcks.example.net", "")):
+            tried = len(aimed)
+            try:
+                api.bluetooth_wifi_setup(B2, "Guest", "gpw", "ph", host, port)
+            except ValueError:
+                assert len(aimed) == tried                              # refused before Bluetooth
+            else:
+                raise AssertionError(f"accepted MQTT {host!r}:{port!r}, which the lock can't hold whole")
     finally:
         BLE.available, W.NMCLI = real, real_nmcli
 
