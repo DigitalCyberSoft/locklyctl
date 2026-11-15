@@ -239,6 +239,11 @@ the next start, single commands and the MCP server all use it without
 `--server` naming another one asks for that server's password instead (or, for
 a single command that can't ask, stops).
 
+<p>
+  <img src="docs/screenshots/phone-server-signin.png" alt="Phone app: the sign-in screen with A private server chosen, its address typed, then the email and password of the account on that server" width="32%">
+  <img src="docs/screenshots/phone-server-settings.png" alt="Phone app, dark mode, Settings: signed in on a private server, with where its console keeps people, PINs and schedules, Sign in somewhere else and Sign out; doors are reached through the server" width="32%">
+</p>
+
 **Use https.** Over plain `http://` to another machine, the password and every
 door's master code cross the network readable: the server hands an account
 its locks' master codes, which locklyctl needs to talk to them. The app warns
@@ -267,6 +272,10 @@ lock.
    server gives (its `-public-mqtt-host` and `-public-mqtt-port`). A lock takes
    a port of up to 4 digits and a host of up to 128 characters (the app's own
    setup message); locklyctl refuses longer ones rather than cutting them.
+
+<p>
+  <img src="docs/screenshots/desktop-server-wifi.png" alt="Desktop app, Maintenance: a lock's Wi-Fi setup with a network chosen and, under MQTT server, the private server's host and port 8883" width="100%">
+</p>
 
 From then on Lockly's app and server can't reach that lock, until it's given
 Wi-Fi again without the MQTT server set.

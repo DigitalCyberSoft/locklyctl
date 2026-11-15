@@ -23,6 +23,10 @@ const shots = [
   ["phone-doors", phone, "", "light"],
   ["phone-door", phone, "access", "light"],
   ["phone-people", phone, "person-detail", "dark"],
+  // Private server (README: "Private server (locklyctl-mqtt)")
+  ["phone-server-signin", phone, "signin-private", "light"],
+  ["phone-server-settings", phone, "server-settings", "dark"],
+  ["desktop-server-wifi", desktop, "wifi-mqtt", "light"],
 ];
 
 // Visible elements poking past the right edge, ignoring content inside a

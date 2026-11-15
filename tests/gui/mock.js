@@ -2,8 +2,8 @@
 // lock or a Lockly account. Serve the repo root and open
 //   http://localhost:8000/locklyctl/gui/web/index.html?mock=/tests/gui/mock.js
 // Optional &scene=signin|door|access|offline|offline-many|schedules|edit|people|person-detail|maint|firmware|settings
-// (and on a private server: signin-server|switch|server|server-access|server-people|server-maint|server-settings|
-// server-switch|wifi-mqtt)
+// (and on a private server: signin-private|signin-server|switch|server|server-access|server-people|server-maint|
+// server-settings|server-switch|wifi-mqtt)
 // scripts a starting state; &device=phone is the phone app (no Bluetooth, "this phone").
 
 const params = new URLSearchParams(location.search);
@@ -106,7 +106,7 @@ window.pywebview = {
         return { signedIn: false, email: "owner@example.com", server: "http://192.168.1.20:8080",
           message: "Couldn't reach http://192.168.1.20:8080: the server didn't answer." };
       }
-      if (scene === "signin") return { signedIn: false, email: "owner@example.com" };
+      if (scene === "signin" || scene === "signin-private") return { signedIn: false, email: "owner@example.com" };
       return { signedIn: true, email: "owner@example.com", ...(onServer ? onServerReply() : {}) };
     },
     async unlock_app(code) {
@@ -378,7 +378,16 @@ setTimeout(() => {
         document.getElementById("wifi-mqtt").open = true;
         f.mqttHost.value = "locks.example.net";
         f.mqttPort.value = "8883";
+        document.getElementById("job-wifi").scrollIntoView({ block: "start" });
       }, 1100);
     }, 200);
+  }
+  // The sign-in screen with a private server chosen and its address typed (the README's screenshot).
+  if (scene === "signin-private") {
+    const f = document.getElementById("signin-form");
+    f.querySelector("input[name=where][value=server]").click();
+    f.server.value = "https://locks.example.net";
+    f.server.dispatchEvent(new Event("input", { bubbles: true }));
+    f.password.focus();
   }
 }, 700);
